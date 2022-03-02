@@ -56,49 +56,10 @@ spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=t
 spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 ```
 ## 导学
-### 0.目录：
->   一、为什么要学习数据库
-    二、数据库的相关概念      
-        DBMS、DB、SQL
-    三、数据库存储数据的特点
-    四、初始MySQL
-        MySQL产品的介绍        
-        MySQL产品的安装          ★        
-        MySQL服务的启动和停止     ★
-        MySQL服务的登录和退出     ★      
-        MySQL的常见命令和语法规范      
-    五、DQL语言的学习   ★              
-        基础查询        ★             
-        条件查询  	   ★			
-        排序查询  	   ★				
-        常见函数        ★               
-        分组函数        ★              
-        分组查询		   ★			
-        连接查询	 	★			
-        子查询       √                  
-        分页查询       ★              
-        union联合查询	√			     
-    六、DML语言的学习    ★             
-        插入语句						
-        修改语句						
-        删除语句						
-    七、DDL语言的学习  
-        库和表的管理	 √				
-        常见数据类型介绍  √          
-        常见约束  	  √			
-    八、TCL语言的学习
-        事务和事务处理                 
-    九、视图的讲解           √
-    十、变量                      
-    十一、存储过程和函数   
-    十二、流程控制结构       
-
 数据库的好处
 
 	1.持久化数据到本地
 	2.可以实现结构化查询，方便管理
-
-
 
 数据库相关概念
 
@@ -211,473 +172,6 @@ size 要显示的条目个数
 
 ## 1.DQL语句
 数据查询语言(Data Query Language)
-### 进阶1：基础查询
-	语法：
-	SELECT 要查询的东西
-	【FROM 表名】;
-	
-	类似于Java中 :System.out.println(要打印的东西);
-	特点：
-	①通过select查询完的结果 ，是一个虚拟的表格，不是真实存在
-	② 要查询的东西 可以是常量值、可以是表达式、可以是字段、可以是函数
-	
-	字符串和日期型常量值必须用单引号引起来，数值型不需要。
-	
-	6.案例
-	题目：显示出表 employees 的全部列，各个列之间用逗号连接，列头显示成 OUT_PUT
-	
-	SELECT CONCAT(`commission_pct`,',',`first_name`,',',`salary`) AS OUT_PUT
-	FROM employees;
-	#第一种写法 在`commission_pct`为null是，全都是null。
-	SELECT IFNULL(`commission_pct`,0) AS 奖金率,
-	`commission_pct`
-	FROM employees;
-	# ifnull(expr1,expr2)函数  第一个参数为null，则将其赋值为0.
-	SELECT CONCAT(IFNULL(`commission_pct`,0),',',`first_name`,',',`salary`) AS OUT_PUT
-	FROM employees;
-	#这样即使有null，也不会表格中某个值直接变null值。
-
-### 进阶2：条件查询
-
-####语法：
-       
-        select 
-            查询列表#第三步
-        from
-            表名#第一步
-        where	#第二步，过滤，使用WHERE 子句，将不满足条件的行过滤掉。
-            筛选条件;
-
-####分类：
-       
-一、按条件表达式筛选
-
-    简单条件运算符：> < = != <> >= <=
-    在mysql中 = 就是等于，不再是== 。  赋值使用 := 符号
-    !=和<>都是不等于
-    
-    #案例1：查询工资>12000的员工信息
-    SELECT 
-        *
-    FROM
-        employees
-    WHERE
-        salary>12000;
-
-二、按逻辑表达式筛选
-        
-    逻辑运算符：
-    作用：用于连接条件表达式
-        && || !
-        and or not
-        
-    &&和and：两个条件都为true，结果为true，反之为false
-    ||或or： 只要有一个条件为true，结果为true，反之为false
-    !或not： 如果连接的条件本身为false，结果为true，反之为false
-
-三、模糊查询
-    
-    like
-    between and
-    in
-    is null
-1.like
-    
-    特点：
-    ①一般和通配符搭配使用
-    可以判断字符，也可以数值型
-    通配符：
-    % 任意多个字符,包含0个字符
-    _ 任意单个字符
-    
-    #案例1：查询员工名中包含字符a的员工信息
-    select 
-        *
-    from
-        employees
-    where
-        last_name like '%a%';#abc
-    
-    #案例2：查询员工名中第二个字符为_的第五个字符为a员工名和工资
-    
-    SELECT
-        last_name,
-        salary
-    FROM
-        employees
-    WHERE
-        last_name LIKE '_$___a%' ESCAPE '$';
-    escape 关键字指定某个字符为转义字符  当然也可以直接用\
-
-2.between  and            
-
-    ①使用between and 可以提高语句的简洁度
-    ②包含临界值
-    ③两个临界值不要调换顺序(从小到大)
-
-3.in
-
-    含义：判断某字段的值是否属于in列表中的某一项
-    特点：
-    ①使用in提高语句简洁度
-    ②in列表的值类型必须一致或兼容
-    ③in列表中不支持通配符
-    
-    #案例：查询员工的工种编号是 IT_PROG、AD_VP、AD_PRES中的一个员工名和工种编号
-    
-    SELECT
-        last_name,
-        job_id
-    FROM
-        employees
-    WHERE
-        job_id IN( 'IT_PROT' ,'AD_VP','AD_PRES');
-
-4.is null 与 安全等于  <=>
-
-    注意：=或<>不能用于判断null值
-    is null或is not null 可以判断null值
-    #----------以下为错误
-    WHERE 
-        salary IS 12000;
-    
-    IS NULL:仅仅可以判断NULL值，可读性较高，建议使用
-    <=>    :既可以判断NULL值，又可以判断普通的数值，可读性较低
-    #以下都是正确的：
-    WHERE 
-    salary <=> 12000;
-    
-    WHERE
-    commission_pct <=>NULL;
-
-### 进阶3：排序查询	
-
-	语法：
-	select #第三步
-		要查询的东西
-	from #第一步
-		表
-	where #第二步
-		条件
-	order by 排序的字段|表达式|函数|别名 【asc|desc】 #第四步
-	
-	特点：
-	1、asc代表的是升序，可以省略，即默认升序
-	desc代表的是降序
-	
-	2、order by子句可以支持 单个字段、别名、表达式、函数、多个字段
-	
-	3、order by子句在查询语句的最后面，除了limit子句
-
-
-
-
-
-### 进阶4：常见函数
-    功能：类似于Java中的方法，提高重用性和隐藏实现细节
-一、单行函数
-
-	1、字符函数
-		concat拼接
-		substr截取子串
-		upper转换成大写
-		lower转换成小写
-		trim去前后指定的空格或字符
-		ltrim去左边空格
-		rtrim去右边空格
-		replace全部替换
-		lpad用指定的字符实现左填充指定长度
-		rpad右填充
-		instr返回子串第一次出现的索引
-		length 获取字节个数
-		
-	2、数学函数
-		round 四舍五入
-		rand 随机数，返回[0-1)之间的小数
-		floor向下取整
-		ceil向上取整
-		mod取余
-		truncate截断
-	3、日期函数
-	        now当前系统日期+时间
-	        curdate当前系统日期
-	        curtime当前系统时间
-	        year(now())获取年
-	        str_to_date 将字符解析成日期    STR_TO_DATE('1998-3-2','%Y-%c-%d')
-	        解析：
-	            1 %Y 四位的年份 
-	            2 %y 2位的年份 
-	            3 %m 月份（01,02…11,12）
-	            4 %c 月份（1,2,…11,12）
-	            5 %d 日（01,02,…） 
-	            6 %H 小时（24小时制） 
-	            7 %h 小时（12小时制） 
-	            8 %i 分钟（00,01…59） 
-	            9 %s 秒（00,01,…59）
-	        date_format将日期转换成字符 DATE_FORMAT(‘2018/6/6’,‘%Y年%m月%d日’) 
-	        datediff:返回两个日期相差的天数
-	        monthname:以英文形式返回月
-	4、流程控制函数
-	    if 处理双分支
-	
-	    case语句 处理多分支
-	    情况1：处理等值判断
-	    情况2：处理条件判断
-	    
-	    mysql中
-	
-	    case 要判断的字段或表达式
-	    when 常量1 then 要显示的值1或语句1;
-	    when 常量2 then 要显示的值2或语句2;
-	    ...
-	    else 要显示的值n或语句n;
-	    end
-		
-	5、其他函数
-		version版本
-		database当前库
-		user当前连接用户
-	    password('字符串')返回该字符串加密形式
-
-
-二、分组函数
-
-
-    sum 求和
-    max 最大值
-    min 最小值
-    avg 平均值
-    count 计数
-    
-    特点：
-    1、以上五个分组函数都忽略null值，除了count(*)
-    2、sum和avg一般用于处理数值型
-    max、min、count可以处理任何数据类型
-    3、都可以搭配distinct使用，用于统计去重后的结果，不加distinct，则默认为all
-    4、count的参数可以支持：
-    字段、*、常量值，一般放1
-    
-    建议使用 count(*)
-
-
-
-### 进阶5：分组查询
-	语法：
-	select 查询列表
-	from 表
-	【where 筛选条件】
-	group by 分组的字段
-	【having 筛选条件】
-	【order by 排序的字段】;
-	
-	特点：
-	1、可以按单个字段分组，也可以嵌套分组
-	    null也是一种分组
-	2、和分组函数一同查询的字段最好是分组后的字段
-	3、分组筛选
-	            针对的表      位置          关键字	
-	分组前筛选：原始表        group by的前面  where
-	分组后筛选：分组后的结果集 group by的后面  having
-	where 过滤的是行，而having  过滤的是分组；
-	事实上，目前所学的所有类型的where子句都可用having 代替；
-	一般来讲，能用分组前筛选的，尽量使用分组前筛选，提高效率。
-	5.group by 不支持别名
-	6、having后可以支持别名
-
-
-
-### 进阶6：多表连接查询
-
-	笛卡尔乘积：如果连接条件省略或无效则会出现
-	解决办法：添加上连接条件
-
-一、传统模式下的连接 ：等值连接——非等值连接
-
-
-	1.等值连接的结果 = 多个表的交集
-	2.n表连接，至少需要n-1个连接条件
-	3.多个表不分主次，没有顺序要求
-	4.一般为表起别名，提高阅读性和性能
-	    注意：如果为表起了别名，则查询的字段就不能使用原来的表名去限定
-
-二、sql99语法：通过join关键字实现连接
-
-
-    #sql92 和 sql99
-    /*
-    sq192 用where联结
-    功能：sql99支持的较多
-    可读性：sql99实现连接条件和筛选条件的分离，可读性较高
-    */
-      
-    含义：1999年推出的sql语法
-    支持：
-    内连接
-        等值连接、非等值连接、自连接
-    外连接
-        左外、右外、全外(MySQL不支持)
-    交叉连接
-    
-    语法：
-    
-    select 字段，...
-    from 表1
-    【inner|left outer|right outer|cross】join 表2 on  连接条件
-    【inner|left outer|right outer|cross】join 表3 on  连接条件
-    【where 筛选条件】
-    【group by 分组字段】
-    【having 分组后的筛选条件】
-    【order by 排序的字段或表达式】
-    
-    好处：语句上，连接条件和筛选条件实现了分离，简洁明了！
-
-
-​	
-三、自连接
-
-案例：查询员工名和直接上级的名称
-
-sql99
-
-	SELECT e.last_name,m.last_name
-	FROM employees e
-	JOIN employees m ON e.`manager_id`=m.`employee_id`;
-
-sql92
-
-
-	SELECT e.last_name,m.last_name
-	FROM employees e,employees m 
-	WHERE e.`manager_id`=m.`employee_id`;
-四、外联结
-    应用场景：用于查询一个表中有，另一个表没有的记录
-    
-    特点：
-    1、外连接的查询结果为主表中的所有记录
-        如果从表中有和它匹配的，则显示匹配的值
-        如果从表中没有和它匹配的，则显示null
-        外连接查询结果=内连接结果+主表中有而从表没有的记录
-    2、左外连接，left join左边的是主表
-        右外连接，right join右边的是主表
-    3、左外和右外交换两个表的顺序，可以实现同样的效果 
-    4、全外连接=内连接的结果+表1中有但表2没有的+表2中有但表1没有的（MySQL不支持会报错）
-
- 五、交叉连接
-    其实就是笛卡尔积
-
-    SELECT b.*,bo.*
-    FROM beauty b
-    CROSS JOIN boys bo;
-
-
-### 进阶7：子查询
-
-含义：
-
-	一条查询语句中又嵌套了另一条完整的select语句，其中被嵌套的select语句，称为子查询或内查询
-	在外面的查询语句，称为主查询或外查询
-
-特点：
-
-	1、子查询都放在小括号内
-	2、子查询可以放在from后面、select后面、where后面、having后面，但一般放在条件的右侧
-	3、子查询优先于主查询执行，主查询使用了子查询的执行结果
-	4、子查询根据查询结果的行数不同分为以下两类：
-	① 单行子查询
-		结果集只有一行
-		一般搭配单行操作符使用：> < = <> >= <= 
-		非法使用子查询的情况：
-		a、子查询的结果为一组值，主查询报错
-		b、子查询的结果为空，此时主查询也不返回任何行
-		
-	② 多行子查询
-		结果集有多行
-		一般搭配多行操作符使用：any|some、all、in、not in
-		in： 属于子查询结果中的任意一个就行
-		any、some和all往往可以用其他查询代替，any、some指其中某个，all指其中全部
-	
-	5、exists后面（相关子查询）
-	一般能用exists的也能换成in之类的替代
-	语法：
-	exists(完整的查询语句)
-	结果：
-	1或0，查询出有结果就是1，否则为0，布尔值
-	#案例1：查询有员工的部门名
-	
-	    #in
-	    SELECT department_name
-	    FROM departments d
-	    WHERE d.`department_id` IN(
-	        SELECT department_id
-	        FROM employees
-	
-	    )
-	
-	    #exists
-	
-	    SELECT department_name
-	    FROM departments d
-	    WHERE EXISTS(
-	        SELECT *
-	        FROM employees e
-	        WHERE d.`department_id`=e.`department_id`
-
-
-        );
-    
-    6.要习惯使用distinct 去重 子查询中出现的重复的意义不大
-
-
-
-### 进阶8：分页查询
-
-应用场景：
-
-	实际的web项目中需要根据用户的需求提交对应的分页查询的sql语句
-
-语法：
-
-	select 查询列表 #7
-	from 表  #1
-	【join type join 表2 #2
-	on 连接条件  #3
-	where 筛选条件 #4
-	group by 分组字段 #5
-	having 分组后的筛选 #6
-	order by 排序的字段】 #8
-	limit 【起始的条目索引，】条目数; #9
-	每一步都会生成虚拟结果表集
-
-特点：1.起始条目索引从0开始
-
-	2.limit子句放在查询语句的最后	
-	3.公式：select * from  表 limit （page-1）*sizePerPage,sizePerPage
-	假如:
-	每页显示条目数sizePerPage
-	要显示的页数 page
-
-
-
-###进阶9：联合查询
-
-引入：
-	union 联合、合并  
-应用场景：要查询的结果来自于多个表，且多个表没有直接的连接关系，但查询的信息一致时
-
-
-语法：
-
-	select 字段|常量|表达式|函数 【from 表】 【where 条件】 union 【all】
-	select 字段|常量|表达式|函数 【from 表】 【where 条件】 union 【all】
-	select 字段|常量|表达式|函数 【from 表】 【where 条件】 union  【all】
-	.....
-	select 字段|常量|表达式|函数 【from 表】 【where 条件】
-
-特点：
-
-	1、多条查询语句的查询的列数必须是一致的
-	2、多条查询语句的查询的列的类型几乎相同
-	3、union默认去重，union all代表不去重
 
 
 
@@ -751,8 +245,6 @@ Data Manipulation Language – 数据操纵语言
     inner|left|right join 表2 别名 on 连接条件
     where 筛选条件;
 
-
-
 方式2：truncate语句  清空数据
 
 	truncate table 表名
@@ -770,8 +262,6 @@ Data Manipulation Language – 数据操纵语言
 
 >5.truncate删除不能回滚，delete删除可以回滚.
 
-
-
 ## 3.DDL语句
 数据定义语言(Data Definition Language)
 ### 库和表的管理
@@ -783,7 +273,7 @@ Data Manipulation Language – 数据操纵语言
 	drop database 【if exists】 库名
 表的管理：
 
-#### 1.创建表 ★
+#### 1.创建表 
 
 	create table 【if not exists】 表名(
 		字段名 字段类型 【约束】,
@@ -916,51 +406,7 @@ WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MOD
 
 ## 4.常见数据类型
 
--	整型：
-	- 分类：
-		tinyint、smallint、mediumint、int/integer、bigint
-	- 特点：
-		① 如果不设置无符号还是有符号，默认是有符号，如果想设置无符号，需要添加unsigned关键字
-		② 如果插入的数值超出了整型的范围,会报out of range异常，并且插入临界值
-		③ 如果不设置长度，会有默认的长度
-		长度代表了显示的最大宽度，如果不够会用0在左边填充，但必须搭配zerofill(会默认无符号)使用！
-
--	小数：
-		浮点型
-		定点型
-	- 分类：
-		1.浮点型
-		float(M,D)
-		double(M,D)
-		2.定点型
-		dec(M，D)
-		decimal(M,D)
-
-	- 特点：
-		①
-		M：整数部位+小数部位
-		D：小数部位位数
-		②
-		M和D都可以省略
-		如果是decimal，则M默认为10，D默认为0
-		如果是float和double，则会根据插入的数值的精度来决定精度
-
-		③定点型的精确度较高，如果要求插入数值的精度较高如货币运算等则考虑使用
-		④如果超出范围，则报out or range异常，并且插入临界值
-
--	字符型：
-	char、varchar、binary、varbinary、enum、set、text、blob
-
-	char：固定长度的字符，写法为char(M)，最大长度不能超过M，其中M可以省略，默认为1
-	varchar：可变长度的字符，写法为varchar(M)，最大长度不能超过M，其中M不可以省略
--	日期型：
-	year年
-	date日期
-	time时间
-	datetime 日期+时间          8      
-	timestamp 日期+时间         4   比较容易受时区、语法模式、版本的影响，更能反映当前时区的真实时间
--	Blob类型：s
-
+看菜鸟教程
 ## 5.常见约束
 ### 约束介绍	
 含义：一种限制规则，用于限制表中的数据，为了保证表中的数据的完整性和一致性。
@@ -1169,7 +615,6 @@ Transaction Control Language 事务控制语言
 比如
 insert、update、delete语句本身就是一个事务
 ```
-
 
 2.显式事务，具有明显的开启和结束事务的标志
 
@@ -1388,9 +833,10 @@ SHOW PROCEDURE STATUS;	#查看存储过程列表
 
 #### 5.案例
 
-######1、创建存储过程或函数实现传入女神名称，返回：女神 and 男神  格式的字符串
+1、创建存储过程或函数实现传入女神名称，返回：女神 and 男神  格式的字符串
 如 传入 ：小昭
 返回： 小昭 AND 张无忌
+
 ```sql
 DROP PROCEDURE test_pro5;
 DELIMITER $
@@ -1405,7 +851,7 @@ END $
 CALL test_pro5('柳岩',@str);
 SELECT @str ;
 ```
-######2、创建存储过程或函数，根据传入的条目数和起始索引，查询beauty表的记录
+2、创建存储过程或函数，根据传入的条目数和起始索引，查询beauty表的记录
 ```sql
 DROP PROCEDURE test_pro6;
 DELIMITER $
@@ -1433,8 +879,8 @@ CALL test_pro6(1,5);
 
 >函数：有且仅有1 个返回，适合做处理数据后返回一个结果
 
+### 1.创建语法
 
-###1.创建语法
 ```sql
 delimiter $
 CREATE FUNCTION 函数名(参数列表) RETURNS 返回类型
@@ -1454,14 +900,14 @@ deliter ;
 	3.函数体中仅有一句话，则可以省略begin end
 	4.使用 delimiter语句设置结束标记
 
-###2.调用语法
-	SELECT 函数名(参数列表)
+### 2.调用语法
+​	`SELECT 函数名(参数列表)`
 
-###3.查看函数
-	SHOW CREATE FUNCTION myf3;
+### 3.查看函数
+​	`SHOW CREATE FUNCTION myf3;`
 
-###4.删除函数
-	DROP FUNCTION myf3;
+### 4.删除函数
+​	`DROP FUNCTION myf3;`
 
 
 ## 10.流程控制语句：
@@ -1667,13 +1113,7 @@ long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录
 
 ![psgresql资料2](pictures/psgresql资料2.png)
 
-
-
-
-
-
-
-
+postgresql14官方中文文档：http://www.postgres.cn/docs/14/index.html
 
 ## jdbc.properties
 
@@ -1681,7 +1121,7 @@ long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录
 driver=org.postgresql.Driver
 url=jdbc:postgresql://localhost:5432/GradeDB
 username=postgres
-password=010326
+password=123456
 ```
 ## SQL语言
 
@@ -1787,23 +1227,6 @@ alter index 索引名 rename to new_name;
 drop index 索引名;
 ```
 
-### DML
-
-数据操纵SQL语句。
-
-对数据库表中数据进行插入、更新和删除处理。
-
-```sql
-insert into <表名|视图>[(列名...)] values(列值...);
--- 注意：插入时，给出部分列名，即为插入部分列值，其余列填充NULL
--- 如果不给出列名，默认是插入所有列，其中代理键不需要出现，由DBMS自动填充
-
-update <表名|视图> set <列名1>=<表达式1>,...
-[where <条件表达式>];
-
-delete from <表名|视图> [where <条件表达式>];
-```
-
 ### DCL
 
 数据控制SQL语句。
@@ -1831,8 +1254,6 @@ REVOKE DELETE ON table_A from ROLE_A;
 DENY <权限列表> ON <数据库对象> TO <用户|角色>;
 DENY DELETE On table_A TO ROLE_B;
 ```
-
-
 
 
 
