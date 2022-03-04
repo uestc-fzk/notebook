@@ -1,3 +1,13 @@
+# 资料
+
+Golang的API中文文档：https://studygolang.com/pkgdoc
+
+Go全路线入门教程：https://www.topgoer.com/
+
+**Go语言全路线详细教程**：https://tutorialedge.net/golang/getting-started-with-go/
+
+> 第3个教程真的超级细致，GraphQL-go这种都有
+
 # 一些技巧
 
 ## 环境配置
@@ -87,3 +97,77 @@ go get go-micro.dev/v4/cmd/protoc-gen-micro@latest
 需要注意的是如果要使用`micro`命令，需要使得此命令的目录在Linux的环境变量PATH下，需要配置一下。一般micro命令会安装于GOPATH/bin下，将此目录加入PATH变量即可。
 
 如果出现问题，把防火墙关了试一下
+
+# 数据访问
+
+目前数据访问部门将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
+
+## 连接Postgresql
+
+1、依赖
+
+```go
+go get xorm.io/xorm
+go get github.com/lib/pq
+```
+
+第二个依赖就是连接Postgresql的相关接口实现
+
+2、main函数
+
+> 注意：需要将github.com/lib/pq引入主函数，从而调用其内部的init函数
+> `import _ "github.com/lib/pq"`
+
+主函数如下：
+
+```go
+func main() {
+	engine, err := xorm.NewEngine("postgres", "host=localhost port=5432"+
+		" user=postgres password=fzk010326"+
+		" dbname=mydatabase sslmode=disable")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer engine.Close()
+	engine.ShowSQL(true)
+	engine.SetMapper(names.SnakeMapper{}) // 名称映射规则
+    
+    // ... 这里写调用dao层
+}
+```
+
+3、dao层
+
+```go
+type User struct {
+	Id       int `xorm:"pk autoincr"`
+	Username string
+	Birthday time.Time
+	Balance  string
+	Location string
+}
+
+// GetUserById 根据id查询
+func GetUserById(engine *xorm.Engine, id int) (*User, error) {
+	var user *User = new(User)
+	_, err := engine.ID(id).Get(user)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// GetUsers 查询所有
+func GetUsers(engine *xorm.Engine) (*[]*User, error) {
+	var sql = "SELECT * FROM public.user"
+	var users = make([]*User, 0, 10)
+
+	err := engine.SQL(sql).Find(&users)
+	if err != nil {
+		return nil, err
+	}
+	return &users, nil
+}
+```
+
+> 注意：Postgresql和MySQL不同的是，在查询表的时候，需要在限定其schema，默认是public，比如查询所有就是`SELECT * FROM public.user`，在Postgresql中用双引号默认使用public的schema，如`SELECT * FROM "user"`也是可以的，在打开XORM的SQL输出的时候，看到的SQL就是这样用双引号来查询的
