@@ -8,6 +8,12 @@ Go全路线入门教程：https://www.topgoer.com/
 
 > 第3个教程真的超级细致，GraphQL-go这种都有
 
+![GoLand快捷键](Golang.assets/GoLand快捷键.png)
+
+
+
+![golang路线](Golang.assets/golang路线.jpg)
+
 # 一些技巧
 
 ## 环境配置
