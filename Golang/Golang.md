@@ -16,13 +16,29 @@ Go全路线入门教程：https://www.topgoer.com/
 
 # 一些技巧
 
-## 环境配置
+## 安装环境配置
 
 作为新手，一定一定不要一来就按照官网教程一步一步的走，因为国内特殊情况，最好还是去网上找那种`一套式保姆级教程`，可以少走很多配环境的弯路！！！比如：https://www.liwenzhou.com/posts/Go/golang-menu/
 
-1.GOPROXY的配置
+然后接下来是一些关于Go的环境配置：
 
-在国内无法直接使用go get下载golang的各种包，但是，https://goproxy.io/zh/，可以让go get 正常使用！！！
+1、GOROOT配置，先将安装Go的目录配置为系统变量GOROOT，并将GOROOT\bin配置到环境变量path中
+
+2、GOPATH配置：在go module模式下，设置的GOPATH路径将用于存放引入的外部依赖包，默认是在用户目录即C盘下，可以新建一个目录来专门放依赖包
+
+- 先命令行配置Go的环境变量GOPATH
+
+```shell
+go env -w GOPATH=D:\xxxx\mygopath
+```
+
+- 再设置系统变量GOPATH
+
+3、在上面配置好GOPATH之后，需要将GOPATH\bin路劲配置到环境变量path中，因为下载的依赖中，里面的可执行命令将会下载到GOPATH\bin下，将其配置到环境变量中才能到处执行(这里主要是给其他工具如protobuf调用其他依赖包的命令)
+
+4、GOPROXY的配置
+
+在国内无法直接使用go get下载golang的各种包，但是，https://goproxy.io/zh/，可以让go get 正常使用！！！也可以用阿里云镜像，可以去阿里云找找
 
 ```shell
 go env -w GOPROXY=https://goproxy.io,direct
@@ -32,13 +48,11 @@ go env -w GOPROXY=https://goproxy.cn,direct
 go env -w GOSUMDB="sum.golang.google.cn"  # 校验包也用国内的代理
 ```
 
-2.目前都是用go mod管理依赖
+5、目前Go1.14之后都是用go mod管理依赖（类似于Java的Maven）
 
 ```shell
 go env -w GO111MODULE=on # 开启mod依赖管理
 ```
-
-
 
 ## 交叉编译
 
@@ -63,7 +77,7 @@ go build 我的应用.go
 
 ![image-20220228195544340](Golang.assets\image-20220228195544340.png)
 
-选择其中的win64版本的压缩包，解压后，在其bin目录有且仅有一个protoc.exe，这个玩意就是用来生成其他代码如go代码或者Java代码的命令，把它的目录如`D:\SoftWare\protoc-3.14.0-win64\bin`加入到环境变量中，就可以到处执行了(主要是给一些框架执行)
+选择其中的win64版本的压缩包，解压后，在其bin目录有且仅有一个protoc.exe，这个玩意就是用来生成其他代码如go代码或者Java代码的命令，把它的目录如`D:\SoftWare\protoc-3.14.0-win64\bin`加入到环境变量path中，就可以到处执行了(也是给一些框架执行)
 
 执行`protoc --version`，输出如下则成功了：
 
@@ -73,6 +87,10 @@ libprotoc 3.14.0
 ```
 
 在Linux上安装的话，步骤是一模一样的，下载上图中第二个压缩包，移动到`/usr/local`目录下，`unzip`解压，正常情况下会把`protoc`命令解压到`/usr/local/bin`目录中，此时就可以直接`protoc --version`验证是否成功了(因为/usr/local/bin一般都是在Linux的环境变量中的，不在的话可以自己配置一下)
+
+用protobuf生成golang代码：
+
+![image-20220306175811895](C:\Users\zhike.feng\AppData\Roaming\Typora\typora-user-images\image-20220306175811895.png)
 
 
 
