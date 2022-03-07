@@ -2,6 +2,68 @@
 
 本md文件将记录对JDK相关学习的笔记。
 
+# 环境搭建
+
+将以Java17为例子，Jetbrains IDEA为开发IDE，Maven为包依赖管理工具搭建开发环境
+
+## JDK17安装
+
+下载Java直接百度搜索Java即可，进入Oracle官网下载就是。但是呢，下载速度有点慢，可以从国内镜像下载：
+
+> 1、编程宝库镜像源：http://www.codebaoku.com/jdk/jdk-oracle.html
+> 2、华为云镜像：https://repo.huaweicloud.com/java/jdk/
+> 3、清华镜像源：https://mirrors.tuna.tsinghua.edu.cn/AdoptOpenJDK/
+
+需要注意的是上面的镜像中有的是Oracle JDK有的是Open JDK
+
+如果是windows下载，用exe文件进行安装的情况下，默认会把某个目录配置到系统变量path中，直接`java -version`验证是没问题的。最好还是配置系统变量`JAVA_HOME`指向安装目录，并将`%JAVA_HOME%\bin`添加到系统变量path中。
+
+## Maven安装和环境配置
+
+1、百度搜索Maven来到Apache关于Maven的网页，下载Maven最新版压缩包解压即为安装完成，然后把安装目录作为`MAVEN_HOME`配置到系统变量，并在系统变量path增加`%MAVEN_HOME\bin`，然后命令行测试即可
+
+2、新建目录mavenRepository用来作为仓库目录存放Maven下载的依赖包（放在D盘，因为后期依赖包会越来越多）
+
+3、打开 Maven 的配置文件(windows机器一般在maven安装目录的conf/settings.xml)(建议直接拖入VSCode中)
+
+4、配置仓库目录如下图：将其指向上面新建的仓库目录
+
+![image-20220307174259858](JavaSE.assets/image-20220307174259858.png)
+
+5、配置阿里云镜像源：这样下载依赖速度飞起！
+去阿里云官网找到镜像站中的Maven镜像，有配置教程
+在`<mirrors></mirrors>`标签中添加 mirror 子节点:
+
+![image-20220307174534200](JavaSE.assets/image-20220307174534200.png)
+
+配置完后保存退出。接下来即可进入IDEA新建Maven项目了
+
+## IDEA安装和激活
+
+安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020
+未验证过，不知是否有效
+
+更推荐：还有一种是学生身份申请IDEA的免费教育许可证，每年可以申请一次，每次有效期一年，这个虽然麻烦，但是学生账户可以登录使用所有Jetbrains系列产品如GoLand，Pycharm。
+申请地址：https://www.jetbrains.com.cn/community/education/#students
+
+### IDEA配置本地Maven
+
+IDEA中默认有Maven插件，也不是不能用，本地安装Maven后，可以在命令行中敲mvn命令
+
+![image-20220307175527312](JavaSE.assets/image-20220307175527312.png)
+
+此时就能去删掉系统默认用户目录下的.m2目录了（默认的Maven仓库地址），新建项目如果说又出现了.m2目录，说明IDEA中Maven配置失效了，再像上图这样配置一下。
+
+### IDEA配置
+
+IDEA还需要好好配置一下才能更好用
+
+1、编码配置为UTF8避免出现乱码
+
+![IDEA配置1](JavaSE.assets/IDEA配置1.png)
+
+
+
 # JUC
 
 资料来源：《Java并发编程的艺术》、JUC包下类源码

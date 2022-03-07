@@ -63,7 +63,7 @@ su - fzk					# 切换到fzk用户
 
 ### Xshell与Xftp免费版
 
-官网地址：https://www.netsarang.com/zh/
+官网地址：https://www.xshell.com
 
 点击所有下载，来到产品页面
 
