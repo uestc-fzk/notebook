@@ -54,6 +54,12 @@ go env -w GOSUMDB="sum.golang.google.cn"  # 校验包也用国内的代理
 go env -w GO111MODULE=on # 开启mod依赖管理
 ```
 
+6、有时候会用到Makefile，所以下载mingw，配置好gcc之后，在Goland中配置make命令指向本地下载的mingw的bin目录下的make.exe
+
+
+
+
+
 ## 交叉编译
 
 在控制台下安装其他系统的运行时，比如下文是`linux x64`
