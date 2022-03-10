@@ -14,7 +14,7 @@ Go全路线入门教程：https://www.topgoer.com/
 
 ![golang路线](Golang.assets/golang路线.jpg)
 
-# 一些技巧
+# 开发环境
 
 ## 安装环境配置
 
@@ -93,10 +93,6 @@ libprotoc 3.14.0
 ```
 
 在Linux上安装的话，步骤是一模一样的，下载上图中第二个压缩包，移动到`/usr/local`目录下，`unzip`解压，正常情况下会把`protoc`命令解压到`/usr/local/bin`目录中，此时就可以直接`protoc --version`验证是否成功了(因为/usr/local/bin一般都是在Linux的环境变量中的，不在的话可以自己配置一下)
-
-
-
-
 
 ## go-micro安装使用
 
@@ -277,11 +273,7 @@ service HelloService{
 protoc --go_out=plugins=grpc:. HelloService.proto
 ```
 
-用protobuf生成golang代码：
-
-![image-20220306175811895](C:\Users\zhike.feng\AppData\Roaming\Typora\typora-user-images\image-20220306175811895.png)
-
-这些包括：
+用protobuf生成golang代码，这些包括：
 
 - 所有用于填充，序列化和获取我们请求和响应消息类型的 protocol buffer 代码
 - 一个为客户端调用定义在`RouteGuide`服务的方法的接口类型（或者 *存根* ）
