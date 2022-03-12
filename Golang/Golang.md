@@ -285,7 +285,7 @@ protoc --go_out=plugins=grpc:. HelloService.proto
 
 如下图所示生成的HelloService.pb.go里面的服务端接口没有默认实现，自己需要根据业务情况去实现其服务方法
 
-![helloservice](C:\Users\zhike.feng\Desktop\helloservice.png)
+![grpc1](Golang.assets/grpc1.png)
 
 ```go
 func main() {
@@ -536,6 +536,3 @@ func myStreamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.Strea
 ```
 
 从结果可用看出，这个流式拦截器只会执行一次，并不会每次发消息就执行
-
-
-
