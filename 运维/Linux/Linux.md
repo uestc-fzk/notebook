@@ -226,8 +226,6 @@ su root
 11.	**usr: 这是一个非常重要的目录，用户的很多应用程序和文件都放在这个目录下，类似与windows下的program files目录**。存放文件。
 12.	var : 这个目录存放着在不断扩充着的东西，我们习惯将那些经常被修改的文件存放在该目录下，比如运行的各种日志文件。
 
-
-
 > 在 Linux 系统中，有几个目录是比较重要的，平时需要注意不要误删除或者随意更改内部文件。
 >- **/etc**： 上边也提到了，这个是**系统中的配置文件**，如果你更改了该目录下的某个文件可能会导致系统不能启动。
 >- **/bin, /sbin, /usr/bin, /usr/sbin**: 这是系统预设的**执行文件的放置目录**，比如 ls 就是在 /bin/ls 目录下的。
@@ -291,10 +289,6 @@ su root
 - **/opt**：默认是空的，我们安装额外软件可以放在这个里面。
 
 - **/srv**：存放服务启动后需要提取的数据**（不用服务器就是空）**
-
-
-
-
 
 
 
@@ -2511,6 +2505,8 @@ done
 
 ### 开放端口
 
+新建open-port.sh文件：
+
 ```shell
 #!/bin/bash
 for i
@@ -2528,6 +2524,8 @@ firewall-cmd --zone=public --list-port
 
 ### 关闭端口
 
+新建close-port.sh文件：
+
 ```shell
 #!/bin/bash
 for i
@@ -2541,12 +2539,6 @@ firewall-cmd --reload
 echo "当前开放的所有端口："
 firewall-cmd --zone=public --list-ports
 ```
-
-
-
-
-
-
 
 
 

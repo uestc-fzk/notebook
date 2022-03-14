@@ -283,3 +283,166 @@ docker push uestcfzk/mynginx:v1
 ```
 
 然后就可以在官网看自己的这个仓库，可以添加一些描述readme.md，记录启动方式这些...
+
+# Docker 安装其他软件
+
+## docker安装MySQL
+
+docker上安装MySQL其实相比于在物理机上安装很简单很多很多。只需要配置密码、映射端口3306、挂载配置文件、挂载数据保存目录即可。
+
+> 前言：docker安装的MySQL的root用户是配置了所有host均可访问的(当然这个玩意直接改user表中的root数据行就行了)，其默认配置文件目录在/etc/mysql下，其中my.cnf为默认配置文件，这个配置文件末尾引入了conf.d目录
+>
+> ```
+> # Custom config should go here
+> !includedir /etc/mysql/conf.d/
+> ```
+>
+> 从其注释中可以得知，如果要自己修改，默认配置，最好是直接去conf.d目录下新建配置文件即可，这个NGINX是一样的策略.
+
+1、先建一个干净的目录，并新建data目录，conf.d目录，以及dockerfile
+
+```shell
+mkdir -m 666 /opt/docker/mysqlDockerDir
+cd /opt/docker/mysqlDockerDir
+mkdir -m 666 data conf.d
+```
+
+2、自定义配置文件：顺便开启慢查询日志
+
+```shell
+cd conf.d
+vim mymysql.cnf
+```
+
+mymysql.cnf的内容如下：
+
+```mysql
+# 客户端设置，即客户端默认的连接参数
+[client]
+# 默认连接端口
+port = 3306
+# 字符集编码
+default-character-set = utf8mb4
+
+# 服务端基本设置
+[mysqld] 
+# MySQL监听端口
+port = 3306
+datadir = /var/lib/mysql
+# 服务端默认编码（数据库级别）
+character_set_server = utf8mb4
+
+# set slow query on 
+log_output=file
+slow_query_log=on
+slow_query_log_file = /tmp/mysql-slow.log
+log_queries_not_using_indexes=on
+long_query_time = 1
+```
+
+> 这里要注意这个慢查询日志的路径必须得有权限，因为MySQL会以mysql用户运行，所以权限最少得是`666`，这个tmp在容器内的权限为`777`，完全没问题。
+
+然后还有一个坑，这里得把mymysql.cnf的权限降低
+
+```shell
+chmod 664 mymysql.cnf
+```
+
+> 注意：这个配置文件名字最好别叫mysql.cnf，因为容器启动后会在这个目录下创建一个mysql,cnf文件；
+> 然后就是权限这个坑！配置文件只能给mysql用户设置读取权限，即只能为4，否则这个配置文件就会被mysql忽略(太坑了)
+
+3、在dockerfile中配置如下：将conf.d目录下的自定义配置文件复制到镜像相应目录内并创建日志目录
+
+```dockerfile
+FROM mysql:latest
+COPY ./conf.d /etc/mysql/conf.d
+```
+
+4、构建镜像
+
+```shell
+docker build -t uestcfzk/mysql:v1 .
+```
+
+5、再建一个shell脚本来专门启动这个镜像
+
+```shell
+echo "the container of uestcfzk/mysql:v1 will run"
+echo "the password is 123456"
+echo "the container id is "
+docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123456 \
+        -v /opt/docker/mysqlDockerDir/data:/var/lib/mysql \
+        uestcfzk/mysql:v1
+sleep 1
+echo "success"
+```
+
+这里可以看到将MySQL默认的数据存放目录挂载到了物理机中，并将3306端口做了映射，以及设置了root用户密码。
+
+这样一个镜像就初步制作完成啦，可以尝试用这个shell脚本运行，成功的话再进入容器内部查看相应的log文件是否自动创建。
+
+> 如果不成功，或者log文件没有创建，就可以用docker logs 命令查看容器启动过程中的日志查看哪里出错(绝对是权限问题！如果说想通过dockerfile中的RUN指令去创建目录或者修改权啥的，这个我已经尝试过了，不知道为啥创建666的权限到容器中就变成了655或者644，反正mysql用户没有写权限)
+
+6、对于慢查询日志文件的权限问题的解决
+
+在上面的过程中，虽然开启了慢查询日志，但是却是放在容器内的tmp根目录，因为这个了目录在容器内是777的权限，dockerfile命令无法创建出mysql用户具有写权限的目录。
+
+上诉操作已经将数据挂载于外部了，但是日志还在容器内。日志文件总不能每次都要进入容器内部查看吧，而且如果容器出了问题，日志数据查看不了，难以找到问题所在，因此日志文件最好挂载于外部物理机。
+
+不能自己去创建目录，因此只能选择容器内存在的有权限的目录，选中了tmp。对应于其777的权限，在上面的工作目录中，创建一个777的目录：
+
+```shell
+mkdir -m 777 log
+```
+
+修改shell启动脚本，将容器的/tmp目录挂载到log目录
+
+```shell
+echo "the container of uestcfzk/mysql:v1 will run"
+echo "the password is 123456"
+echo "the container id is "
+docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123456 \
+        -v /opt/docker/mysqlDockerDir/data:/var/lib/mysql \
+        -v /opt/docker/mysqlDockerDir/log:/tmp \
+        uestcfzk/mysql:v1
+sleep 1
+echo "success"
+```
+
+这样就将日志也挂载出来了，重新构建镜像并启动容器后查看log目录是否出现日志文件。
+
+7、可以连接上数据库之后，进入到mysql库中，可能会发现有两个root用户，一个访问权限是%，一个是localhost，把localhost这个删掉，以免有可能连不上数据库。
+
+## 制作Redis镜像
+
+如果以单节点Redis作为缓存的话，制作过程非常简单
+
+dockerfile如下
+
+```dockerfile
+FROM redis:latest
+COPY ./myredis.conf /tmp/myredis.conf
+CMD cd /tmp \
+        &&  redis-server myredis.conf
+```
+
+myredis.conf如下：
+
+```
+port 6379
+requirepass !MyRedis123456
+protected-mode no
+# daemonize yes # 这里不能开启守护进程，开启之后，redis默认后台启动，但是docker容器会自动结束
+
+
+pidfile "/tmp/redis_6379.pid"
+dbfilename dump6379.rdb
+# 工作目录
+dir /tmp
+logfile "6379.log"
+
+# 缓存策略
+maxmemory 100mb
+maxmemory-policy allkeys-lru
+```
+
