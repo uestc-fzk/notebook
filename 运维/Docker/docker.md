@@ -99,6 +99,18 @@ ENTRYPOINT ["<executeable>","<param1>","<param2>",...]
 
 可以搭配 CMD 命令使用：一般是变参才会使用 CMD ，这里的 CMD 等于是在给 ENTRYPOINT 传参.
 
+6、**WORKDIR**：指定工作目录，指定之后通过docker exec命令进入容器内部时就位于此目录，如下示例：
+
+```dockerfile
+FROM openjdk:11
+COPY . /usr/src/myapp
+WORKDIR /usr/src/myapp
+CMD cd /usr/src/myapp \ 
+   && java -jar blog-1.3.0-GA.jar --spring.profiles.active=product --server.port=9090 
+```
+
+
+
 更多命令和细节请看官方文档。
 
 ### 构建命令

@@ -126,7 +126,7 @@ GraphQL 实际上将多个 HTTP 请求聚合成了一个请求，它只是将多
 
 # GraphQL-Go
 
-这一部门记录GraphQL在go中的实现，框架为：https://github.com/graphql-go/graphql。这个实现的框架有点多，感觉都不好用。
+这一部分记录GraphQL在go中的实现，框架为graphql-go：https://github.com/graphql-go/graphql。这个实现的框架有点多，感觉都不好用。
 
 ## 资料
 
@@ -136,7 +136,7 @@ GitHub：https://github.com/graphql-go/graphql
 
 官方例子：https://github.com/graphql-go/graphql/blob/master/examples/crud/main.go
 
-简书：https://www.jianshu.com/p/0215fcc9843e
+如何使用GraphQL(实现框架为gqlgen)：https://www.howtographql.com/graphql-go/2-queries/
 
 Go GraphQL 初学者教程：https://tutorialedge.net/golang/go-graphql-beginners-tutorial/
 
