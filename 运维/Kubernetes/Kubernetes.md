@@ -1,4 +1,4 @@
-# 资料
+#  资料
 
 官网(有中文文档)：https://kubernetes.io/zh/
 
@@ -639,3 +639,315 @@ eyJhbGciOiJSUzI1NiIsImtpZCI6ImhsNXczQUpxWl8xMFgxS09CSmdER040eW9ZZ25LY19UUGc5bnBT
 拿着这个token去登录：
 
 ![dashboard1](Kubernetes.assets/dashboard1.png)
+
+
+
+# kubectl 命令
+
+## 常用
+
+```shell
+# 使用 example-service.yaml 中的定义创建服务。
+kubectl apply -f example-service.yaml
+
+
+########### kubectl get ###############
+kubectl get pods -owide # 以纯文本输出格式列出所有 pod，并包含附加信息(如节点名IP等)。
+kubectl get ns # 查出所有名称空间
+
+########### kubectl describe ###############
+kubectl describe nodes <node-name> # 显示名称为 <node-name> 的节点的详细信息。
+kubectl describe pod名 # 显示名为 <pod-name> 的 pod 的详细信息。
+
+########### kubectl delete ###############
+kubectl delete -f example-service.yaml  # 删除又yaml文件定义的资源
+# 删除所有带有 '<label-key>=<label-value>' 标签的 Pod 和服务
+kubectl delete pods,services -l <label-key>=<label-value>
+kubectl delete pods --all # 删除所有 pod，包括未初始化的 pod
+
+
+```
+
+
+
+## 名称空间
+
+```shell
+kubectl create ns my-namespace  # 直接创建namespace
+kubectl delete ns my-namespace  # 直接删除namespace
+
+# 用文件配置进行名称空间相关操作
+cat <<EOF | sudo tee myNamespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello
+EOF
+
+kubectl apply -f myNamespace.yaml  # 以文件方式定义名称空间，-f指以文件方式
+kubectl delete -f myNamespace.yaml # 最好也已文件方式删除
+```
+
+
+
+## pod
+
+```shell
+kubectl run mynginx --image=nginx # 创建并运行一个 image in a pod
+
+kubectl get pod  # 查看default名称空间的Pod
+kubectl describe pod 你自己的Pod名字 # 显示名为 <pod-name> 的 pod 的详细信息
+kubectl delete pod Pod名字 # 删除pod
+kubectl logs Pod名字 # 查看Pod的运行日志
+
+# 每个Pod - k8s都会分配一个ip
+kubectl get pod -owide
+curl 172.16.36.73 # 使用Pod的ip+pod里面运行容器的端口，如果访问不了，说明这个内网ip只能部署它的机器访问(公网不方便的地方)
+
+# 获取一个交互 TTY 并运行 /bin/bash <pod-name >。默认情况下，输出来自第一个容器。
+kubectl exec -it <pod-name> -- /bin/bash
+```
+
+使用yaml文件创建pod
+
+```shell
+cat <<EOF | sudo tee pod-mynginx.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: mynginx
+  name: mynginx
+  namespace: default
+spec:
+  containers:
+  - image: nginx
+    name: mynginx
+EOF
+
+kubectl apply -f pod-mynginx.yaml  # 应用yaml文件，创建pod
+kubectl delete -f pod-mynginx.yaml # 删除此yaml创建的pod
+```
+
+## Deployment
+
+Deployment的好处是如果一个pod发生了故障，还会再调度生成一个新的pod。
+
+### 多副本
+
+一个pod的deploy
+
+```shell
+kubectl create deployment mytomcat --image=tomcat:8.5.68 # 创建一个deploy
+# 这个命令执行后会启动一个pod，即使用命令将这个pod删除，很快又会启动一个新的pod
+
+kubectl get deploy # 获取当前的deploy
+kubectl delete deploy mytomcat # 删除这个mytomcat的deploy
+```
+
+创建多份副本pod的deploy，以下示例一次将会创建3个pod
+
+```shell
+kubectl create deployment mynginx3 --image=nginx --replicas=3 # 3份副本pod
+```
+
+以yaml文件创建，这里要注意apiVersion需要选择`apps/v1`
+
+```shell
+cat <<EOF | sudo tee pod-mynginx5.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: mynginx5
+  name: mynginx5
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: mynginx5
+  template:
+    metadata:
+      labels:
+        app: mynginx5
+    spec:
+      containers:
+      - image: nginx
+        name: nginx
+EOF
+
+kubectl apply -f pod-mynginx5.yaml # 部署
+```
+
+### 扩缩容
+
+通过kubectl scale命令指定副本数量
+
+```shell
+kubectl scale --replicas=5 deployment/mynginx5
+```
+
+还可以通过kubectl edit命令修改replica数量实现扩容缩容
+
+```shell
+kubectl edit deployment mynginx5 # 这命令会返回该的deploy的yaml配置，直接修改即可
+```
+
+### 滚动更新/版本回退
+
+```shell
+# 将deploy中的镜像替换成其它版本的镜像，pod将会杀死一个旧的，启动一个新的image的pod
+kubectl set image deployment/mynginx5 nginx=nginx:1.16.1 --record
+```
+
+同时也具有版本回退功能
+
+```shell
+#历史记录
+kubectl rollout history deploy/mynginx5
+#查看某个历史详情
+kubectl rollout history deployment/mynginx5 --revision=2
+#回滚(回到上次)
+kubectl rollout undo deployment/mynginx5
+#回滚(回到指定版本)
+kubectl rollout undo deployment/mynginx5 --to-revision=2
+```
+
+![image-20220319172635956](Kubernetes.assets/image-20220319172635956.png)
+
+# Kubernetes概述
+
+
+
+## Pod
+
+Pod 是 k8s 系统中可以**创建和管理的最小单元**，其他的资源对象都是用来支撑或者扩展 Pod 对象功能的，比如控制器对象是用来管控 Pod 对象的，Service 或者 Ingress 资源对象是用来暴露 Pod 引用对象的，PersistentVolume 资源对象是用来为 Pod 提供存储等等，k8s 不会直接处理容器，而是 Pod，Pod 是由一个或多个 container 组成 
+
+Pod 是 Kubernetes 的最重要概念，每一个 Pod 都有一个特殊的被称为**”根容器“的 Pause 容器**。Pause 容器对应的镜像属于 Kubernetes 平台的一部分，除了 Pause 容器，每个 Pod 还包含一个或多个紧密相关的用户业务容器。
+
+### pod联网
+
+每个 Pod 都在每个地址族中获得一个唯一的 IP 地址。 Pod 中的每个容器共享网络名字空间，包括 IP 地址和网络端口。 ***Pod 内* 的容器可以使用 `localhost` 互相通信**。 当 Pod 中的容器与 *Pod 之外* 的实体通信时，它们必须协调如何使用共享的网络资源 （例如端口）。
+
+在同一个 Pod 内，所有容器共享一个 IP 地址和端口空间，并且可以通过 `localhost` 发现对方。 他们也能通过如 SystemV 信号量或 POSIX 共享内存这类标准的进程间通信方式互相通信。 不同 Pod 中的容器的 IP 地址互不相同，没有 [特殊配置](https://kubernetes.io/zh/docs/concepts/policy/pod-security-policy/) 就不能使用 IPC 进行通信。 如果某容器希望与运行于其他 Pod 中的容器通信，可以通过 IP 联网的方式实现。
+
+Pod 中的容器所看到的系统主机名与为 Pod 配置的 `name` 属性值相同。 [网络](https://kubernetes.io/zh/docs/concepts/cluster-administration/networking/)部分提供了更多有关此内容的信息。
+
+**Pod分类**：
+
+1、普通pod
+
+普通 Pod 一旦被创建，就会被放入到 etcd 中存储，随后会被 Kubernetes Master 调度到某个具体的 Node 上并进行绑定，随后该 Pod 对应的 Node 上的 kubelet 进程实例化成一组相关的 Docker 容器并启动起来。在默认情 况下，当 Pod 里某个容器停止时，Kubernetes 会自动检测到这个问题并且重新启动这个 Pod 里某所有容器， 如果 Pod 所在的 Node 宕机，则会将这个 Node 上的所有 Pod 重新调度到其它节点上。 
+
+2、静态pod
+
+静态 Pod 是由 kubelet 进行管理的仅**存在于特定 Node** 上的 Pod,它们不能通过 API Server 进行管理，无法与 ReplicationController、Deployment 或 DaemonSet 进行关联，并且kubelet 也无法对它们进行健康检查。
+
+### pod定义
+
+用yaml定义pod：
+
+```yaml
+apiVersion: v1 #版本号
+kind: Pod #类型
+metadata:
+  name: string, #pod的名称
+  namespace: string, #pod所属的命名空间,默认为default
+  labels: #自定义标签列表
+    - name: string
+  annotations: #自定义注解列表
+    - name: string
+spec: #开始详细定义
+  containers: #定义容器列表
+  - name: string #容器名称
+    image: string #镜像名称
+    imagePullPolicy: [Always | Never | IfNotPresent] #镜像拉取策略(Always:每次都尝试重新拉取镜像;IfNotPresent:如果本地有该镜像就用本地的,本地不存在就下载镜像;Never:仅使用本地镜像)
+    command: [string] #容器的启动命令列表,如果不指定,则使用镜像打包时使用的启动命令
+    args: [string] #容器启动命令参数列表
+    workingDir: string #容器的工作目录
+    volumeMounts: #挂载到容器内部的存储卷配置
+    - name: string #引用pod定义的共享存储卷的名称,需要使用volumes[]部分中定义的共享存储卷名称
+      mountPath: string #存储卷在容器内Mount的绝对路径,应少于512个字符
+      readOnly: boolean #是否为只读模式,默认为读写模式
+    ports: #容器需要暴露的端口号列表
+    - name: string #端口的名称
+      containerPort: int #容器需要监听的端口号
+      hostPort: int #容器所在主机需要监听的端口号,默认与ports[0].containerPort相同.设置hostPort时,同一台宿主机将无法启动该容器的第2份副本(端口冲突)
+      protocol: string #端口协议,支持TCP和UDP,默认TCP
+    env: #容器运行前需要设置的环境变量列表
+    - name: string #环境变量名称
+      value: string #环境变量的值
+    resources: #资源限制和资源请求的设置
+      limits: #资源限制设置
+        cpu: string #CPU限制,单位为core数,将用于docker run --cpu-shares 参数
+        memory: string #内存限制,单位可以为MiB/GiB等,将用于docker run --memory 参数
+      requests: #资源请求限制
+        cpu: string #CPU请求,单位为core数,容器启动的初始可用数量
+        memory: string #内存请求,单位可以为MiB/GiB等,容器启动的初始可用大小
+  volumes: #在该pod上定义的共享存储卷列表
+    - name: string #共享存储卷名称,容器定义部分的containers[].volumeMounts[].name将应用该共享存储卷的名称.而volume的类型包括(emptyDir,hostPath,gitRepo,nfs,glusterfs,persistentVolumeClaim,flocker,configMap,rdb,gcePersistentDisk,awsElasticBlockStore等),可以定义多个volume,每个volume的name必须唯一
+      emptyDir: {} #此为类型是emptyDir的存储卷,与pod同生命周期的一个临时目录,值是空对象
+      hostPath: #类型为hostPath的存储卷,标识挂载pod所在宿主机的目录,通过volumes[].hostPath.path指定
+        path: string #pod所在主机的目录,将被用于容器中mount的目录
+      secret: #类型为secret的存储卷,标识挂载集群预定义的secret对象到容器内部
+        secretName: string 
+        items:
+        - key: string
+          path: string
+      configMap: #类型为configMap的存储卷,标识挂载集群预定义的configMap对象到容器内部
+        name: string #configMap的名称
+        items:
+        - key: string
+          path: string
+    livenessProbe: #对pod内各个容器健康检查的设置,如果探测无响应几次后,系统将自动重启该容器.主要方式有三种(exec,httpGet,tcpSocket)
+      exec: #以exec的方式检查pod内各个容器的健康状况
+        command: [string] #exec方式需要指定的命令或脚本
+      httpGet: #对pod内各个容器健康检查的设置,使用httpGet的方式
+        path: string #get的路径
+        port: number #get的端口号
+        host: string #get的主机ip
+        scheme: string #get的协议 http/https
+        httpHeaders: #get的请求头
+        - name: string #get请求头的key
+          value: string #get请求头的值
+      tcpSocket: #对pod内各个容器健康检查的设置,使用tcpSocket的方式
+        port: number #检测number端口是否在使用
+      initialDelaySeconds: 0 #容器启动完成后进行首次探测的时间,单位是秒
+      timeoutSeconds: 1 #对容器健康检查的探测等待响应的超时时间设置,单位是秒,默认1秒.超过该超时时间时,将认为该容器不健康,并重启该容器.
+      periodSeconds: 10 #对容器健康检查的定期探测时间设置,单位是秒,默认10秒探测一次
+      successThreshold: 1 #探测成功的阈值,默认1次,达到该次数时,表示容器正常/健康
+      failureThreshold: 3 #探测失败的阈值,达到该次数时,表示容器异常/不健康
+      securityContext: #安全上下文,用于定义Pod或Container的权限和访问控制,用的少
+        privileged: false
+  restartPolicy: [Always | Never | onFailure] #pod的重启策略(Always:pod一旦终止运行,无论pod中的容器是如何终止的,kubelet都将重启它;OnFailure:只有pod以非0退出码终止时,kubelet才会重启该容器,如果容器正常结束,即退出码为0,kubelet则不会重启它
+  nodeSelector: object #设置nodeSelector,表示将pod调度到包涵这些label的node节点上,以key:value格式指定{status:dev}
+  imagePullSecrets: #拉取镜像时使用secret名称,以name:secretkey的格式指定
+  - name: string
+  hostNetwork: false #是否使用主机网络模式,默认false.如果设置为true,则表示容器使用宿主机网络,不在使用Docker网桥,该pod将无法在同一台宿主机上启动第二个相同副本
+```
+
+### pod的生命周期和重启策略
+
+**Pod的status**
+
+Pod 的阶段（Phase）是 Pod 在其生命周期中所处位置的简单宏观概述。
+
+| 取值                | 描述                                                         |
+| :------------------ | :----------------------------------------------------------- |
+| `Pending`（悬决）   | Pod 已被 Kubernetes 系统接受，但有一个或者多个容器尚未创建亦未运行。此阶段包括等待 Pod 被调度的时间和通过网络下载镜像的时间。 |
+| `Running`（运行中） | Pod 已经绑定到了某个节点，Pod 中所有的容器都已被创建。至少有一个容器仍在运行，或者正处于启动或重启状态。 |
+| `Succeeded`（成功） | Pod 中的所有容器都已成功终止，并且不会再重启。               |
+| `Failed`（失败）    | Pod 中的所有容器都已终止，并且至少有一个容器是因为失败终止。也就是说，容器以非 0 状态退出或者被系统终止。 |
+| `Unknown`（未知）   | 因为某些原因无法取得 Pod 的状态。这种情况通常是因为与 Pod 所在主机通信失败。 |
+
+如果某节点死掉或者与集群中其他节点失联，Kubernetes 会实施一种策略，将失去的节点上运行的所有 Pod 的 `phase` 设置为 `Failed`
+
+**pod重启策略**
+
+Pod 的 `spec` 中包含一个 `restartPolicy` 字段，其可能取值包括 Always、OnFailure 和 Never。默认值是 Always。
+
+| 重启策略  | 说明                                             |
+| --------- | ------------------------------------------------ |
+| Always    | 容器失效时，kubelet自动重启该pod的容器           |
+| OnFailure | 容器终止运行且退出码不为0，kubelet自动重启该容器 |
+| Never     | 容器终止，kubelet不会重启该容器                  |
