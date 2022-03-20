@@ -597,7 +597,7 @@ vim dash.yaml
 # 然后将以下内容复制进去
 
 apiVersion: v1
-kind: ServiceAccount
+kind:           
 metadata:
   name: admin-user
   namespace: kubernetes-dashboard
@@ -664,11 +664,9 @@ kubectl delete -f example-service.yaml  # 删除又yaml文件定义的资源
 # 删除所有带有 '<label-key>=<label-value>' 标签的 Pod 和服务
 kubectl delete pods,services -l <label-key>=<label-value>
 kubectl delete pods --all # 删除所有 pod，包括未初始化的 pod
-
-
 ```
 
-
+# Kubernetes核心概念
 
 ## 名称空间
 
@@ -690,142 +688,33 @@ kubectl delete -f myNamespace.yaml # 最好也已文件方式删除
 
 
 
-## pod
 
-```shell
-kubectl run mynginx --image=nginx # 创建并运行一个 image in a pod
 
-kubectl get pod  # 查看default名称空间的Pod
-kubectl describe pod 你自己的Pod名字 # 显示名为 <pod-name> 的 pod 的详细信息
-kubectl delete pod Pod名字 # 删除pod
-kubectl logs Pod名字 # 查看Pod的运行日志
+## 工作负载
 
-# 每个Pod - k8s都会分配一个ip
-kubectl get pod -owide
-curl 172.16.36.73 # 使用Pod的ip+pod里面运行容器的端口，如果访问不了，说明这个内网ip只能部署它的机器访问(公网不方便的地方)
+工作负载是在 Kubernetes 上运行的应用程序。
 
-# 获取一个交互 TTY 并运行 /bin/bash <pod-name >。默认情况下，输出来自第一个容器。
-kubectl exec -it <pod-name> -- /bin/bash
-```
+无论你的负载是单一组件还是由多个一同工作的组件构成，在 Kubernetes 中你 可以在一组 [Pods](https://kubernetes.io/zh/docs/concepts/workloads/pods) 中运行它。 在 Kubernetes 中，Pod 代表的是集群上处于运行状态的一组 [容器](https://kubernetes.io/zh/docs/concepts/overview/what-is-kubernetes/#why-containers)。
 
-使用yaml文件创建pod
+不需要直接管理每个 Pod。 相反，可以使用 *负载资源* 来管理一组 Pods。 这些资源配置 [控制器](https://kubernetes.io/zh/docs/concepts/architecture/controller/) 来确保合适类型的、处于运行状态的 Pod 个数是正确的，与你所指定的状态相一致。
 
-```shell
-cat <<EOF | sudo tee pod-mynginx.yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  labels:
-    run: mynginx
-  name: mynginx
-  namespace: default
-spec:
-  containers:
-  - image: nginx
-    name: mynginx
-EOF
+Kubernetes 提供若干种内置的工作负载资源：
 
-kubectl apply -f pod-mynginx.yaml  # 应用yaml文件，创建pod
-kubectl delete -f pod-mynginx.yaml # 删除此yaml创建的pod
-```
+- [Deployment](https://kubernetes.io/zh/docs/concepts/workloads/controllers/deployment/) 和 [ReplicaSet](https://kubernetes.io/zh/docs/concepts/workloads/controllers/replicaset/) （替换原来的资源 [ReplicationController](https://kubernetes.io/zh/docs/reference/glossary/?all=true#term-replication-controller)）。 `Deployment` 适合用来管理集群上的**无状态应用**，`Deployment` 中的所有 `Pod` 都是相互等价的，并且在需要的时候被换掉。
+- [StatefulSet](https://kubernetes.io/zh/docs/concepts/workloads/controllers/statefulset/) 让你能够运行一个或者多个以某种方式跟踪应用状态的 Pods。 例如，如果你的负载会**将数据作持久存储**，你可以运行一个 `StatefulSet`，将每个 `Pod` 与某个 [`PersistentVolume`](https://kubernetes.io/zh/docs/concepts/storage/persistent-volumes/) 对应起来。你在 `StatefulSet` 中各个 `Pod` 内运行的代码可以将数据复制到同一 `StatefulSet` 中的其它 `Pod` 中以提高整体的服务可靠性。
 
-## Deployment
-
-Deployment的好处是如果一个pod发生了故障，还会再调度生成一个新的pod。
-
-### 多副本
-
-一个pod的deploy
-
-```shell
-kubectl create deployment mytomcat --image=tomcat:8.5.68 # 创建一个deploy
-# 这个命令执行后会启动一个pod，即使用命令将这个pod删除，很快又会启动一个新的pod
-
-kubectl get deploy # 获取当前的deploy
-kubectl delete deploy mytomcat # 删除这个mytomcat的deploy
-```
-
-创建多份副本pod的deploy，以下示例一次将会创建3个pod
-
-```shell
-kubectl create deployment mynginx3 --image=nginx --replicas=3 # 3份副本pod
-```
-
-以yaml文件创建，这里要注意apiVersion需要选择`apps/v1`
-
-```shell
-cat <<EOF | sudo tee pod-mynginx5.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app: mynginx5
-  name: mynginx5
-spec:
-  replicas: 5
-  selector:
-    matchLabels:
-      app: mynginx5
-  template:
-    metadata:
-      labels:
-        app: mynginx5
-    spec:
-      containers:
-      - image: nginx
-        name: nginx
-EOF
-
-kubectl apply -f pod-mynginx5.yaml # 部署
-```
-
-### 扩缩容
-
-通过kubectl scale命令指定副本数量
-
-```shell
-kubectl scale --replicas=5 deployment/mynginx5
-```
-
-还可以通过kubectl edit命令修改replica数量实现扩容缩容
-
-```shell
-kubectl edit deployment mynginx5 # 这命令会返回该的deploy的yaml配置，直接修改即可
-```
-
-### 滚动更新/版本回退
-
-```shell
-# 将deploy中的镜像替换成其它版本的镜像，pod将会杀死一个旧的，启动一个新的image的pod
-kubectl set image deployment/mynginx5 nginx=nginx:1.16.1 --record
-```
-
-同时也具有版本回退功能
-
-```shell
-#历史记录
-kubectl rollout history deploy/mynginx5
-#查看某个历史详情
-kubectl rollout history deployment/mynginx5 --revision=2
-#回滚(回到上次)
-kubectl rollout undo deployment/mynginx5
-#回滚(回到指定版本)
-kubectl rollout undo deployment/mynginx5 --to-revision=2
-```
+- [DaemonSet](https://kubernetes.io/zh/docs/concepts/workloads/controllers/daemonset/) 定义提供**节点本地支撑设施**的 `Pods`。这些 Pods 可能对于你的集群的运维是 非常重要的，例如作为网络链接的辅助工具或者作为网络 [插件](https://kubernetes.io/zh/docs/concepts/cluster-administration/addons/) 的一部分等等。每次你向集群中添加一个新节点时，如果该节点与某 `DaemonSet` 的规约匹配，则控制面会为该 `DaemonSet` 调度一个 `Pod` 到该新节点上运行。
+- [Job](https://kubernetes.io/zh/docs/concepts/workloads/controllers/job/) 和 [CronJob](https://kubernetes.io/zh/docs/concepts/workloads/controllers/cron-jobs/)。 定义一些一直运行到结束并停止的任务。`Job` 用来表达的是一次性的任务，而 `CronJob` 会根据其时间规划反复运行。
 
 ![image-20220319172635956](Kubernetes.assets/image-20220319172635956.png)
 
-# Kubernetes概述
-
-
-
-## Pod
+### Pod
 
 Pod 是 k8s 系统中可以**创建和管理的最小单元**，其他的资源对象都是用来支撑或者扩展 Pod 对象功能的，比如控制器对象是用来管控 Pod 对象的，Service 或者 Ingress 资源对象是用来暴露 Pod 引用对象的，PersistentVolume 资源对象是用来为 Pod 提供存储等等，k8s 不会直接处理容器，而是 Pod，Pod 是由一个或多个 container 组成 
 
 Pod 是 Kubernetes 的最重要概念，每一个 Pod 都有一个特殊的被称为**”根容器“的 Pause 容器**。Pause 容器对应的镜像属于 Kubernetes 平台的一部分，除了 Pause 容器，每个 Pod 还包含一个或多个紧密相关的用户业务容器。
 
-### pod联网
+#### pod联网
 
 每个 Pod 都在每个地址族中获得一个唯一的 IP 地址。 Pod 中的每个容器共享网络名字空间，包括 IP 地址和网络端口。 ***Pod 内* 的容器可以使用 `localhost` 互相通信**。 当 Pod 中的容器与 *Pod 之外* 的实体通信时，它们必须协调如何使用共享的网络资源 （例如端口）。
 
@@ -843,7 +732,7 @@ Pod 中的容器所看到的系统主机名与为 Pod 配置的 `name` 属性值
 
 静态 Pod 是由 kubelet 进行管理的仅**存在于特定 Node** 上的 Pod,它们不能通过 API Server 进行管理，无法与 ReplicationController、Deployment 或 DaemonSet 进行关联，并且kubelet 也无法对它们进行健康检查。
 
-### pod定义
+#### pod详细配置
 
 用yaml定义pod：
 
@@ -926,7 +815,7 @@ spec: #开始详细定义
   hostNetwork: false #是否使用主机网络模式,默认false.如果设置为true,则表示容器使用宿主机网络,不在使用Docker网桥,该pod将无法在同一台宿主机上启动第二个相同副本
 ```
 
-### pod的生命周期和重启策略
+#### pod的生命周期和重启策略
 
 **Pod的status**
 
@@ -951,3 +840,235 @@ Pod 的 `spec` 中包含一个 `restartPolicy` 字段，其可能取值包括 Al
 | Always    | 容器失效时，kubelet自动重启该pod的容器           |
 | OnFailure | 容器终止运行且退出码不为0，kubelet自动重启该容器 |
 | Never     | 容器终止，kubelet不会重启该容器                  |
+
+#### 例子
+
+```shell
+kubectl run mynginx --image=nginx # 创建并运行一个 image in a pod
+
+kubectl get pod  # 查看default名称空间的Pod
+kubectl describe pod 你自己的Pod名字 # 显示名为 <pod-name> 的 pod 的详细信息
+kubectl delete pod Pod名字 # 删除pod
+kubectl logs Pod名字 # 查看Pod的运行日志
+
+# 每个Pod - k8s都会分配一个ip
+kubectl get pod -owide
+curl 172.16.36.73 # 使用Pod的ip+pod里面运行容器的端口，如果访问不了，说明这个内网ip只能部署它的机器访问(公网不方便的地方)
+
+# 获取一个交互 TTY 并运行 /bin/bash <pod-name >。默认情况下，输出来自第一个容器。
+kubectl exec -it <pod-name> -- /bin/bash
+```
+
+使用yaml文件创建pod
+
+```shell
+cat <<EOF | sudo tee pod-mynginx.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: mynginx
+  name: mynginx
+  namespace: default
+spec:
+  containers:
+  - image: nginx
+    name: mynginx
+EOF
+
+kubectl apply -f pod-mynginx.yaml  # 应用yaml文件，创建pod
+kubectl delete -f pod-mynginx.yaml # 删除此yaml创建的pod
+```
+
+
+
+### Deployment
+
+一个 *Deployment* 为 [Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 和 [ReplicaSets](https://kubernetes.io/zh/docs/concepts/workloads/controllers/replicaset/) 提供声明式的更新能力。
+
+#### 多副本
+
+一个pod的deploy
+
+```shell
+kubectl create deployment mytomcat --image=tomcat:8.5.68 # 创建一个deploy
+# 这个命令执行后会启动一个pod，即使用命令将这个pod删除，很快又会启动一个新的pod
+
+kubectl get deploy # 获取当前的deploy
+kubectl delete deploy mytomcat # 删除这个mytomcat的deploy
+```
+
+创建多份副本pod的deploy，以下示例一次将会创建3个pod
+
+```shell
+kubectl create deployment mynginx3 --image=nginx --replicas=3 # 3份副本pod
+```
+
+以yaml文件创建，这里要注意apiVersion需要选择`apps/v1`
+
+```shell
+cat <<EOF | sudo tee pod-mynginx5.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: mynginx5
+  name: mynginx5
+spec:
+  replicas: 5  # 启动5个副本
+  selector:
+    matchLabels:
+      app: mynginx5
+  template:
+    metadata:
+      labels:
+        app: mynginx5
+    spec:
+      containers:
+      - image: nginx
+        name: nginx
+EOF
+
+kubectl apply -f pod-mynginx5.yaml # 部署
+```
+
+#### 扩缩容
+
+通过kubectl scale命令指定副本数量
+
+```shell
+kubectl scale --replicas=3 deployment/mynginx5  # 这里缩容为3个副本
+```
+
+还可以通过kubectl edit命令修改replica数量实现扩容缩容
+
+```shell
+kubectl edit deployment mynginx5 # 这命令会返回该的deploy的yaml配置，直接修改即可
+```
+
+#### 更新Deploy
+
+```shell
+# 将deploy中的镜像替换成其它版本的镜像，pod将会杀死一个旧的，启动一个新的image的pod
+kubectl set image deployment/mynginx5 nginx=nginx:1.16.1 --record
+
+# 也可以直接修改配置资源，这里可以改的就很多了
+kubectl edit deployment/mynginx5
+```
+
+可以在触发一个或多个更新之前暂停 Deployment，然后再恢复其执行。 这样做使得你能够在暂停和恢复执行之间应用多个修补程序，而不会触发不必要的上线操作。
+
+暂停的 Deployment 和未暂停的 Deployment 的唯一区别是，Deployment 处于暂停状态时， PodTemplateSpec 的任何修改都不会触发新的上线。 Deployment 在创建时是默认不会处于暂停状态。
+
+```shell
+kubectl rollout pause deployment/mynginx5   # 暂停运行：只暂停新容器上线
+# 此时进行镜像替换操作以及其他更新操作都不会触发上线
+kubectl set image deploy/mynginx5 nginx=nginx:1.16.1 
+kubectl set resources deploy/mynginx5 -c=nginx --limits=cpu=200m,memory=512Mi
+
+#最终，恢复 Deployment 执行并观察新的 ReplicaSet 的创建过程，其中包含了所应用的所有更新：
+kubectl rollout resume deploy/mynginx5
+```
+
+#### 版本回退
+
+同时也具有版本回退功能
+
+```shell
+#历史记录
+kubectl rollout history deploy/mynginx5
+#查看某个历史详情
+kubectl rollout history deployment/mynginx5 --revision=2
+#回滚(回到上次)
+kubectl rollout undo deployment/mynginx5
+#回滚(回到指定版本)
+kubectl rollout undo deployment/mynginx5 --to-revision=2
+```
+
+### ReplicaSet
+
+ReplicaSet 的目的是**维护一组在任何时候都处于运行状态的 Pod 副本的稳定集合**。 因此，它通常用来保证给定数量的、完全相同的 Pod 的可用性。
+
+**ReplicaSet 确保任何时间都有指定数量的 Pod 副本在运行**。 然而，Deployment 是一个更高级的概念，它管理 ReplicaSet，并向 Pod 提供声明式的更新以及许多其他有用的功能。 这实际上意味着，你可能永远不需要操作 ReplicaSet 对象：而是使用 Deployment，并在 spec 部分定义你的应用
+
+**ReplicaSet的替代方案**
+
+1、Deployment
+
+尽管 ReplicaSet 可以独立使用，目前它们的主要用途是提供给 Deployment 作为 编排 Pod 创建、删除和更新的一种机制。当使用 Deployment 时，你不必关心 如何管理它所创建的 ReplicaSet，Deployment 拥有并管理其 ReplicaSet。 因此，建议你在需要ReplicaSet 时使用 Deployment。
+
+2、Job
+
+3、DaemonSet
+
+4、ReplicationController
+
+ReplicaSet 是 [ReplicationController](https://kubernetes.io/zh/docs/concepts/workloads/controllers/replicationcontroller/) 的后继者。二者目的相同且行为类似，只是 ReplicationController 不支持 [标签用户指南](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/#label-selectors) 中讨论的基于集合的选择算符需求。 因此，相比于 ReplicationController，应优先考虑 ReplicaSet。
+
+### StatefulSet
+
+StatefulSet 是用来管理有状态应用的工作负载 API 对象。
+
+和 [Deployment](https://kubernetes.io/zh/docs/concepts/workloads/controllers/deployment/) 类似， StatefulSet 管理基于相同容器规约的一组 Pod。但和 Deployment 不同的是， StatefulSet **为每个 Pod 维护了一个有粘性的 ID**。这些 Pod 是基于相同的规约来创建的， 但是不能相互替换：无论怎么调度，每个 Pod 都有一个永久不变的 ID。
+
+可以**使用存储卷为工作负载提供持久存储**。尽管 StatefulSet 中的单个 Pod 仍可能出现故障， 但持久的 Pod 标识符使得将现有卷与替换已失败 Pod 的新 Pod 相匹配变得更加容易
+
+
+
+
+
+
+
+待续...
+
+
+
+### Jobs
+
+......
+
+ 
+
+## Label
+
+Label是Kubernetes系统中另外一个核心概念。一个Label是一个`key=value`的键值对，其中key与vaue由用户自己指定。Label可以附加到各种资源对象上，例如Node、Pod、Service、RC等，一个资源对象可以定义任意数量的Label，同一个Label也可以被添加到任意数量的资源对象上去。
+
+Label相当于我们熟悉的“标签”，給某个资源对象定义一个Label，随后可以通过Label Selector（标签选择器）查询和筛选拥有某些Label的资源对象，Kubernetes通过这种方式实现了类似SQL的简单又通用的对象查询机制。
+
+Label 的最常见的用法是使用 metadata.labels 字段，来为对象添加 Label，通过spec.selector 来引用对象。
+
+一些常用等label示例如下：
+
+> - 版本标签："release" : "stable" , "release" : "canary"...
+> - 环境标签："environment" : "dev" , "environment" : "production"
+> - 架构标签："tier" : "frontend" , "tier" : "backend" , "tier" : "middleware"
+> - 分区标签："partition" : "customerA" , "partition" : "customerB"...
+> - 质量管控标签："track" : "daily" , "track" : "weekly"
+
+
+
+Label Selector在Kubernetes中重要的使用场景有以下几处：
+
+- kube-controller进程通过资源对象RC上定义都Label Selector来筛选要监控的Pod副本的数量，从而实现Pod副本的数量始终符合预期设定。
+- kube-proxy进程通过Service的Label Selector来选择对应的Pod，自动建立起每个Service到对应Pod的请求转发路由表，从而实现Service的智能负载均衡机制。
+- 通过对某些Node定义特定的Label，并且在Pod定义文件中使用NodeSelector这种标签调度策略，kube-scheduler进程可以实现Pod“定向调度”的特性。
+
+## Volume
+
+Volume是**Pod中能够被多个容器访问的共享目录**。Kubernetes的Volume概念、用途和目的与Docker的Volume比较类似，但两者不能等价。首先，Kubernetes中的Volume定义在Pod上，然后被一个Pod里的多个容器挂载到具体的文件目录下；其次，Kubernetes中的Volume中的数据也不会丢失。最后，Kubernetes支持多种类型的Volume，例如Gluster、Ceph等先进的分布式文件系统。
+
+Volume的使用也比较简单，在大多数情况下，我们先在Pod上声明一个Volume，然后在容器里引用该Volume并Mount到容器里的某个目录上。
+
+
+
+## Service
+
+将运行在一组 [Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 上的应用程序公开为网络服务的抽象方法。
+
+一般使用Deployment来运行应用程序，它会动态创建和销毁pod。每个pod有自己的ip，但是在 Deployment 中，在同一时刻运行的 Pod 集合可能与稍后运行该应用程序的 Pod 集合不同。
+
+这导致了一个问题： 如果一组 Pod（称为“后端”）为集群内的其他 Pod（称为“前端”）提供功能， 那么前端如何找出并跟踪要连接的 IP 地址，以便前端可以使用提供工作负载的后端部分？
+
+这就要引入service了。
+
+Kubernetes Service 定义了这样一种抽象：逻辑上的一组 Pod，一种可以访问它们的策略 —— 通常称为微服务。 Service 所针对的 Pods 集合通常是通过[选择算符](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/)来确定的。
