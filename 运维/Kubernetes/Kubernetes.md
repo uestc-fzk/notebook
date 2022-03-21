@@ -670,9 +670,29 @@ kubectl delete pods --all # 删除所有 pod，包括未初始化的 pod
 
 ## 名称空间
 
+Kubernetes 支持多个虚拟集群，它们底层依赖于同一个物理集群。 这些虚拟集群被称为名称空间。 在一些文档里名称空间也称为命名空间。
+名字空间为名称提供了一个范围。**资源的名称需要在名字空间内是唯一的**，但不能跨名字空间。 名字空间不能相互嵌套，每个 Kubernetes 资源只能在一个名字空间中。不必使用多个名字空间来分隔仅仅轻微不同的资源，例如同一软件的不同版本： 应该使用[标签](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/) 来区分同一名字空间中的不同资源。
+
+> 注意：避免使用前缀 `kube-` 创建名字空间，因为它是为 Kubernetes 系统名字空间保留的。
+
+Kubernetes 会创建四个初始名字空间：
+
+- `default` 没有指明使用其它名字空间的对象所使用的默认名字空间
+- `kube-system` Kubernetes 系统创建对象所使用的名字空间
+- `kube-public` 这个名字空间是自动创建的，所有用户（包括未经过身份验证的用户）都可以读取它。 这个名字空间主要用于集群使用，以防某些资源在整个集群中应该是可见和可读的。 这个名字空间的公共方面只是一种约定，而不是要求。
+- `kube-node-lease` 此名字空间用于与各个节点相关的 [租约（Lease）](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/lease-v1/)对象。 节点租期允许 kubelet 发送[心跳](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#heartbeats)，由此控制面能够检测到节点故障
+
 ```shell
 kubectl create ns my-namespace  # 直接创建namespace
 kubectl delete ns my-namespace  # 直接删除namespace
+# 获取namespace，在命令中，可以把namespace简写为ns
+[root@k8s-master ~]# kubectl get ns
+NAME                   STATUS   AGE
+default                Active   2d18h
+kube-node-lease        Active   2d18h
+kube-public            Active   2d18h
+kube-system            Active   2d18h
+kubernetes-dashboard   Active   2d15h
 
 # 用文件配置进行名称空间相关操作
 cat <<EOF | sudo tee myNamespace.yaml
@@ -686,7 +706,21 @@ kubectl apply -f myNamespace.yaml  # 以文件方式定义名称空间，-f指�
 kubectl delete -f myNamespace.yaml # 最好也已文件方式删除
 ```
 
+在默认情况下，所有请求都是访问的default这个名称空间，可以通过`--namespace`设置请求的名称空间
 
+```shell
+kubectl get pod --namespace=<名称空间名字>
+kubectl run nginx --image=nginx --namespace=<名字空间名称>
+```
+
+需要注意的是，并不是所有资源都在名称空间中，有很多资源没有名称空间这个概念，如名称空间本身，节点，持久化卷等
+
+```shell
+# 查看位于名字空间中的资源
+kubectl api-resources --namespaced=true
+# 查看不在名字空间中的资源
+kubectl api-resources --namespaced=false
+```
 
 
 
@@ -916,7 +950,7 @@ metadata:
   name: mynginx5
 spec:
   replicas: 5  # 启动5个副本
-  selector:
+  selector: # 这里的过滤选择标签 必须 匹配下面的template的标签
     matchLabels:
       app: mynginx5
   template:
@@ -924,8 +958,8 @@ spec:
       labels:
         app: mynginx5
     spec:
-      containers:
-      - image: nginx
+      containers: # 配置每个pod中的容器列表
+      - image: nginx:1.14.2
         name: nginx
 EOF
 
@@ -1031,9 +1065,7 @@ StatefulSet 是用来管理有状态应用的工作负载 API 对象。
 
 ## Label
 
-Label是Kubernetes系统中另外一个核心概念。一个Label是一个`key=value`的键值对，其中key与vaue由用户自己指定。Label可以附加到各种资源对象上，例如Node、Pod、Service、RC等，一个资源对象可以定义任意数量的Label，同一个Label也可以被添加到任意数量的资源对象上去。
-
-Label相当于我们熟悉的“标签”，給某个资源对象定义一个Label，随后可以通过Label Selector（标签选择器）查询和筛选拥有某些Label的资源对象，Kubernetes通过这种方式实现了类似SQL的简单又通用的对象查询机制。
+*标签（Labels）* 是附加到 Kubernetes 对象（比如 Pods）上的键值对。 标签旨在用于指定对用户有意义且相关的对象的标识属性，但不直接对核心系统有语义含义。 标签可以用于组织和选择对象的子集。
 
 Label 的最常见的用法是使用 metadata.labels 字段，来为对象添加 Label，通过spec.selector 来引用对象。
 
@@ -1049,9 +1081,79 @@ Label 的最常见的用法是使用 metadata.labels 字段，来为对象添加
 
 Label Selector在Kubernetes中重要的使用场景有以下几处：
 
-- kube-controller进程通过资源对象RC上定义都Label Selector来筛选要监控的Pod副本的数量，从而实现Pod副本的数量始终符合预期设定。
+- kube-controller进程通过资源对象RC上定义的Label Selector来筛选要监控的Pod副本的数量，从而实现Pod副本的数量始终符合预期设定。
 - kube-proxy进程通过Service的Label Selector来选择对应的Pod，自动建立起每个Service到对应Pod的请求转发路由表，从而实现Service的智能负载均衡机制。
 - 通过对某些Node定义特定的Label，并且在Pod定义文件中使用NodeSelector这种标签调度策略，kube-scheduler进程可以实现Pod“定向调度”的特性。
+
+### 标签选择算符
+
+通过 *标签选择算符*，客户端/用户可以识别一组对象。标签选择算符是 Kubernetes 中的核心分组原语。
+
+API 目前支持两种类型的选择算符：***基于等值的*** 和 ***基于集合的***。 标签选择算符可以由逗号分隔的多个 *需求* 组成。 在多个需求的情况下，必须满足所有要求，因此逗号分隔符充当逻辑 *与*（`&&`）运算符。
+
+空标签选择算符或者未指定的选择算符的语义取决于上下文， 支持使用选择算符的 API 类别应该将算符的合法性和含义用文档记录下来。
+
+**1、基于等值的**
+
+匹配对象必须满足所有指定的标签约束，可接受的运算符有`=`、`==` 和 `!=` 三种。 前两个表示 *相等*（并且只是同义词），而后者表示 *不相等*
+
+**2、基于集合的**
+
+*基于集合* 的标签需求允许你通过一组值来过滤键。 支持三种操作符：`in`、`notin` 和 `exists` (只可以用在键标识符上)。
+
+```
+environment in (production, qa)
+tier notin (frontend, backend)
+partition
+!partition
+```
+
+- 第一个示例选择了所有键等于 `environment` 并且值等于 `production` 或者 `qa` 的资源。
+- 第二个示例选择了所有键等于 `tier` 并且值不等于 `frontend` 或者 `backend` 的资源，以及所有没有 `tier` 键标签的资源。
+- 第三个示例选择了所有包含了有 `partition` 标签的资源；没有校验它的值。
+- 第四个示例选择了所有没有 `partition` 标签的资源；没有校验它的值。 类似地，逗号分隔符充当 *与* 运算符。因此，使用 `partition` 键（无论为何值）和 `environment` 不同于 `qa` 来过滤资源可以使用 `partition, environment notin（qa)` 来实现
+
+Service和ReplicationController只支持 基于等值 的选择算符；而新的资源如Deployment、Job、DaemonSet和ReplicaSet都支持：
+
+```yaml
+......        
+        selector:
+          matchLabels:
+            component: redis
+          matchExpressions:
+            - {key: tier, operator: In, values: [cache]}
+            - {key: environment, operator: NotIn, values: [dev]}
+```
+
+`matchLabels` 是由 `{key,value}` 对组成的映射。`matchExpressions` 是 Pod 选择算符需求的列表。 有效的运算符包括 `In`、`NotIn`、`Exists` 和 `DoesNotExist`。 来自 `matchLabels` 和 `matchExpressions` 的所有要求都按逻辑与的关系组合到一起，它们必须都满足才能匹配
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Volume
 
