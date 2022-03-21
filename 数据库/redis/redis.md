@@ -3552,7 +3552,7 @@ Redis为什么不使用真实的LRU实现是因为这需要太多的内存。不
 
 > Redis Replication中文相关文档：http://www.redis.cn/topics/replication.html
 
-![image-20210905211607016](https://uestc-fzk.gitee.io/notebook/数据库/redis/redis.assets/image-20210905211607016.png)
+![image-20210905211607016](redis.assets/image-20210905211607016.png)
 
 ### 概述
 
@@ -4356,7 +4356,7 @@ dir ./
 logfile "6379.log"
 
 # 缓存策略
-maxmemory 10mb
+maxmemory 100mb
 maxmemory-policy allkeys-lru
 
 # 开启集群模式
@@ -4371,7 +4371,7 @@ cluster-node-timeout 15000
 > 在底线命令模式下，先按`:`，再接后面的即可实现快速查找替换。
 > `/6379`的话就是快速查找了。
 
-![image-20210907201747959](https://uestc-fzk.gitee.io/notebook/数据库/redis/redis.assets/image-20210907201747959.png)
+![image-20210907201747959](redis.assets/image-20210907201747959.png)
 
 #### 创建集群
 
@@ -4394,7 +4394,7 @@ cluster-node-timeout 15000
 
 启动完成之后，各个服务器会生成3个node_xxxx.conf配置文件：当然这个图不对
 
-![image-20210907203030861](https://uestc-fzk.gitee.io/notebook/数据库/redis/redis.assets/image-20210907203030861.png)
+![image-20210907203030861](redis.assets/image-20210907203030861.png)
 
 **构建集群**
 

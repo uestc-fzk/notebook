@@ -7,12 +7,12 @@
 下载安装方式：
 在官网中找到产品下载：
 
-![VMware16下载1](pictures/VMware16下载1.png)
+![VMware16下载1](Linux.assets/VMware16下载1.png)
 
 下载之后安装即可：
 如果出现此问题：
 
-![VMware16下载2](pictures/VMware16下载2.png)
+![VMware16下载2](Linux.assets/VMware16下载2.png)
 
 **解决方法：**
 
@@ -22,13 +22,13 @@
 
 在官网中搜索Visual C++进行下载：
 
-![VMware16下载3](pictures/VMware16下载3.png)
+![VMware16下载3](Linux.assets/VMware16下载3.png)
 
 注意：如果服务器所在的windows操作系统是32位的，就下载 vc_redist.x86.exe；如果是64位的，vc_redist.x64.exe 与 vc_redist.x86.exe 最好都下载安装。
 
 安装成功之后：
 
-![VMware16下载4](pictures/VMware16下载4.png)
+![VMware16下载4](Linux.assets/VMware16下载4.png)
 
 再进行VMware16的安装，此时安装成功时候，将会提示输入激活码：
 
@@ -47,7 +47,7 @@
 > 中文官方使用文档：https://docs.vmware.com/cn/VMware-Workstation-Pro/index.html
 > 如下图：
 >
-> ![VMware16下载5](pictures/VMware16下载5.png)
+> ![VMware16下载5](Linux.assets/VMware16下载5.png)
 
 ## ubuntu
 
@@ -67,15 +67,15 @@ su - fzk					# 切换到fzk用户
 
 点击所有下载，来到产品页面
 
-![xshell](pictures/xshell.png)
+![xshell](Linux.assets/xshell.png)
 
 点击xshell下载即可。
 
-![xshell1](pictures/xshell1.png)
+![xshell1](Linux.assets/xshell1.png)
 
 
 
-![xshell2](pictures/xshell2.png)
+![xshell2](Linux.assets/xshell2.png)
 
 在邮箱中收到下载地址后，进去下载即可。
 
@@ -93,7 +93,7 @@ su root
 ```
 
 首先去ifconfig查看ip地址，如果ip地址不是这个样子的
-![centos1](pictures/centos1.png)
+![centos1](Linux.assets/centos1.png)
 
 如果不是这样子的，说明centos空闲一段时间之后，自动断网了。此时是不能进行xshell连接的。
 
@@ -111,7 +111,7 @@ su root
 
 1. 查看是否开启了ssh服务
     `sudo ps -e |grep ssh`
-    ![ubuntu1](pictures/ubuntu1.png)
+    ![ubuntu1](Linux.assets/ubuntu1.png)
     如果只有ssh-agent表示还没启动,需要通过`sudo /etc/init.d/ssh start`启动ssh server.
     如果提醒找不到该命令，说明没有安装openssh-server。（跳到步骤2）
 
@@ -123,14 +123,14 @@ su root
 
    1. 更新源列表
        `sudo apt-get update`，之后输入管理员密码。
-       ![ubuntu3](pictures/ubuntu3.png)
+       ![ubuntu3](Linux.assets/ubuntu3.png)
    
    2. 安装openssh-server
       `sudo apt-get install openssh-server`
    
    3. 查看ssh服务是否启动
       `sudo ps -e |grep ssh`
-      ![ubuntu4](pictures/ubuntu4.png)
+      ![ubuntu4](Linux.assets/ubuntu4.png)
       
       如果还是没有shhd服务，则需要手动开启
       `sudo service ssh start`
@@ -139,11 +139,11 @@ su root
       `sudo ifconfig`
       
       如果提示没有该命令，则：`sudo apt install net-tools `
-      ![ubuntu5](pictures/ubuntu5.png)
+      ![ubuntu5](Linux.assets/ubuntu5.png)
 
 4. Xshell连接
 
-   ![ubuntu6](pictures/ubuntu6.png)
+   ![ubuntu6](Linux.assets/ubuntu6.png)
 
 出现的协议保护点接受即可。
 
@@ -211,7 +211,7 @@ su root
 
 ## Linux目录说明
 
-![目录结构](pictures/目录结构.png)
+![目录结构](Linux.assets/目录结构.png)
 
 1.	bin -> usr/bin : 这个目录存放最经常使用的命令
 2.	boot : 这个目录存放启动Linux时使用的一些核心文件，包括一些连接文件以及镜像文件
@@ -225,8 +225,6 @@ su root
 10.	tmp: 这个目录是用来存放一些临时文件的。
 11.	**usr: 这是一个非常重要的目录，用户的很多应用程序和文件都放在这个目录下，类似与windows下的program files目录**。存放文件。
 12.	var : 这个目录存放着在不断扩充着的东西，我们习惯将那些经常被修改的文件存放在该目录下，比如运行的各种日志文件。
-
-
 
 > 在 Linux 系统中，有几个目录是比较重要的，平时需要注意不要误删除或者随意更改内部文件。
 >- **/etc**： 上边也提到了，这个是**系统中的配置文件**，如果你更改了该目录下的某个文件可能会导致系统不能启动。
@@ -291,10 +289,6 @@ su root
 - **/opt**：默认是空的，我们安装额外软件可以放在这个里面。
 
 - **/srv**：存放服务启动后需要提取的数据**（不用服务器就是空）**
-
-
-
-
 
 
 
@@ -374,7 +368,7 @@ BackSpace键和Ctrl+H都可以删除已经输入的字符，推荐Ctrl+H，该�
 
 #### 路劲自动补全
 在Linux命令行中，可以敲文件夹的第一个字母，再按下tab键，如果只有一个匹配的文件夹，则自动补全，如果有多个，则会列出匹配的所有文件夹来提示接下里的输入。
-![自动补全](pictures/自动补全.png)
+![自动补全](Linux.assets/自动补全.png)
 
 #### 常用命令
 - ls（英文全拼：list files）: 列出目录及文件名
@@ -458,7 +452,7 @@ lrwxrwxrwx 1 root root 10 Sep  4 17:54 /var/mail -> spool/mail
 ##### ll
 列出目录下的详细内容（相当于Windows的列表查看）
 
-![ll和ls的区别](pictures/ll和ls的区别.png)
+![ll和ls的区别](Linux.assets/ll和ls的区别.png)
 
 
 ### 文件管理
@@ -880,13 +874,13 @@ Linux 系统是一种典型的多用户系统，不同的用户处于不同的�
 - chmod (change mode) ： 修改用户的权限。
 
 下图中通过 chown 来授权用户，通过 chmod 为用户设置可以开门的权限。
-![权限0](pictures/权限0.png)
+![权限0](Linux.assets/权限0.png)
 
 
 #### 基本属性查看
 权限指用户或程序能够对目录，文件执行的操作。
 执行ll 或 ls -l 显示文件和目录详细信息
-![权限](pictures/权限.png)
+![权限](Linux.assets/权限.png)
 
 前10个字符的含义：
 ```shell
@@ -918,7 +912,7 @@ Linux 系统是一种典型的多用户系统，不同的用户处于不同的�
 #### 文件访问权限
 
 linux权限机制采用UGO模式。其中 u(user)表示所属用户、g(group)表示所属组、o(other)表示除了所属用户、所属组之外的情况。
-![权限1](pictures/权限1.png)
+![权限1](Linux.assets/权限1.png)
 
 ```
 A、	读权限：读取文件内容，对文件执行cat ,more ,less这样的查看命令，对目录来说可以读取目录中文件列表
@@ -1333,7 +1327,7 @@ vi是linux下标配的一个纯字符界面的文本编辑器，由于不是图�
 
 vim是vi的升级版本，完全兼容vi，vim也可以完全当成vi使用，vim是在vi的基础上增加一些功能，比如语法着色等
 
-![vim键盘图](pictures/vim键盘图.gif)
+![vim键盘图](Linux.assets/vim键盘图.gif)
 
 ### 启动vi编辑器
 语法：vi 文件名
@@ -1391,10 +1385,10 @@ wq! 若文件属性为『只读』时,强制写入该档案。不过,到底能�
 ```
 
 ### vim使用示例
-![vim工作模式](pictures/vim工作模式.png)
-![vim使用示例1](pictures/vim使用示例1.jpg)
-![vim使用示例2](pictures/vim使用示例2.jpg)
-![vim使用示例3](pictures/vim使用示例3.jpg)
+![vim工作模式](Linux.assets/vim工作模式.png)
+![vim使用示例1](Linux.assets/vim使用示例1.jpg)
+![vim使用示例2](Linux.assets/vim使用示例2.jpg)
+![vim使用示例3](Linux.assets/vim使用示例3.jpg)
 
 ### vi/vim 常用按键
 
@@ -1410,9 +1404,7 @@ wq! 若文件属性为『只读』时,强制写入该档案。不过,到底能�
 
 ## yum命令
 yum（ Yellow dog Updater, Modified）是一个在 Fedora 和 RedHat 以及 SUSE 中的 Shell 前端软件包管理器。
-
 基于 RPM 包管理，能够从指定的服务器自动下载 RPM 包并且安装，可以自动处理依赖性关系，并且一次安装所有依赖的软体包，无须繁琐地一次次下载、安装。
-
 yum 提供了查找、安装、删除某一个、一组甚至全部软件包的命令，而且命令简洁而又好记。
 
 ### yum 语法
@@ -1423,25 +1415,22 @@ yum 提供了查找、安装、删除某一个、一组甚至全部软件包的�
 - package：安装的包名。
 
 ### yum常用命令
-1. 列出所有可更新的软件清单命令：yum check-update
 
-2. 更新所有软件命令：yum update
-
-3. 仅安装指定的软件命令：yum install <package_name>
-
-4. 仅更新指定的软件命令：yum update <package_name>
-
-5. 列出所有可安裝的软件清单命令：yum list
-
-6. 删除软件包命令：yum remove <package_name>
-
-7. 查找软件包命令：yum search <keyword>
-
-8. 清除缓存命令:(yum命令下载的安装包都放在/var/cache/yum目录)
-    yum clean packages: 清除缓存目录下的软件包
-    yum clean headers: 清除缓存目录下的 headers
-    yum clean oldheaders: 清除缓存目录下旧的 headers
-    yum clean, yum clean all (= yum clean packages; yum clean oldheaders) :清除缓存目录下的软件包及旧的 headers
+```sh
+# 1、查看已经安装的包
+yum list installed
+# 2、查看软件包
+yum search 软件包名
+# 3、安装软件包
+yum install 软件包名
+# 4、删除软件包
+yum remove 软件包名
+# 5、清除缓存命令:(yum命令下载的安装包都放在/var/cache/yum目录)
+yum clean packages: 清除缓存目录下的软件包
+yum clean headers: 清除缓存目录下的 headers
+yum clean oldheaders: 清除缓存目录下旧的 headers
+yum clean, yum clean all (= yum clean packages; yum clean oldheaders) :清除缓存目录下的软件包及旧的 headers
+```
 
 
 注意：对于 Linux 软件安装时提示缺失库的，可以使用 yum 的 provides 参数查看 libstdc++.so.6 的库文件包含在那个安装包中只需要执行：
@@ -1449,10 +1438,6 @@ yum 提供了查找、安装、删除某一个、一组甚至全部软件包的�
 yum provides libstdc++.so.6
 ```
 然后按查询到安装包包名，使用 yum install 安装即可。
-
-
-
-
 
 ## Shell命令解释器
 
@@ -1483,7 +1468,7 @@ yum provides libstdc++.so.6
 >
 > 4.如果用户输入的命令尾部带有`&`(后台命令)，Shell建立子进程后，不会睡眠，直接等待新命令。
 
-![Shell执行命令过程](pictures/Shell执行命令过程.png)
+![Shell执行命令过程](Linux.assets/Shell执行命令过程.png)
 
 ### 重定向和管道
 
@@ -1861,9 +1846,9 @@ unset variable_name
 - **2) 环境变量** 所有的程序，包括shell启动的程序，都能访问环境变量，有些程序需要环境变量来保证其正常运行。必要的时候shell脚本也可以定义环境变量。
 - **3) shell变量** shell变量是由shell程序设置的特殊变量。shell变量中有一部分是环境变量，有一部分是局部变量，这些变量保证了shell的正常运行
 
-![Shell环境变量](pictures/Shell环境变量.png)
+![Shell环境变量](Linux.assets/Shell环境变量.png)
 
-![Shell系统变量](pictures/Shell系统变量.png)
+![Shell系统变量](Linux.assets/Shell系统变量.png)
 
 
 
@@ -2511,6 +2496,8 @@ done
 
 ### 开放端口
 
+新建open-port.sh文件：
+
 ```shell
 #!/bin/bash
 for i
@@ -2528,6 +2515,8 @@ firewall-cmd --zone=public --list-port
 
 ### 关闭端口
 
+新建close-port.sh文件：
+
 ```shell
 #!/bin/bash
 for i
@@ -2541,12 +2530,6 @@ firewall-cmd --reload
 echo "当前开放的所有端口："
 firewall-cmd --zone=public --list-ports
 ```
-
-
-
-
-
-
 
 
 
@@ -2708,7 +2691,7 @@ shell> service mysqld {start|stop|restart|status}
 
 但是当去查看status 的时候发现：
 
-![Linux下MySQL8字符集](pictures/Linux下MySQL8字符集.png)
+![Linux下MySQL8字符集](Linux.assets/Linux下MySQL8字符集.png)
 
 可以看到默认字符集都是utf8mb4(utf8的超集)。可能是MySQL8的rpm安装的原因。
 
@@ -2751,14 +2734,3 @@ pid-file=/var/run/mysqld/mysqld.pid
 ```
 
 可以去参考手册找找或者百度找找如何改配置文件。目前暂时使用默认的即可。
-
-
-
-# Linux下安装jdk11
-
-可以官网下载RPM包或者tar.gz进行安装oracle jdk，也可以yum安装openjdk。
-
-如果对于`JAVA_HOME`系统变量有要求，则建议rpm安装或者tar.gz解压安装。
-
-
-
