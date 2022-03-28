@@ -1207,3 +1207,246 @@ Kubernetes `ServiceTypes` 允许指定你所需要的 Service 类型，默认是
 
 备注：看到externalName了
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Ingress
+
+文档：https://kubernetes.github.io/ingress-nginx/deploy/
+
+Ingress 是对集群中服务的外部访问进行管理的 API 对象，典型的访问方式是 HTTP，Ingress 可以提供负载均衡、SSL 终结和基于名称的虚拟托管。
+[Ingress](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#ingress-v1beta1-networking-k8s-io) 公开了从集群外部到集群内[服务](https://kubernetes.io/zh/docs/concepts/services-networking/service/)的 HTTP 和 HTTPS 路由。 流量路由由 Ingress 资源上定义的规则控制。
+
+下面是一个将所有流量都发送到同一 Service 的简单 Ingress 示例：
+
+![image-20220328220030961](Kubernetes.assets/image-20220328220030961.png)
+
+Ingress 可为 Service 提供外部可访问的 URL、负载均衡流量、终止 SSL/TLS，以及基于名称的虚拟托管。
+
+Ingress 不会公开任意端口或协议。 将 HTTP 和 HTTPS 以外的服务公开到 Internet 时，通常使用 [Service.Type=NodePort](https://kubernetes.io/zh/docs/concepts/services-networking/service/#type-nodeport) 或 [Service.Type=LoadBalancer](https://kubernetes.io/zh/docs/concepts/services-networking/service/#loadbalancer) 类型的 Service
+
+### 环境准备
+
+前提：必须下载ingress控制器，可以选择 [ingress-nginx](https://kubernetes.github.io/ingress-nginx/deploy/)。 也可以从许多 [Ingress 控制器](https://kubernetes.io/zh/docs/concepts/services-networking/ingress-controllers) 中进行选择。
+
+```shell
+wget https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.47.0/deploy/static/provider/baremetal/deploy.yaml
+
+#修改镜像
+vim deploy.yaml
+#将image的值改为如下值：
+registry.cn-hangzhou.aliyuncs.com/lfy_k8s_images/ingress-nginx-controller:v0.46.0
+
+# 改个名
+mv deploy.yaml ingress-nginx.yaml
+# 部署安装
+kubectl apply -f ingress-nginx.yaml
+# 检查安装的结果
+[root@k8s-master ~]# kubectl get pod,svc -n ingress-nginx
+NAME                                            READY   STATUS      RESTARTS   AGE
+pod/ingress-nginx-admission-create-pnscj        0/1     Completed   0          63m
+pod/ingress-nginx-admission-patch-mt46m         0/1     Completed   2          63m
+pod/ingress-nginx-controller-65bf56f7fc-5t778   1/1     Running     0          63m
+
+NAME                                         TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+service/ingress-nginx-controller             NodePort    10.99.53.23    <none>        80:31590/TCP,443:31067/TCP   63m
+service/ingress-nginx-controller-admission   ClusterIP   10.99.15.254   <none>        443/TCP                      63m
+```
+
+此时可以**根据上面查到的ip端口访问查看**是否能够成功访问到ingress-nginx内置的nginx服务。比如此时就可以访问`http://fzk-tx.top:31590`。
+
+### 测试
+
+创建两个deploy，并分别创建两个service公开访问，yaml如下：
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-server
+  template:
+    metadata:
+      labels:
+        app: hello-server
+    spec:
+      containers:
+      - name: hello-server
+        image: registry.cn-hangzhou.aliyuncs.com/lfy_k8s_images/hello-server
+        ports:
+        - containerPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx-demo
+  name: nginx-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-demo
+  template:
+    metadata:
+      labels:
+        app: nginx-demo
+    spec:
+      containers:
+      - image: nginx
+        name: nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: nginx-demo
+  name: nginx-demo
+spec:
+  selector:
+    app: nginx-demo
+  ports:
+  - port: 8000
+    protocol: TCP
+    targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: hello-server
+  name: hello-server
+spec:
+  selector:
+    app: hello-server
+  ports:
+  - port: 8000
+    protocol: TCP
+    targetPort: 9000
+```
+
+1、域名访问
+
+这里需要去服务器提供商的域名解析管理将域名解析设置为泛解析*和@解析，这样下面的前缀域名才能有效
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress  
+metadata:
+  name: ingress-host-bar
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: "hello.fzk-tx.top"
+    http:
+      paths:
+      - pathType: Prefix # 前缀匹配
+        path: "/"
+        backend:
+          service:
+            name: hello-server
+            port:
+              number: 8000
+  - host: "demo.fzk-tx.top"
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"  # 把请求会转给下面的服务，下面的服务一定要能处理这个路径，不能处理就是404
+        # path: "/demo" # 这里可以配置匹配前缀
+        backend:
+          service:
+            name: nginx-demo
+            port:
+              number: 8000
+```
+
+如果出现了某个错误`Internal error occurred: failed calling webhook “validate.nginx.ingress.kubernetes.io`，可以参考[这个](https://stackoverflow.com/questions/61616203/nginx-ingress-controller-failed-calling-webhook)
+
+在经过上面这个配置之后，访问hello.fzk-tx.top:31590和demo.fzk-tx.top:31590，会出现不同效果，如下图：
+
+![ingress-nginx1](Kubernetes.assets/ingress-nginx1.png)
+
+2、路劲重写
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress  
+metadata:
+  annotations:   # 这里得加个注解启动高级功能
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+  name: ingress-host-bar
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: "hello.fzk-tx.top"
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/"
+        backend:
+          service:
+            name: hello-server
+            port:
+              number: 8000
+  - host: "demo.fzk-tx.top"
+    http:
+      paths:
+      - pathType: Prefix
+        path: "/demo(/|$)(.*)"  # 这里就是把前缀路劲去掉
+        backend:
+          service:
+            name: nginx-demo 
+            port:
+              number: 8000
+```
+
+此时就需要访问`http://demo.fzk-tx.top:31590/demo`
+
+3、流量限制
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-limit-rate
+  annotations:  # 流量限制要引入这个注解
+    nginx.ingress.kubernetes.io/limit-rps: "1"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: "haha.fzk-tx.top"
+    http:
+      paths:
+      - pathType: Exact  # 精确匹配，这里只匹配跟路劲
+        path: "/"
+        backend:
+          service:
+            name: nginx-demo
+            port:
+              number: 8000
+```
+
+此时可以访问`http://haha.fzk-tx.top:31590/`，然后疯狂刷新，就能看见流控了：
+
+![image-20220329011036734](Kubernetes.assets/image-20220329011036734.png)
