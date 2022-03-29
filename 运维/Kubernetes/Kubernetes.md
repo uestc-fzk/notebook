@@ -941,29 +941,29 @@ kubectl create deployment mynginx3 --image=nginx --replicas=3 # 3份副本pod
 以yaml文件创建，这里要注意apiVersion需要选择`apps/v1`
 
 ```shell
-cat <<EOF | sudo tee pod-mynginx5.yaml
+cat <<EOF | sudo tee deploy-mynginx3.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: mynginx5
-  name: mynginx5
+    app: mynginx3
+  name: mynginx3
 spec:
-  replicas: 5  # 启动5个副本
+  replicas: 3  # 启动3个副本
   selector: # 这里的过滤选择标签 必须 匹配下面的template的标签
     matchLabels:
-      app: mynginx5
+      app: mynginx3
   template:
     metadata:
       labels:
-        app: mynginx5
+        app: mynginx3
     spec:
       containers: # 配置每个pod中的容器列表
       - image: nginx:1.14.2
         name: nginx
 EOF
 
-kubectl apply -f pod-mynginx5.yaml # 部署
+kubectl apply -f deploy-mynginx3.yaml # 部署
 ```
 
 #### 扩缩容
@@ -971,23 +971,23 @@ kubectl apply -f pod-mynginx5.yaml # 部署
 通过kubectl scale命令指定副本数量
 
 ```shell
-kubectl scale --replicas=3 deployment/mynginx5  # 这里缩容为3个副本
+kubectl scale --replicas=3 deployment/mynginx3  # 这里缩容为3个副本
 ```
 
 还可以通过kubectl edit命令修改replica数量实现扩容缩容
 
 ```shell
-kubectl edit deployment mynginx5 # 这命令会返回该的deploy的yaml配置，直接修改即可
+kubectl edit deployment mynginx3 # 这命令会返回该的deploy的yaml配置，直接修改即可
 ```
 
 #### 更新Deploy
 
 ```shell
 # 将deploy中的镜像替换成其它版本的镜像，pod将会杀死一个旧的，启动一个新的image的pod
-kubectl set image deployment/mynginx5 nginx=nginx:1.16.1 --record
+kubectl set image deployment/mynginx3 nginx=nginx:1.16.1 --record
 
 # 也可以直接修改配置资源，这里可以改的就很多了
-kubectl edit deployment/mynginx5
+kubectl edit deployment/mynginx3
 ```
 
 可以在触发一个或多个更新之前暂停 Deployment，然后再恢复其执行。 这样做使得你能够在暂停和恢复执行之间应用多个修补程序，而不会触发不必要的上线操作。
@@ -995,13 +995,13 @@ kubectl edit deployment/mynginx5
 暂停的 Deployment 和未暂停的 Deployment 的唯一区别是，Deployment 处于暂停状态时， PodTemplateSpec 的任何修改都不会触发新的上线。 Deployment 在创建时是默认不会处于暂停状态。
 
 ```shell
-kubectl rollout pause deployment/mynginx5   # 暂停运行：只暂停新容器上线
+kubectl rollout pause deployment/mynginx3   # 暂停运行：只暂停新容器上线
 # 此时进行镜像替换操作以及其他更新操作都不会触发上线
-kubectl set image deploy/mynginx5 nginx=nginx:1.16.1 
-kubectl set resources deploy/mynginx5 -c=nginx --limits=cpu=200m,memory=512Mi
+kubectl set image deploy/mynginx3 nginx=nginx:1.16.1 
+kubectl set resources deploy/mynginx3 -c=nginx --limits=cpu=200m,memory=512Mi
 
 #最终，恢复 Deployment 执行并观察新的 ReplicaSet 的创建过程，其中包含了所应用的所有更新：
-kubectl rollout resume deploy/mynginx5
+kubectl rollout resume deploy/mynginx3
 ```
 
 #### 版本回退
@@ -1010,13 +1010,13 @@ kubectl rollout resume deploy/mynginx5
 
 ```shell
 #历史记录
-kubectl rollout history deploy/mynginx5
+kubectl rollout history deploy/mynginx3
 #查看某个历史详情
-kubectl rollout history deployment/mynginx5 --revision=2
+kubectl rollout history deployment/mynginx3 --revision=2
 #回滚(回到上次)
-kubectl rollout undo deployment/mynginx5
+kubectl rollout undo deployment/mynginx3
 #回滚(回到指定版本)
-kubectl rollout undo deployment/mynginx5 --to-revision=2
+kubectl rollout undo deployment/mynginx3 --to-revision=2
 ```
 
 ### ReplicaSet
@@ -1173,7 +1173,7 @@ Volume的使用也比较简单，在大多数情况下，我们先在Pod上声�
 
 这就要引入service了。
 
-Kubernetes Service 定义了这样一种抽象：逻辑上的一组 Pod，一种可以访问它们的策略 —— 通常称为微服务。 Service 所针对的 Pods 集合通常是通过[选择算符](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/)来确定的。
+Kubernetes Service 定义了这样一种抽象：逻辑上的一组 Pod，一种可以访问它们的策略 —— 通常称为微服务。 Service 所针对的 Pods 集合通常是通过[选择算符](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/)来确定的。 当每个 Service 创建时，会被**分配一个唯一的 IP 地址（也称为 clusterIP）**。 这个 IP 地址与 Service 的生命周期绑定在一起，只要 Service 存在，它就不会改变。 可以配置 Pod 使它与 Service 进行通信，Pod 知道与 Service 通信将被自动地负载均衡到该 Service 中的某些 Pod 上。
 
 Service 在 Kubernetes 中是一个 REST 对象，和 Pod 类似。
 
@@ -1181,19 +1181,18 @@ Service 在 Kubernetes 中是一个 REST 对象，和 Pod 类似。
 apiVersion: v1
 kind: Service
 metadata:
-  name: my-service
+  name: myservice3
 spec:
   type: NodePort  # 默认是clusterIP
   selector:
-    app: MyApp
+    app: mynginx3
   ports:
-      # 默认情况下，为了方便起见，`targetPort` 被设置为与 `port` 字段相同的值。
+      # 默认情况下，为了方便起见，`targetPort` 被设置为与 `port` 字段相同的值
     - port: 80
       targetPort: 80
       # 可选字段
       # 默认情况下，为了方便起见，Kubernetes 控制平面会从某个范围内分配一个端口号（默认：30000-32767）
       nodePort: 30007
-      
 ```
 
 Kubernetes `ServiceTypes` 允许指定你所需要的 Service 类型，默认是 `ClusterIP`。
@@ -1205,5 +1204,5 @@ Kubernetes `ServiceTypes` 允许指定你所需要的 Service 类型，默认是
 - [`LoadBalancer`](https://kubernetes.io/zh/docs/concepts/services-networking/service/#loadbalancer)：使用云提供商的负载均衡器向外部暴露服务。 外部负载均衡器可以将流量路由到自动创建的 `NodePort` 服务和 `ClusterIP` 服务上。
 - [`ExternalName`](https://kubernetes.io/zh/docs/concepts/services-networking/service/#externalname)：通过返回 `CNAME` 和对应值，可以将服务映射到 `externalName` 字段的内容（例如，`foo.bar.example.com`）。 无需创建任何类型代理
 
-备注：看到externalName了
+上面的这些配置会把标签为`app: mynginx3`的一组pod暴露在外网，并映射节点的80端口到pod的80端口，此时可以通过部署有这些pod的节点的公网IP访问到这些pod内的服务。
 
