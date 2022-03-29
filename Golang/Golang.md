@@ -91,7 +91,15 @@ SET GOARCH=amd64
 go build 我的应用.go
 ```
 
+在makefile中就得小心一点的：
 
+```makefile
+go-build-to-linux:  # 交叉编译，GOOS=linux这里必须挨着&&，不能出现空格，否则会把空格也设置为GOOS而报错
+	SET CGO_ENABLED=0 &&\
+	SET GOOS=linux&&\
+	SET GOARCH=amd64&&\
+	go build main.go
+```
 
 # 数据访问
 
