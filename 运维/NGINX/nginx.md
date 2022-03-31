@@ -28,7 +28,7 @@ Nginx 是高性能的 HTTP 和反向代理的服务器，处理高并发能力�
 
 正向代理：如果把局域网外的 Internet 想象成一个巨大的资源库，则局域网中的客户端要访问 Internet，则需要通过代理服务器来访问，这种代理服务就称为正向代理。
 
-![image-20210912101253053](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/image-20210912101253053.png)
+![image-20210912101253053](nginx.assets/image-20210912101253053.png)
 
 **反向代理**
 
@@ -36,17 +36,17 @@ Nginx 是高性能的 HTTP 和反向代理的服务器，处理高并发能力�
 
 **暴露的是代理服务器地址，隐藏了真实服务器** **IP** **地址。**
 
-![image-20210912101524868](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/image-20210912101524868.png)
+![image-20210912101524868](nginx.assets/image-20210912101524868.png)
 
 **负载均衡**
 
 增加服务器数量，将多个请求负载分发到不同服务器，就像刚学到的Redis cluster集群那样呗。
 
-![image-20210912102246401](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/image-20210912102246401.png)
+![image-20210912102246401](nginx.assets/image-20210912102246401.png)
 
 **动静分离**
 
-![image-20210912102530117](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/image-20210912102530117.png)
+![image-20210912102530117](nginx.assets/image-20210912102530117.png)
 
 ## 安装
 
@@ -336,7 +336,7 @@ location = / {
     }
 ```
 
-![image-20210912194017442](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/image-20210912194017442.png)
+![image-20210912194017442](nginx.assets/image-20210912194017442.png)
 
 `return `指令有2个参数：
 
@@ -687,6 +687,8 @@ root指令用于指定文件搜索的根目录，可以放置在HTTP块、server
 
 配置静态内容代理远远没有这么简单，可以去官网看看更多细节。
 
+> 注意：权限问题，我自己测试发现在文件夹的权限为666的时候居然无法访问，日志显示拒绝访问。755的权限可以正常访问。
+
 #### SpringMVC处理
 
 有两种方式，一个是传统的表单文件上传，一个是js将图片转为base64之后发给服务器。
@@ -913,6 +915,6 @@ spring:
 
 根据其官网文档可以发现，它的特性非常多且非常强大。比如内容缓存，安全控制中的禁IP等。
 
-![NGINX文档](https://uestc-fzk.gitee.io/notebook/运维/NGINX/nginx.assets/NGINX文档.png)
+![NGINX文档](nginx.assets/NGINX文档.png)
 
 NGINX是一个功能强大的服务器，不过我目前只用得到其中的反向代理和负载均衡。
