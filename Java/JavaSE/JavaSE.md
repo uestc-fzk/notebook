@@ -40,29 +40,45 @@
 
 ## IDEA安装和激活
 
-安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020
-未验证过，不知是否有效
+安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020 未验证过，不知是否有效
+还有一个更牛逼的激活网站：https://idea.medeming.com 缺点是要关注公众号，不过它的激活码确实是可以用的，非常方便。
 
 更推荐：还有一种是学生身份申请IDEA的免费教育许可证，每年可以申请一次，每次有效期一年，这个虽然麻烦，但是学生账户可以登录使用所有Jetbrains系列产品如GoLand，Pycharm。
 申请地址：https://www.jetbrains.com.cn/community/education/#students
 
+### IDEA全局配置配置
+
+IDEA还需要好好配置一下才能更好用
+
+![IDEA全局配置1](JavaSE.assets/IDEA全局配置1.png)
+
+![IDEA全局配置2](JavaSE.assets/IDEA全局配置2.png)
+
+这个是自动导入依赖：
+
+![IDEA全局配置3](JavaSE.assets/IDEA全局配置3.png)
+
+![IDEA全局配置4](JavaSE.assets/IDEA全局配置4.png)
+
+![IDEA全局配置5](JavaSE.assets/IDEA全局配置5.png)
+
+![IDEA全局配置6](JavaSE.assets/IDEA全局配置6.png)
+
+给Java的class文件设置文件头：超级好用
+
+![IDEA全局配置7](JavaSE.assets/IDEA全局配置7.png)
+
+设置文件的编码为utf8，避免文件出现乱码
+
+![IDEA全局配置8](JavaSE.assets/IDEA全局配置8.png)
+
 ### IDEA配置本地Maven
 
-IDEA中默认有Maven插件，也不是不能用，本地安装Maven后，可以在命令行中敲mvn命令
+IDEA中默认有Maven插件，也不是不能用，本地安装Maven后，可以在命令行中敲mvn命令，注意：这里也必须在全局配置中配置哦！
 
 ![image-20220307175527312](JavaSE.assets/image-20220307175527312.png)
 
 此时就能去删掉系统默认用户目录下的.m2目录了（默认的Maven仓库地址），新建项目如果说又出现了.m2目录，说明IDEA中Maven配置失效了，再像上图这样配置一下。
-
-### IDEA配置
-
-IDEA还需要好好配置一下才能更好用
-
-1、编码配置为UTF8避免出现乱码
-
-![IDEA配置1](JavaSE.assets/IDEA配置1.png)
-
-
 
 # JUC
 
