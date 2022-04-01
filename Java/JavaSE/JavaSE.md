@@ -38,7 +38,7 @@
 
 配置完后保存退出。接下来即可进入IDEA新建Maven项目了
 
-## IDEA安装和激活
+## IDEA安装激活和配置
 
 安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020 未验证过，不知是否有效
 还有一个更牛逼的激活网站：https://idea.medeming.com 缺点是要关注公众号，不过它的激活码确实是可以用的，非常方便。
@@ -72,9 +72,13 @@ IDEA还需要好好配置一下才能更好用
 
 ![IDEA全局配置8](JavaSE.assets/IDEA全局配置8.png)
 
+最后，一定要点击上图中右下角的Apply，然后再点ok，这样设置才会生效噶。
+
 ### IDEA配置本地Maven
 
-IDEA中默认有Maven插件，也不是不能用，本地安装Maven后，可以在命令行中敲mvn命令，注意：这里也必须在全局配置中配置哦！
+IDEA中默认有Maven插件，也不是不能用，但是捏，它不符合国情！它下载的依赖包默认放在`$USER/.m2`目录，就是在C盘里，然后默认的配置从官方源下载依赖库，慢的一批。本地安装Maven后，可以设置maven本地仓库放在D盘啊，还可以配置阿里云镜像加速，还可以在命令行中敲mvn命令。
+
+注意：这里也必须在IDEA的全局配置中配置哦！
 
 ![image-20220307175527312](JavaSE.assets/image-20220307175527312.png)
 
