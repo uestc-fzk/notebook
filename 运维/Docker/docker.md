@@ -316,7 +316,7 @@ docker上安装MySQL其实相比于在物理机上安装很简单很多很多。
 ```shell
 mkdir -m 666 /opt/docker/mysqlDockerDir
 cd /opt/docker/mysqlDockerDir
-mkdir -m 666 data conf.d
+mkdir -m 755 data conf.d
 ```
 
 2、自定义配置文件：顺便开启慢查询日志
@@ -360,7 +360,7 @@ long_query_time = 1
 chmod 664 mymysql.cnf
 ```
 
-> 注意：这个配置文件名字最好别叫mysql.cnf，因为容器启动后会在这个目录下创建一个mysql,cnf文件；
+> 注意：这个配置文件名字最好别叫mysql.cnf，因为容器启动后会在这个目录下创建一个mysql.cnf文件；
 > 然后就是权限这个坑！配置文件只能给mysql用户设置读取权限，即只能为4，否则这个配置文件就会被mysql忽略(太坑了)
 
 3、在dockerfile中配置如下：将conf.d目录下的自定义配置文件复制到镜像相应目录内并创建日志目录
