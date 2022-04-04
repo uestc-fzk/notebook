@@ -1185,7 +1185,7 @@ metadata:
 spec:
   type: NodePort  # 默认是clusterIP
   selector:
-    app: mynginx3
+    app: mynginx3  # 选中此标签的pod
   ports:
       # 默认情况下，为了方便起见，`targetPort` 被设置为与 `port` 字段相同的值
     - port: 80
@@ -1205,26 +1205,6 @@ Kubernetes `ServiceTypes` 允许指定你所需要的 Service 类型，默认是
 - [`ExternalName`](https://kubernetes.io/zh/docs/concepts/services-networking/service/#externalname)：通过返回 `CNAME` 和对应值，可以将服务映射到 `externalName` 字段的内容（例如，`foo.bar.example.com`）。 无需创建任何类型代理
 
 上面的这些配置会把标签为`app: mynginx3`的一组pod暴露在外网，并映射节点的80端口到pod的80端口，此时可以通过部署有这些pod的节点的公网IP访问到这些pod内的服务。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ## Ingress
 
@@ -1449,3 +1429,157 @@ spec:
 此时可以访问`http://haha.fzk-tx.top:31590/`，然后疯狂刷新，就能看见流控了：
 
 ![image-20220329011036734](Kubernetes.assets/image-20220329011036734.png)
+
+## 存储
+
+**背景**
+
+Container 中的文件在磁盘上是临时存放的，这给 Container 中运行的较重要的应用程序带来一些问题。**问题之一是当容器崩溃时文件丢失，kubelet 会重新启动容器，但容器会以干净的状态重启。** 第二个问题会在同一 `Pod` 中运行多个容器并共享文件时出现。 Kubernetes [卷（Volume）](https://kubernetes.io/zh/docs/concepts/storage/volumes/) 这一抽象概念能够解决这两个问题。虽然docker也能挂载卷，但是在kubernetes中，pod崩溃后，新pod可能会换节点部署，那么原容器挂载的卷在新的pod就不可见啦。
+
+卷的核心是一个目录，其中可能存有数据，Pod 中的容器可以访问该目录中的数据。
+
+使用卷时, 在 `.spec.volumes` 字段中设置为 Pod 提供的卷，并在 `.spec.containers[*].volumeMounts` 字段中声明卷在容器中的挂载位置。
+
+卷挂载在镜像中的[指定路径](https://kubernetes.io/zh/docs/concepts/storage/volumes/#using-subpath)下。 Pod 配置中的每个容器必须独立指定各个卷的挂载位置。卷不能挂载到其他卷之上（不过存在一种[使用 subPath](https://kubernetes.io/zh/docs/concepts/storage/volumes/#using-subpath) 的相关机制），也不能与其他卷有硬链接。
+
+kubernetes支持的卷类型非常多，在这里做demo的话可以用nfs或local类型卷。
+
+![image-20220404225141837](Kubernetes.assets/image-20220404225141837.png)
+
+### local卷
+
+`local` 卷所代表的是某个被挂载的本地存储设备，例如磁盘、分区或者目录。
+
+`local` 卷只能用作静态创建的持久卷。尚不支持动态配置。
+
+与 `hostPath` 卷相比，`local` 卷能够以持久和可移植的方式使用，而无需手动将 Pod 调度到节点。系统通过查看 PersistentVolume 的节点亲和性配置，就能了解卷的节点约束。
+
+然而，`local` 卷仍然取决于底层节点的可用性，并不适合所有应用程序。 如果节点变得不健康，那么 `local` 卷也将变得不可被 Pod 访问。使用它的 Pod 将不能运行。 使用 `local` 卷的应用程序必须能够容忍这种可用性的降低，以及因底层磁盘的耐用性特征而带来的潜在的数据丢失风险
+
+
+
+### nfs
+
+`nfs` 卷能将 NFS (网络文件系统) 挂载到你的 Pod 中。 不像 `emptyDir` 那样会在删除 Pod 的同时也会被删除，`nfs` 卷的内容在删除 Pod 时会被保存，卷只是被卸载。 这意味着 `nfs` 卷可以被预先填充数据，并且这些数据可以在 Pod 之间共享。
+
+#### 环境准备
+
+```shell
+#所有机器安装
+yum install -y nfs-utils
+```
+
+主节点
+
+```shell
+#nfs主节点
+echo "/nfs/data/ *(insecure,rw,sync,no_root_squash)" > /etc/exports
+
+mkdir -p /nfs/data  # 创建这个文件夹
+systemctl enable rpcbind --now
+systemctl enable nfs-server --now
+#配置生效
+exportfs -r
+```
+
+接下来就检查一下成功与否
+
+```shell
+[root@k8s-master ~]# exportfs
+/nfs/data     	<world>
+```
+
+从节点
+
+```shell
+showmount -e 主节点ip地址   # 此命令可以在从节点查看主节点哪些目录可以挂载
+# 将目录挂载到主节点的这个nfs目录
+mkdir -p /nfs/data
+mount -t nfs 主节点ip:/nfs/data /nfs/data
+```
+
+![image-20220405001335605](Kubernetes.assets/image-20220405001335605.png)
+
+从此图可以看到，左边的master节点创建的文件，在slave节点能看到，那么nfs文件系统就搭建成功了。
+
+#### 原生方式挂载数据
+
+```yaml
+cat <<EOF | sudo tee deploy-nginx-pv-demo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx-pv-demo
+  name: nginx-pv-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-pv-demo
+  template:
+    metadata:
+      labels:
+        app: nginx-pv-demo
+    spec:
+      containers:
+      - image: nginx
+        name: nginx
+        volumeMounts:
+        - name: html # 名无所谓的
+          mountPath: /usr/share/nginx/html # 将容器内的此目录挂载出去
+      volumes: # 挂载数据卷
+        - name: html # 名得和上面这个一样
+          nfs: # 以nfs方式挂载数据
+            server: 124.223.192.8
+            path: /nfs/data/nginx-pv   # 挂载的节点的此目录
+EOF
+
+# 在主节点执行命令创建容器
+[root@k8s-master data]# kubectl apply -f deploy-nginx-pv-demo.yaml 
+```
+
+此yaml文件将容器内的/usr/share/nginx/html目录挂载到节点的/nfs/data/nginx-pv
+
+直接应用应该是会报错的，原因也很简单：No such file or directory；需要自己提前创建好挂载的目录才行`mkdir -p /nfs/data/nginx-pv`；创建好之后，再去dashboard看就部署成功了。
+
+测试一下：
+
+```shell
+# 在这个挂载的目录下搞一个index.html页面
+cd /nfs/data/nginx-pv
+echo "hello nfs" >> index.html
+
+# 为了外部访问，桥接一个service
+cat <<EOF | sudo tee deploy-nginx-pv-demo-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-pv-demo-service
+spec:
+  type: NodePort  # 默认是clusterIP
+  selector:
+    app: nginx-pv-demo  # 选中此标签的pod
+  ports:
+      # 默认情况下，为了方便起见，`targetPort` 被设置为与 `port` 字段相同的值
+      - port: 80
+        targetPort: 80
+        # 可选字段
+        # 默认情况下，为了方便起见，Kubernetes 控制平面会从某个范围内分配一个端口号（默认：30000-32767）
+        nodePort: 30008
+EOF
+
+kubectl apply -f deploy-nginx-pv-demo-service.yaml
+```
+
+部署成功的话，就能直接访问测试了，可以看到完全没得问题
+
+```shell
+[root@k8s-master data]# curl fzk-tx.top:30008   # nodePort方式得从外网ip访问
+hello nfs
+```
+
+此时如果用kubectl命令将部署的这个deployment删除的话，其挂载的目录/nfs/data/nginx-pv还是会存在，并不受影响。所以在pod出现问题后，kubernetes重启pod，一切就都恢复正常。
+
+### 持久卷
+
