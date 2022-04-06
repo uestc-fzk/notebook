@@ -1442,7 +1442,7 @@ Container 中的文件在磁盘上是临时存放的，这给 Container 中运�
 
 卷挂载在镜像中的[指定路径](https://kubernetes.io/zh/docs/concepts/storage/volumes/#using-subpath)下。 Pod 配置中的每个容器必须独立指定各个卷的挂载位置。卷不能挂载到其他卷之上（不过存在一种[使用 subPath](https://kubernetes.io/zh/docs/concepts/storage/volumes/#using-subpath) 的相关机制），也不能与其他卷有硬链接。
 
-kubernetes支持的卷类型非常多，在这里做demo的话可以用nfs或local类型卷。
+kubernetes支持的**卷类型**非常多，在这里做demo的话可以用**nfs**或local类型卷。
 
 ![image-20220404225141837](Kubernetes.assets/image-20220404225141837.png)
 
@@ -1575,11 +1575,332 @@ kubectl apply -f deploy-nginx-pv-demo-service.yaml
 部署成功的话，就能直接访问测试了，可以看到完全没得问题
 
 ```shell
-[root@k8s-master data]# curl fzk-tx.top:30008   # nodePort方式得从外网ip访问
+# nodePort方式得从外网ip访问
+[root@k8s-master data]# curl fzk-tx.top:30008
 hello nfs
 ```
 
 此时如果用kubectl命令将部署的这个deployment删除的话，其挂载的目录/nfs/data/nginx-pv还是会存在，并不受影响。所以在pod出现问题后，kubernetes重启pod，一切就都恢复正常。
 
 ### 持久卷
+
+#### 概述
+
+PersistentVolume 子系统为用户 和管理员提供了一组 API，将存储如何供应的细节从其如何被使用中抽象出来。引入两个新概念：
+
+PV：持久卷(Persistent Volume)，将应用需要持久化的数据保存到指定位置。
+PVC：持久卷申领(Persistent Volume Claim)，申明需要使用的持久卷规格。
+PV 卷是集群中的资源。PVC 申领是对这些资源的请求。
+
+**PV卷的供应有两种方式：**
+
+1、静态供应：集群管理员提前创建好若干PV卷，之后PVC申请只能从这些分配好大小的块中选合适的。
+
+![image-20220406232653075](Kubernetes.assets/image-20220406232653075.png)
+
+2、动态供应：如果事先创建的静态PV卷无法满足用户的PVC匹配，集群可以尝试为它动态供应一个存储卷。
+
+**绑定**
+
+创建的PVC对象会寻找与之匹配的PV卷，并将两者绑定到一起。绑定具有**排他性**，实现上使用 ClaimRef 来记述 PV 卷 与 PVC 申领间的双向绑定关系。
+
+如果找不到匹配的PV卷，PVC申领会无限期处于未绑定状态，直至匹配的PV卷出现。
+
+**pod使用PVC**
+
+Pod将PVC申领当做存储卷使用，找到PVC绑定的卷，并将其挂载到pod。
+
+**持久卷的类型**
+
+PV持久卷是用插件的形式实现的。kubernetes支持的插件比较多，下面做的demo以[nfs](https://kubernetes.io/zh/docs/concepts/storage/volumes/#nfs) 作为存储卷类型。
+
+#### 持久卷PV配置
+
+每个 PV 对象都包含 `spec` 部分和 `status` 部分，分别对应卷的规约和状态。示例：
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv01-10m
+spec:
+  capacity:
+    storage: 10Mi # 设置卷容量,常用的单位有Ki,Mi,Gi等
+  accessModes: # 访问模式
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Recycle # 回收策略
+  storageClassName: nfs # 类
+  nfs:
+    path: /nfs/data/01 # nfs目录
+    server: 124.223.192.8 # nfs主节点IP
+```
+
+**容量**
+
+`spec.capacity.storage`属性，可以接受的10进制单位有m(milli),k(小写),M,G，如1G=10<sup>3</sup>M=10<sup>6</sup>k=10<sup>9</sup>m。公认的二进制单位有Ki,Mi,Gi，如1Gi=2<sup>10</sup>Mi=2<sup>20</sup>Ki。
+
+**访问模式**
+
+`spec.accessModes`属性。
+
+- `ReadWriteOnce`
+
+  卷可以被一个节点以读写方式挂载。
+
+- `ReadOnlyMany`
+
+  卷可以被多个节点以只读方式挂载。
+
+- `ReadWriteMany`
+
+  卷可以被多个节点以读写方式挂载。
+
+- `ReadWriteOncePod`
+
+  卷可以被单个 Pod 以读写方式挂载。 如果你想确保整个集群中只有一个 Pod 可以读取或写入该 PVC， 请使用ReadWriteOncePod 访问模式。这只支持 CSI 卷以及需要 Kubernetes 1.22 以上版本。
+
+> **重要提醒！** 每个卷同一时刻只能以一种访问模式挂载，即使该卷能够支持 多种访问模式。
+
+还有一点需要注意，不同存储卷插件支持的访问模式是不同的。如NFS只支持前三种，更多支持情况需要看[文档](https://kubernetes.io/zh/docs/concepts/storage/persistent-volumes/#persistent-volumes)。
+
+**类**
+
+ `spec.storageClassName` 属性。每个 PV 可以属于某个类（Class），特定类的 PV 卷只能绑定到请求该类存储卷的 PVC 申领。 未设置 `storageClassName` 的 PV 卷没有类设定，只能绑定到那些没有指定特定存储类的 PVC 申领。
+
+**回收策略**
+
+目前的回收策略有：
+
+- Retain -- 手动回收(默认)
+- Recycle -- 基本擦除 (`rm -rf /thevolume/*`)
+- Delete -- 诸如 AWS EBS、GCE PD、Azure Disk 或 OpenStack Cinder 卷这类关联存储资产也被删除
+
+目前，仅 NFS 和 HostPath 支持回收（Recycle）。 AWS EBS、GCE PD、Azure Disk 和 Cinder 卷都支持删除（Delete）。更多细节：https://kubernetes.io/zh/docs/concepts/storage/persistent-volumes/#reclaiming
+
+#### PVC配置
+
+每个 PVC 对象都有 `spec` 和 `status` 部分，分别对应申领的规约和状态。示例：
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests: # 请求需要200M空间
+      storage: 200Mi
+  storageClassName: nfs # 这个类将会与PV的类为nfs的进行匹配绑定
+  selector: # 选择算符
+    matchLabels:
+      release: "stable"
+    matchExpressions:
+      - {key: environment, operator: In, values: [dev]}
+```
+
+**访问模式**
+
+`spec.accessModes`，同PV访问模式。
+
+**资源**
+
+`spec.resources.requests.storage`字段请求存储空间资源。单位同PV处的描述。
+
+**选择算符**
+
+PVC还能根据选择算符过滤PV，选择合适的PV卷。
+
+**类**
+
+`spec.storageClassName`属性，PVC可以指定类名， `storageClassName` 值与 PVC 设置相同的 PV 卷， 才能绑定到 PVC 申领。如果没有设置，即为`""`，则被视为要请求的是没有设置存储类的 PV 卷。
+
+#### 创建静态PV池
+
+在nfs主节点创建下面几个目录：
+
+```shell
+#nfs主节点
+mkdir -p /nfs/data/01
+mkdir -p /nfs/data/02
+mkdir -p /nfs/data/03
+```
+
+然后创建yaml文件
+
+```shell
+cat <<EOF | sudo tee pv.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv01-10m
+spec:
+  capacity:
+    storage: 10Mi # 设置卷容量,常用的单位有Ki,Mi,Gi等
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  nfs:
+    path: /nfs/data/01 # nfs目录
+    server: 124.223.192.8 # nfs主节点IP
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv02-1gi
+spec:
+  capacity: 
+    storage: 1Gi # 设置卷容量,常用的单位有Ki,Mi,Gi等
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  nfs:
+    path: /nfs/data/02
+    server: 124.223.192.8 # nfs主节点IP
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv03-3gi
+spec:
+  capacity:
+    storage: 3Gi # 设置卷容量,常用的单位有Ki,Mi,Gi等
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  nfs:
+    path: /nfs/data/03
+    server: 124.223.192.8    # nfs主节点IP
+EOF
+
+# 应用一下
+kubectl apply -f pv.yaml
+# 没有错误的话就查看效果如下
+[root@k8s-master data]# kubectl get pv
+NAME       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
+pv01-10m   10M        RWX            Retain           Available           nfs                     48s
+pv02-1gi   1Gi        RWX            Retain           Available           nfs                     48s
+pv03-3gi   3Gi        RWX            Retain           Available           nfs                     48s
+
+```
+
+#### PVC创建与绑定
+
+1、PVC创建
+
+```shell
+cat <<EOF | sudo tee pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests: # 请求需要200M空间
+      storage: 200Mi
+  storageClassName: nfs # 这个类需要与PV的类相同
+EOF
+```
+
+申请一下呢
+
+![PV1](Kubernetes.assets/PV1.png)
+
+从上图可以看到，申请的200M第一个pv不能满足，所以选择绑定最合适的第2个1GB容量的pv。
+
+查看pvc：
+
+```shell
+[root@k8s-master data]# kubectl get pvc
+NAME        STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+nginx-pvc   Bound    pv02-1gi   1Gi        RWX            nfs            5m3s
+```
+
+#### 使用PVC作为卷
+
+Pod 将PVC作为卷来使用，并藉此访问存储资源。 PVC和pod必须在同一namespace。找到PVC之后，其绑定的PV卷会被挂载到宿主上并挂载到 Pod 中。
+
+```shell
+cat <<EOF | sudo tee nginx-pvc.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx-deploy-pvc
+  name: nginx-deploy-pvc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-deploy-pvc
+  template:
+    metadata:
+      labels:
+        app: nginx-deploy-pvc
+    spec:
+      containers:
+      - image: nginx
+        name: nginx
+        volumeMounts:
+        - name: html # 名字无所谓
+          mountPath: /usr/share/nginx/html # 将此目录挂载出去
+      volumes:
+        - name: html # 这个名得和上面匹配
+          persistentVolumeClaim: # 挂载到这个PVC上
+            claimName: nginx-pvc # 这里的名称得和上面PVC的名称一样
+EOF
+
+# 应用一下
+kubectl apply -f nginx-pvc.yaml
+```
+
+这样，就把nginx的/usr/share/nginx/html目录挂载到名称为nginx-pvc的PVC了，即它所申请的PV，即/nfs/data/02目录。
+
+测试一下：
+
+```shell
+# 在这个挂载的目录下搞一个index.html页面
+cd /nfs/data/02
+echo "hello this is pvc for index.html" >> index.html
+
+# 为了外部访问，桥接一个service
+cat <<EOF | sudo tee nginx-pvc-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-deploy-pvc-service
+spec:
+  type: NodePort  # 默认是clusterIP
+  selector:
+    app: nginx-deploy-pvc  # 选中此标签的pod
+  ports:
+      # 默认情况下，为了方便起见，`targetPort` 被设置为与 `port` 字段相同的值
+      - port: 80
+        targetPort: 80
+        # 可选字段
+        # 默认情况下，为了方便起见，Kubernetes 控制平面会从某个范围内分配一个端口号（默认：30000-32767）
+        nodePort: 30009
+EOF
+
+kubectl apply -f nginx-pvc-service.yaml
+```
+
+部署成功的话，就能直接访问测试了，可以看到完全没得问题
+
+```shell
+[root@k8s-master 02]# kubectl get service
+NAME                       TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE
+hello-server               ClusterIP   10.111.39.94   <none>        8000/TCP       8d
+kubernetes                 ClusterIP   10.96.0.1      <none>        443/TCP        16d
+nginx-demo                 ClusterIP   10.101.165.9   <none>        8000/TCP       8d
+nginx-deploy-pvc-service   NodePort    10.103.36.77   <none>        80:30009/TCP   9s
+# nodePort 方式得从外网IP访问
+[root@k8s-master 02]# curl fzk-tx.top:30009
+hello this is pvc for index.html
+```
+
+## ConfigMap
 
