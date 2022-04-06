@@ -918,3 +918,115 @@ spring:
 ![NGINX文档](nginx.assets/NGINX文档.png)
 
 NGINX是一个功能强大的服务器，不过我目前只用得到其中的反向代理和负载均衡。
+
+# nginx常用配置
+
+## 跳转到@域名
+
+从阿里云copy的解释如下：
+
+> 主机记录就是域名前缀，常见用法有：
+>
+> **www：**解析后的域名为www.aliyun.com。
+>
+> **@：**直接解析主域名 aliyun.com。
+>
+> ***：**泛解析，匹配其他所有域名 *.aliyun.com。
+>
+> **mail：**将域名解析为mail.aliyun.com，通常用于解析邮箱服务器。
+>
+> **二级域名：**如：abc.aliyun.com，填写abc。
+>
+> **手机网站：**如：m.aliyun.com，填写m。
+>
+> **显性URL：**不支持泛解析（泛解析：将所有子域名解析到同一地址
+
+监听的80端口配置如下
+
+```nginx
+# 配置任何域名都跳转到@域名
+server {
+	listen       80;
+	listen       [::]:80; # 这里表示监听任何域名的80端口，即作为监听80的默认服务器
+    server_name  _; # 这里必须得是"_"
+    root         /usr/share/nginx/html;
+
+    # Load configuration files for the default server block.
+    include /etc/nginx/default.d/*.conf;
+        
+    error_page 404 /404.html;
+    	location = /404.html {
+    }
+
+    error_page 500 502 503 504 /50x.html;
+     	location = /50x.html {
+    }
+
+    return 301 $scheme://fzk-tx.top$request_uri; #将所有HTTP请求通过rewrite指令重定向到HTTP
+}
+```
+
+监听的443端口配置如下
+
+```nginx
+# 配置HTTPS的server，以及反向代理
+server{
+    listen 443 ssl; # 配置https默认端口443
+    listen       [::]:443 ssl http2 default_server;
+    server_name  _;
+    if ($host != "fzk-tx.top"){
+        rewrite ^(.*) https://fzk-tx.top$1;  # 将*域都转到@域
+    }
+    root         /usr/share/nginx/html;
+
+    index index.html index.htm;
+    # 下面的是ssl配置，需要有ssl证书哦
+    ssl_certificate cert/fzk-tx.top_bundle.crt;  #需要将cert-file-name.pem替换成已上传的证书文件的名称。
+    ssl_certificate_key cert/fzk-tx.top.key; #需要将cert-file-name.key替换成已上传的证书密钥文件的名称。
+    ssl_session_timeout 5m;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE:ECDH:AES:HIGH:!NULL:!aNULL:!MD5:!ADH:!RC4; #表示使用的加密套件的类型。
+    ssl_protocols TLSv1.2 TLSv1.3; #表示使用的TLS协议的类型。
+    ssl_prefer_server_ciphers on;
+
+    # Load configuration files for the default server block.
+    include /etc/nginx/default.d/*.conf;
+
+    error_page 404 /404.html;
+        location = /40x.html {
+    }
+    error_page 500 502 503 504 /50x.html;
+        location = /50x.html {
+    }
+}
+```
+
+举一反三，那么从@域名跳转到www域名如下：
+
+```nginx
+server {
+	listen 80;
+ 	server_name fzk-tx.top;
+ 	return 301 $scheme://www.fzk-tx.top$request_uri;
+}
+```
+
+## HTTP跳转到HTTPS
+
+```nginx
+# 配置HTTP跳转至HTTPS
+server{
+    listen 80;
+    server_name fzk-tx.top;
+
+    rewrite ^(.*)$ https://$host$1; #将所有HTTP请求通过rewrite指令重定向到HTTPS
+}
+```
+
+## 整站301跳转
+
+```nginx
+server {
+ 	server_name old-site.com
+ 	return 301 $scheme://new-site.com$request_uri;
+}
+```
