@@ -103,7 +103,7 @@ go-build-to-linux:  # 交叉编译，GOOS=linux这里必须挨着&&，不能出�
 
 # 数据访问
 
-目前数据访问部门将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
+目前数据访问部分将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
 
 ## 连接Postgresql
 
@@ -174,6 +174,437 @@ func GetUsers(engine *xorm.Engine) (*[]*User, error) {
 ```
 
 > 注意：Postgresql和MySQL不同的是，在查询表的时候，需要在限定其schema，默认是public，比如查询所有就是`SELECT * FROM public.user`，在Postgresql中用双引号默认使用public的schema，如`SELECT * FROM "user"`也是可以的，在打开XORM的SQL输出的时候，看到的SQL就是这样用双引号来查询的
+
+## xorm时间类型转换失败
+
+背景：在xorm的低版本如v1.0.5中，查询数据库，如果以一个entity实体结构对应接受，是没有用问题的。但是，如果是像下面这种查询单个字段并只返回单条结果的情况下，并且用的是一个结构体去接受如time.Time就会有一定问题。
+
+接下来以一个简单是例子说明：
+
+```sql
+-- 创建一个user表
+CREATE TABLE t_user(
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `username` varchar(80) NULL,
+  `update_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+);
+```
+
+对应实体结构User如下：
+
+```go
+type User struct {
+	Id         int64    `json:"id" xorm:"pk"`
+	Username   string   `json:"username"`
+	UpdateTime NullTime `json:"updateTime"`
+}
+// TableName 返回表名
+func (user *User) TableName() string {
+	return "t_user"
+}
+```
+
+在这里出现了一个NullTime结构去作为更新时间字段的类型，这个是自定义类型：
+
+```go
+// NullTime is an alias for data type
+type NullTime time.Time
+
+// MarshalJSON for Time
+func (t *NullTime) MarshalJSON() ([]byte, error) {
+	if time.Time(*t).IsZero() {
+		return []byte(`null`), nil
+	}
+	return []byte(`"` + time.Time(*t).Format("2006-01-02 15:04:05") + `"`), nil
+}
+
+// UnmarshalJSON for NullTime
+func (t *NullTime) UnmarshalJSON(b []byte) error {
+	return json.Unmarshal(b, &t)
+}
+
+// CurrentTime Now for current time
+func CurrentTime() NullTime {
+	return NullTime(time.Now())
+}
+```
+
+为什么这里要用个NullTime作为time.Time的别名呢？这样可以给NullTime类型增加两个marshal方法，有利于直接返给前端正确的格式如`2006-01-02 15:04:05`。
+
+连接上数据库：
+
+```go
+	engine, err := xorm.NewEngine("mysql", "root:密码@/数据库名?charset=utf8")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer engine.Close()
+	engine.ShowSQL(true)	// 打开SQL日志
+	engine.SetColumnMapper(names.GonicMapper{})  // 字段名称映射规则
+	err = engine.Ping()
+	if err != nil {
+		log.Fatalln(err)
+	}
+```
+
+### 时间结构赋值的问题
+
+假设一个需求，只需要查询出数据库中最新的一个时间记录：确保此时是xorm的版本v1.0.5
+
+```go
+	var lastUpdateTime entity.NullTime
+	has, err := engine.SQL("SELECT MAX(update_time) FROM " + (&entity.User{}).TableName()).Get(&lastUpdateTime)
+	if has {
+		json, err := lastUpdateTime.MarshalJSON()
+		if err != nil {
+			return
+		}
+		fmt.Println(has, err, string(json))
+	}
+```
+
+这里就是只需要查出一个字段、一条结果，并用了一个自定义结构体NullTime去接受，然后就能看见报错了：
+
+![image-20220408144219405](Golang.assets/image-20220408144219405.png)
+
+把错误复制到xorm的gitea一查，就能找到相应的问题描述：https://gitea.com/xorm/xorm/issues/1302
+
+在这里也可以把这个NullTime类型改回time.Time类型，依旧报错，可以看到此时版本的xorm居然连time.Time类型也不支持嘛。
+
+### 问题解决方式
+
+经过自己的测试和gitea上问题描述开发者给出的答复，有三个解决方式：
+
+1、用User这个entity结构去接受，最后返回里面的update_time
+
+```go
+// 方式1：用entity结构体User接受，但是有点挫
+func getLastUpdateTime1(engine *xorm.Engine) (*entity.NullTime, error) {
+	var user entity.User
+    // 这里要用到别名
+	has, err := engine.SQL("SELECT MAX(update_time) as update_time FROM " + (&entity.User{}).TableName()).Get(&user)
+	if has {
+		return &user.UpdateTime, nil
+	}
+	return nil, err
+}
+```
+
+2、升级版本到当前最新版v1.2.5之后，支持了对time.Time的转换
+
+```go
+// 方式2：用time.Time，再强转；需要升级xorm版本至v1.2.5
+func getLastUpdateTime2(engine *xorm.Engine) (*entity.NullTime, error) {
+	var lastUpdateTime time.Time
+	has, err := engine.SQL("SELECT MAX(update_time) FROM " + (&entity.User{}).TableName()).Get(&lastUpdateTime)
+	if has {
+		var result = entity.NullTime(lastUpdateTime)
+		return &result, nil
+	}
+	return nil, err
+}
+```
+
+3、升级版本到当前最新版v1.2.5之后，自定义类型转换器：convert.Conversion
+
+对于需要自定义类型转换的结构体，需要实现convert.Conversion接口的两个方法
+
+```go
+package convert
+
+// Conversion is an interface. A type implements Conversion will according
+// the custom method to fill into database and retrieve from database.
+type Conversion interface {
+   FromDB([]byte) error
+   ToDB() ([]byte, error)
+}
+```
+
+NullTime具体实现如下：
+
+```go
+// FromDB 从数据库数据形式转回结构体
+func (t *NullTime) FromDB(b []byte) error {
+	parseTime, err := time.Parse("2006-01-02 15:04:05", string(b))
+	if err != nil {
+		return err
+	}
+	nullTime := NullTime(parseTime)
+	*t = nullTime // 将解析后的时间设置到此自定义结构中
+	return nil
+}
+
+// ToDB 转换为数据库数据形式
+func (t *NullTime) ToDB() ([]byte, error) {
+	return []byte(`"` + time.Time(*t).Format("2006-01-02 15:04:05") + `"`), nil
+}
+```
+
+这样就可以直接用这个NullTime类型接受返回的值了：
+
+```go
+// 方式3：自定义类型转换器；需要升级xorm版本至当前最新版v1.2.5
+func getLastUpdateTime3(engine *xorm.Engine) (*entity.NullTime, error) {
+	var lastUpdateTime entity.NullTime
+	has, err := engine.SQL("SELECT MAX(update_time) FROM " + (&entity.User{}).TableName()).Get(&lastUpdateTime)
+	if has {
+		return &lastUpdateTime, nil
+	}
+	return nil, err
+}
+```
+
+这样就没得问题了。
+
+### v1.0.5版本问题定位
+
+还是得去找找问题怎么出现的。先将版本退回v1.0.5，开始debug。
+
+在v1.0.5版本，以没有实现convert.Conversion接口的NullTime类型直接去接受值`engine.SQL("SELECT MAX(update_time) FROM " + (&entity.User{}).TableName()).Get(&lastUpdateTime)`，debug最后的Get方法：
+
+```go
+func (session *Session) get(bean interface{}) (bool, error) {
+    // 省略一些代码
+    
+    // 这里走的是解析结构体的方式进行赋值：
+    // 那必然有问题啊，time.Time作为一个结构体，把sql查询的数据当做time.Time中的某个字段进行解析，肯定找不到啊
+    if beanValue.Elem().Kind() == reflect.Struct {
+		if err := session.statement.SetRefBean(bean); err != nil {
+			return false, err
+		}
+	}
+    
+    // 省略一些代码
+}
+
+// Parse parses a struct as a table information
+func (parser *Parser) Parse(v reflect.Value) (*schemas.Table, error) {
+    // 省略很多代码
+    
+    
+    var sqlType schemas.SQLType
+    if fieldValue.CanAddr() {
+        // 最开始出现错误的地方在这里
+        if _, ok := fieldValue.Addr().Interface().(convert.Conversion); ok {
+            sqlType = schemas.SQLType{Name: schemas.Text}
+       }
+    }
+    
+    // 省略很多代码
+}
+```
+
+因为这个fieldValue是NullTime类型即time.Time类型的第一个字段：
+
+```go
+type Time struct {
+	wall uint64
+	ext  int64
+	loc *Location
+}
+```
+
+出现的错误是：panic: reflect.Value.Interface: cannot return value obtained from unexported field or method
+
+当点击进入Interface()方法查看：
+
+```go
+// Interface returns v's current value as an interface{}.
+// It is equivalent to:
+//	var i interface{} = (v's underlying value)
+// It panics if the Value was obtained by accessing
+// unexported struct fields. 这里的意思是：如果该值是通过访问未报告的struct字段获得的，它就会崩溃
+func (v Value) Interface() (i interface{}) {
+	return valueInterface(v, true)
+}
+```
+
+总结：在将数据库数据查询出来之后，解析赋值给NullTime结构体时，Get方法直接根据它结构体这一类型，对其内部的字段进行遍历获取，然后解析，意图将数据解析到其内部的字段中，然后就发生了错误。
+
+疑惑：在上面的例子中，可以知道在v1.2.5版本时，这个问题依旧没有解决，但是已经可以支持直接解析time.Time类型了，那么这个新版本又做了些什么呢？
+
+### v1.2.5版本更改：引入自定义转换器
+
+在v1.2.5版本中，直接以time.Time接受单条且单个字段返回且是时间类型是可以的，其它的自定义结构体如果也要接受单条且单个字段数据返回需要自定义转换器进行操作。
+
+还是一样的debug它的Get方法：
+
+```go
+func (session *Session) get(bean interface{}) (bool, error) {
+    // 省略一些代码
+    
+    // 就是把这里的判断加了判断是否为时间time.Time类型，那么这样一改，就不会走这里了
+    if beanValue.Elem().Kind() == reflect.Struct && !isPtrOfTime(bean) {
+        if err := session.statement.SetRefBean(bean); err != nil {
+            return false, err
+        }
+    }
+    // 省略一些代码
+    
+    // 现在走的是这里
+    has, err := session.nocacheGet(beanValue.Elem().Kind(), table, bean, sqlStr, args...)
+    // 省略一些代码
+}
+```
+
+进入此方法内：
+
+```go
+func (session *Session) nocacheGet(beanKind reflect.Kind, table *schemas.Table, bean interface{}, sqlStr string, args ...interface{}) (bool, error) {
+	// 省略一些代码
+    
+	switch beanKind {
+	case reflect.Struct:	// 是结构体，走的这里
+        // 这个判断是否可扫描到结构体的方法很重要
+		if !isScannableStruct(bean, len(types)) {
+			break
+		}
+		return session.getStruct(rows, types, fields, table, bean) // 这里是按照常规方式解析数据到结构体中：即字段映射
+	case reflect.Slice:
+		return session.getSlice(rows, types, fields, bean)
+	case reflect.Map:
+		return session.getMap(rows, types, fields, bean)
+	}
+	// 咱们这个情况走的是这里，即将查询到的数据作为一个值直接赋给bean（可能是string、int等基本类型，或者是time.Time，或者自定义了转换器的struct）
+	return session.getVars(rows, types, fields, bean)
+}
+
+// 判断是否可以将数据扫描到结构体中
+// false：结构体为time.Time、sql.Scanner、big.Float的情况下返回false，在自定义了转换器且返回数据只有一条的时候也返回false
+// true：自定义了转换器，但是返回数据有多条，或者是其他一般结构体返回true
+func isScannableStruct(bean interface{}, typeLen int) bool {
+	switch bean.(type) {
+	case *time.Time:
+		return false
+	case sql.Scanner:
+		return false
+	case convert.Conversion: // 当在自定义了转换器，且返回数据超过1条的时候返回true
+		return typeLen > 1
+	case *big.Float:
+		return false
+	}
+	return true	// 其他情况都返回true
+}
+```
+
+那么看看它又是如何处理这种非结构体接受，或者是特殊的结构体接受数据的情况的：
+
+```go
+func (session *Session) getVars(rows *core.Rows, types []*sql.ColumnType, fields []string, beans ...interface{}) (bool, error) {
+	if len(beans) != len(types) {
+		return false, fmt.Errorf("expected columns %d, but only %d variables", len(types), len(beans))
+	}
+
+	err := session.engine.scan(rows, fields, types, beans...)
+	return true, err
+}
+```
+
+它最终来跑到convert包的Assign方法处：
+
+```go
+// Assign copies to dest the value in src, converting it if possible.
+// src 是数据库查到的数据，dest是要存放数据的地方。 dest 得是指针类型.
+func Assign(dest, src interface{}, originalLocation *time.Location, convertedLocation *time.Location) error {
+    // 1.先判断src的类型，即数据库查到返回的数据类型
+	switch s := src.(type) {
+	case *interface{}:
+		return Assign(dest, *s, originalLocation, convertedLocation)
+	case string:
+		// 省略 ：这里是直接转换给dest
+	case []byte:
+		// 省略：这里和string类型处理逻辑差不多
+	case time.Time:
+		// 省略：这里是转换为string类型给dest
+	case nil:
+		// 省略：dest赋值为nil
+	case *sql.NullString:
+		// 省略：比string处理逻辑多一些
+	case *sql.NullInt32:
+		// 省略：能转换为int类型的dest
+	case *sql.NullInt64:
+		// 省略：和上面这个差不多
+	case *sql.NullFloat64:
+		// 省略：和上面这个差不多
+	case *sql.NullBool:
+		// 省略：和上面这个差不多
+	case *sql.NullTime:
+		// 省略：能转换为time.Time或者string类型的dest
+	case *NullUint32:
+		// 省略：和int这个差不多
+	case *NullUint64:
+		// 省略：和上面这个差不多
+        
+    // 重点在这里：这个sql.RawBytes就是[]byte的别名
+    // 咱这情况走的是这里：
+	case *sql.RawBytes:
+        // 1.1 先判断dest是否实现了自定义转换器，即实现convert.Conversion接口
+		switch d := dest.(type) {
+		case Conversion:
+			return d.FromDB(*s)  // 这个方法看着就眼熟，这就是自定义的解析方法
+		}
+	}
+
+    // 2.如果scr类型均不满足，则从dest类型判断采取解析措施
+	var sv reflect.Value
+
+	switch d := dest.(type) {
+	case *string: // 省略
+	case *[]byte: // 省略
+	case *bool: // 省略
+	case *interface{}: // 省略
+	}
+	// 3.最后的尝试
+	return AssignValue(reflect.ValueOf(dest), src)
+}
+```
+
+总结：在v1.2.5的版本下，增加了对结构体类型time.Time的特殊处理，同时对自定义类型如上面自己定义的那个NullTime也支持了自定义转换器。现在xorm解析查询结果的逻辑就是：如果接受者是个结构体，则先判断是否为time.Time类型，再判断是否有自定义转换器，都不是的情况下，再调用通用的字段映射处理方式进行解析。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

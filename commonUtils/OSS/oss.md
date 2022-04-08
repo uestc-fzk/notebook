@@ -11,7 +11,7 @@ AWS SDK for Go：https://docs.aws.amazon.com/zh_cn/sdk-for-go/?id=docs_gateway
 
 这个可以在阿里云文档了解，这里仅仅对其文档进行一些重要的点进行copy，更多细节还是要看阿里云文档。
 
-阿里云对象存储OSS（Object Storage Service）是一款海量、安全、低成本、高可靠的**云存储服务**，可提供99.9999999999%（12个9）的数据持久性，99.995%的数据可用性。多种存储类型供选择，全面优化存储成本。
+阿里云对象存储OSS（Object Storage Service）是一款海量、安全、低成本、高可靠的**分布式对象云存储服务**，可提供99.9999999999%（12个9）的数据持久性，99.995%的数据可用性。多种存储类型供选择，全面优化存储成本。
 
 您可以使用阿里云提供的API、SDK接口或者OSS迁移工具轻松地将海量数据移入或移出阿里云OSS。数据存储到阿里云OSS以后，您可以选择**标准存储（Standard）**作为移动应用、大型网站、图片分享或热点音视频的主要存储方式，也可以选择成本更低、存储期限更长的**低频访问存储（Infrequent Access）**、**归档存储（Archive）**、**冷归档存储（Cold Archive）**作为不经常访问数据的存储方式。
 
@@ -53,7 +53,7 @@ AWS SDK for Go：https://docs.aws.amazon.com/zh_cn/sdk-for-go/?id=docs_gateway
 
 ### 3.对象/文件Object
 
-对象（Object）是OSS存储数据的基本单元，也被称为OSS的文件。和传统的文件系统不同，OSS内部使用扁平结构存储数据，**Object没有文件目录层级结构的关系**，所有对象均以
+对象（Object）是OSS存储数据的基本单元，也被称为OSS的文件。和传统的文件系统不同，OSS内部使用扁平结构存储数据，**Object没有文件目录层级结构的关系**
 
 **三种类型**：
 
@@ -69,4 +69,216 @@ AWS SDK for Go：https://docs.aws.amazon.com/zh_cn/sdk-for-go/?id=docs_gateway
 
 - Object Meta：Object元信息，一组键值对
 
-虽然说，OSS中没有目录这个概念，但是为方便您对Object进行分组并简化权限管理，您可以创建目录，然后将目标文件存放至指定目录。**OSS将以`/`结尾的Object视作目录**。
+虽然说，OSS中没有目录这个概念，但是为方便您对Object进行分组并简化权限管理，您可以创建目录，然后将目标文件存放至指定目录。
+
+**OSS将以`/`结尾的Object视作目录**。
+
+在各语言SDK中，ObjectKey、Key以及ObjectName是同一概念，均表示对Object执行相关操作时需要填写的Object名称。ObjectKey表示上传的Object所在存储空间的**完整名称**，即包含文件后缀在内的完整路径，如填写为abc/efg/123.jpg。
+
+## OSS与自建存储优劣
+
+为什么要花钱去买OSS服务，明明自己也可以建立存储服务啊？
+
+在阿里云给出的对比中，可以知道阿里云OSS服务在持久性、安全性、成本上都有明显优势，而且提供多种增值服务如图片处理、视频处理、人脸识别等。关键是方便、安全。
+
+应用场景：图片和音视频海量存储、网页或移动应用的动静分离、云端数据处理。
+
+## 快速开始
+
+阿里云OSS支持多种控制方式，如控制台、命令行工具ossutil、图形化管理工具ossbrower、API和SDK、基于OSS的文件管理系统。
+
+建议先在阿里云通过[视频教程](https://help.aliyun.com/document_detail/31883.html)，使用控制台创建并管理bucket，并了解如何上传和管理文件，并创建AccessKey用于访问OSS服务，然后就可以愉快的用各个语言相关的SDK开发啦。
+
+# aliyun-oss-go-sdk
+
+阿里云Go SDK文档：https://help.aliyun.com/document_detail/32143.html
+
+由于阿里云Go SDK文档写的非常简单易懂，这里就不去重复写笔记了。
+
+## 自己简单封装的API
+
+在写demo的过程中，自己简单的小小的封装一下阿里云的SDK的API，方便自己以后copy：
+
+```go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"log"
+	"os"
+	"strings"
+)
+
+const (
+	AccessKey    = "你的key"
+	AccessSecret = "你的密码"
+	Endpoint     = "oss-cn-shanghai.aliyuncs.com"
+	RegionID     = "oss-cn-shanghai"
+	Bucket       = "uestcfzk-bucket-01"
+	Prefix       = "test"
+)
+
+func main() {
+	fmt.Printf("hello oss , the version is %s  \n", oss.Version)
+	// 1.连接到OSS客户端
+	// oss.Timeout(10, 120)表示设置HTTP连接超时时间为10秒（默认值为30秒），HTTP读写超时时间为120秒（默认值为60秒）。0表示永不超时（不推荐使用）
+	client, err := oss.New(Endpoint, AccessKey, AccessSecret, oss.Timeout(10, 120))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	// 2.获取bucket实例
+	bucket, err := client.Bucket(Bucket)
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
+
+// MyPutObjectFromFile 上传文件
+func MyPutObjectFromFile(bucket *oss.Bucket, filePath string) error {
+	// 1.打开文件
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	bufReader := bufio.NewReader(file)
+	// 2.上传
+	var objectKey = Prefix + "/" + strings.TrimPrefix(file.Name(), "C:/")
+	err = bucket.PutObject(objectKey, bufReader)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// MyPageListObjectsWithPrefix 新起一个goroutine分页列举指定前缀的所有文件，并放入管道中
+func MyPageListObjectsWithPrefix(bucketArg *oss.Bucket, prefixArg string) (<-chan string, error) {
+	var outputChan = make(chan string, 100) // 新建一个管道
+
+	go func(bucket *oss.Bucket, prefix string) {
+		defer close(outputChan)
+		// 1.分页列举包含指定前缀的文件；每页列举100个
+		prefixOption := oss.Prefix(prefix)
+		marker := oss.Marker("")
+		for {
+			lsRes, err := bucket.ListObjects(oss.MaxKeys(100), marker, prefixOption)
+			if err != nil {
+				log.Printf("分页查询指定前缀 %s 的OSS对象出现异常 %+v \n", prefix, err)
+				return
+			}
+			// 2.查询结果放入管道
+			for _, obj := range lsRes.Objects {
+				outputChan <- obj.Key
+			}
+			// 3.下一循环判断
+			if lsRes.IsTruncated {
+				prefixOption = oss.Prefix(lsRes.Prefix)
+				marker = oss.Marker(lsRes.NextMarker)
+			} else {
+				break
+			}
+		}
+	}(bucketArg, prefixArg)
+	return outputChan, nil
+}
+
+// MyDeleteObjectsWithPrefix 删除指定前缀的所有文件：其实也可以直接按照指定前缀查询出所有的文件，然后一键直接删除
+func MyDeleteObjectsWithPrefix(bucket *oss.Bucket, prefix string) error {
+	marker := oss.Marker("")
+	prefixOption := oss.Prefix(prefix)
+	for {
+		lor, err := bucket.ListObjects(marker, prefixOption)
+		if err != nil {
+			return err
+		}
+
+		var keys = make([]string, 0, 10)
+		for _, obj := range lor.Objects {
+			keys = append(keys, obj.Key)
+		}
+
+		if err := MyDeleteObjects(bucket, keys); err != nil {
+			return err
+		}
+
+		if lor.IsTruncated {
+			prefixOption = oss.Prefix(lor.Prefix)
+			marker = oss.Marker(lor.NextMarker)
+		} else {
+			break
+		}
+	}
+	return nil
+}
+
+// MyDeleteObjects 删除给定的key对应的OSS对象
+func MyDeleteObjects(bucket *oss.Bucket, objKeys []string) error {
+	objects, err := bucket.DeleteObjects(objKeys)
+	if err != nil {
+		return err
+	}
+	for _, key := range objects.DeletedObjects {
+		log.Printf("成功删除 %s \n", key)
+	}
+	log.Printf("成功删除 %d 个OSS对象\n", len(objects.DeletedObjects))
+	return nil
+}
+```
+
+## 测试直接删除目录
+
+**首先要清晰的是，OSS将ObjectName以`/`结尾的对象视作目录，OSS内部使用扁平结构存储数据，是没有目录这个概念的。**
+
+测试直接删除文件夹(即objectName以`/`结尾的OSS对象)，此时该文件夹下有文件：
+
+![测试直接删除dir](oss.assets/测试直接删除dir.png)
+
+```go
+func main() {
+	fmt.Printf("hello oss , the version is %s  \n", oss.Version)
+	// 1.连接到OSS客户端
+	// oss.Timeout(10, 120)表示设置HTTP连接超时时间为10秒（默认值为30秒），HTTP读写超时时间为120秒（默认值为60秒）。0表示永不超时（不推荐使用）
+	client, err := oss.New(Endpoint, AccessKey, AccessSecret, oss.Timeout(10, 120))
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// 2.获取bucket实例
+	bucket, err := client.Bucket(Bucket)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	// 3.列举指定前缀的文件测试
+	outputChan, err := MyPageListObjectsWithPrefix(bucket, Prefix)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	for objKey := range outputChan {
+		fmt.Println(objKey)
+	}
+
+	// 4.尝试删除目录对象(即以/结尾的OSS对象)
+	if err := MyDeleteObjects(bucket, []string{"test/Users/zhike.feng/Desktop/mydir/"}); err != nil {
+		log.Fatalln(err)
+	}
+
+	// 5.再查一下剩下了哪些文件
+	outputChan2, err := MyPageListObjectsWithPrefix(bucket, Prefix)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	for objKey := range outputChan2 {
+		fmt.Println(objKey)
+	}
+}
+```
+
+结果打印：
+
+![删除OSS对象测试1](oss.assets/删除OSS对象测试1.png)
+
+其实从这里的打印就能看出来，虽然在阿里云中看着好像把有这些个目录，必然Desktop，但是实际上它只是这些资源的前缀罢了，这里根本查不出来有这个Desktop对象的存在，除非单独去创建这个以`/`结尾的所谓的目录对象。

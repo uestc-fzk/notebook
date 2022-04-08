@@ -24,3 +24,15 @@ File-settings
 
 Alt 按住左键上滑或者下滑；
 ![IDEA批量操作](pictures/IDEA批量操作.png)
+
+## 换行符问题
+
+windows和Unix和macos换行符不一样，有时项目中的换行符是Windows的CRLF，但是被改成了LF这种情况，如果直接提交，会有很多文件提交到git上，分析大半天。
+
+先点中当前项目，然后如下修改即可：
+
+![image-20220408102741539](IDEA.assets/image-20220408102741539.png)
+
+设置里面也有：
+
+![image-20220408102834393](IDEA.assets/image-20220408102834393.png)
