@@ -1902,5 +1902,224 @@ nginx-deploy-pvc-service   NodePort    10.103.36.77   <none>        80:30009/TCP
 hello this is pvc for index.html
 ```
 
-## ConfigMap
+### 临时卷Ephemeral Volume
+
+有些应用程序需要额外的存储，但并不关心数据在重启后仍然可用。 例如，缓存服务经常受限于内存大小，将不常用的数据转移到比内存慢、但对总体性能的影响很小的存储中。
+
+另有些应用程序需要以文件形式注入的只读数据，比如配置数据或密钥。
+
+*临时卷* 就是为此类用例设计的。因为卷会遵从 Pod 的生命周期，**与 Pod 一起创建和删除**， 所以停止和重新启动 Pod 时，不会受持久卷在何处可用的限制。
+
+临时卷在 Pod 规范中以 *内联* 方式定义，这简化了应用程序的部署和管理。
+
+**临时卷的类型**
+
+Kubernetes 为了不同的目的，支持几种不同类型的临时卷：
+
+- [emptyDir](https://kubernetes.io/zh/docs/concepts/storage/volumes/#emptydir)：Pod 启动时为空，存储空间来自本地的 kubelet 根目录（通常是根磁盘）或内存
+- [configMap](https://kubernetes.io/zh/docs/concepts/storage/volumes/#configmap)、 [downwardAPI](https://kubernetes.io/zh/docs/concepts/storage/volumes/#downwardapi)、 [secret](https://kubernetes.io/zh/docs/concepts/storage/volumes/#secret)：将不同类型的 Kubernetes 数据注入到 Pod 中，是作为 [本地临时存储](https://kubernetes.io/zh/docs/concepts/configuration/manage-resources-containers/#local-ephemeral-storage) 提供的。它们由各个节点上的 kubelet 管理。
+- [CSI 临时卷](https://kubernetes.io/zh/docs/concepts/storage/volumes/#csi-ephemeral-volumes)：由专门[支持此特性](https://kubernetes-csi.github.io/docs/drivers.html) 的 [CSI 驱动程序](https://github.com/container-storage-interface/spec/blob/master/spec.md)提供
+- [通用临时卷](https://kubernetes.io/zh/docs/concepts/storage/ephemeral-volumes/#generic-ephemeral-volumes)：可以由所有支持持久卷的存储驱动程序提供
+
+
+
+### ConfigMap
+
+ConfigMap 是一种 API 对象，用来将非机密性的数据保存到键值对中。使用时， [Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 可以将其用作环境变量、命令行参数或者存储卷中的配置文件。
+
+ConfigMap 将环境配置信息和 [容器镜像](https://kubernetes.io/zh/docs/reference/glossary/?all=true#term-image) 解耦，便于应用配置的修改。
+
+ConfigMap 使用 `data` 和 `binaryData` 字段。`data` 字段设计用来保存 UTF-8 字符串，而 `binaryData` 则被设计用来保存二进制数据作为 base64 编码的字串。
+
+#### redis示例
+
+1、创建配置集
+
+```shell
+# 先创建一个redis.conf配置文件
+cat <<EOF | sudo tee redis.conf
+port 6379
+requirepass !MyRedis123456
+protected-mode no
+# daemonize yes # 这里不能开启守护进程，开启之后，redis默认后台启动，但是docker容器会自动结束
+
+
+pidfile "/tmp/redis_6379.pid"
+dbfilename dump6379.rdb
+# 工作目录
+dir /tmp
+logfile "6379.log"
+
+# 缓存策略
+maxmemory 100mb
+maxmemory-policy allkeys-lru
+EOF
+
+# 创建配置，redis保存到k8s的etcd；
+[root@k8s-master configTestDir]# kubectl create cm redis-conf --from-file=redis.conf
+configmap/redis-conf created
+[root@k8s-master configTestDir]# kubectl get cm
+NAME               DATA   AGE
+kube-root-ca.crt   1      20d
+redis-conf         1      6s
+```
+
+此时可以看看这个配置集详情：
+
+```yaml
+# 以yaml格式输出
+[root@k8s-master configTestDir]# kubectl get cm redis-conf -oyaml
+apiVersion: v1
+kind: ConfigMap
+data:
+  redis.conf: |
+    port 6379
+    requirepass !MyRedis123456
+    protected-mode no
+    # daemonize yes # 这里不能开启守护进程，开启之后，redis默认后台启动，但是docker容器会自动结束
+
+
+    pidfile "/tmp/redis_6379.pid"
+    dbfilename dump6379.rdb
+    # 工作目录
+    dir /tmp
+    logfile "6379.log"
+
+    # 缓存策略
+    maxmemory 100mb
+    maxmemory-policy allkeys-lru
+metadata:
+  creationTimestamp: "2022-04-07T15:44:31Z"
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:redis.conf: {}
+    manager: kubectl-create
+    operation: Update
+    time: "2022-04-07T15:44:31Z"
+  name: redis-conf
+  namespace: default
+  resourceVersion: "2490004"
+  uid: e0e19829-d6fb-4ff1-90d9-65b8cc31ae82
+```
+
+如果要手写configMap配置文件的话，就是从上面这个样板简化简化如下：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-conf
+  namespace: default
+data: # data就是配置数据，key：默认是文件名  value是文件内容
+  redis.conf: |
+    port 6379
+    requirepass !MyRedis123456
+    protected-mode no
+    # daemonize yes # 这里不能开启守护进程，开启之后，redis默认后台启动，但是docker容器会自动结束
+
+
+    pidfile "/tmp/redis_6379.pid"
+    dbfilename dump6379.rdb
+    # 工作目录
+    dir /tmp
+    logfile "6379.log"
+
+    # 缓存策略
+    maxmemory 100mb
+    maxmemory-policy allkeys-lru
+```
+
+2、创建deployment
+
+```yaml
+cat <<EOF | sudo tee cm-redis-demo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: cm-redis-demo
+  name: cm-redis-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cm-redis-demo
+  template:
+    metadata:
+      labels:
+        app: cm-redis-demo
+    spec:
+      containers:
+      - image: redis
+        name: redis
+        command: # 这里配置启动命令
+        - redis-server
+        - "/redis-master/redis.conf"  
+        volumeMounts:
+        - name: data # 名字无所谓
+          mountPath: /data # 将此目录挂载出去
+        - name: config
+          mountPath: /redis-master
+      volumes:
+        - name: data # 这个名得和上面匹配
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: redis-conf # 指定配置集ConfigMap
+            items:
+            - key: redis.conf # 指定cm定义中data的键
+              path: redis.conf # mountPath下的文件名，将键对应的值作为此文件内容
+EOF
+
+# 应用一下
+kubectl apply -f cm-redis-demo.yaml 
+```
+
+上面这些配置大概如下图所示：(注：下图出现的configMap是不能通过的，只有小写字母、数字和`-`是允许的)
+
+![configMap-redis-demo](Kubernetes.assets/configMap-redis-demo.png)
+
+在dashboard中进入到上述启动的pod中，查看redis.conf是否正确：
+
+```shell
+root@cm-redis-demo-685564999c-drnqf:/data# cd /redis-master/
+root@cm-redis-demo-685564999c-drnqf:/redis-master# ls
+redis.conf
+root@cm-redis-demo-685564999c-drnqf:/redis-master# cat redis.conf 
+port 6379
+requirepass !MyRedis123456
+protected-mode no
+# daemonize yes # 这里不能开启守护进程，开启之后，redis默认后台启动，但是docker容器会自动结束
+
+
+pidfile "/tmp/redis_6379.pid"
+dbfilename dump6379.rdb
+# 工作目录
+dir /tmp
+logfile "6379.log"
+
+# 缓存策略
+maxmemory 100mb
+maxmemory-policy allkeys-lru
+```
+
+可以看到，没得问题哦。这里还可以用redis-cli命令连接redis服务，不过，由于设置了密码，这里好像直接用`redis-cli -a "!MyRedis123456"`能连上，但是还是认证失败。在下面的修改配置集时注释掉密码就可以在dashboard中用redis-cli使用了。
+
+3、修改配置集configMap
+
+那么如何动态修改configMap呢？
+
+```shell
+kubectl edit cm 你的configMap名称
+```
+
+这里将configMap修改之后，pod中的挂载的相应配置文件很快也会跟着更改。
+
+不过似乎，deploy并没有让pod重启，那只能手动删除pod，等待deploy让它重启，这样新的redis配置才会生效。
+
+### Secret
 
