@@ -2123,3 +2123,23 @@ kubectl edit cm 你的configMap名称
 
 ### Secret
 
+Secret 是一种包含少量敏感信息例如密码、令牌或密钥的对象。将这些信息放在 secret 中比放在 [Pod](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 的定义或者 [容器镜像](https://kubernetes.io/zh/docs/reference/glossary/?all=true#term-image) 中来说更加安全和灵活
+
+由于创建 Secret 可以独立于使用它们的 Pod， 因此在创建、查看和编辑 Pod 的工作流程中暴露 Secret（及其数据）的风险较小。 Kubernetes 和在集群中运行的应用程序也可以对 Secret 采取额外的预防措施， 例如避免将机密数据写入非易失性存储。
+
+Secret 类似于 [ConfigMap](https://kubernetes.io/zh/docs/tasks/configure-pod-container/configure-pod-configmap/) 但专门用于保存机密数据。
+
+```shell
+kubectl create secret docker-registry uestcfzk-docker \
+--docker-username=uestcfzk \
+--docker-password=fzk010326 \
+--docker-email=767719297@qq.com
+
+[root@k8s-master ~]# kubectl get  secret
+NAME                  TYPE                                  DATA   AGE
+default-token-8qxx6   kubernetes.io/service-account-token   3      21d
+uestcfzk-docker       kubernetes.io/dockerconfigjson        1      4s
+```
+
+
+
