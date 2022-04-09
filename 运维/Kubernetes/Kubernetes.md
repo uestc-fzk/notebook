@@ -1155,15 +1155,13 @@ Service和ReplicationController只支持 基于等值 的选择算符；而新�
 
 
 
-## Volume
-
-Volume是**Pod中能够被多个容器访问的共享目录**。Kubernetes的Volume概念、用途和目的与Docker的Volume比较类似，但两者不能等价。首先，Kubernetes中的Volume定义在Pod上，然后被一个Pod里的多个容器挂载到具体的文件目录下；其次，Kubernetes中的Volume中的数据也不会丢失。最后，Kubernetes支持多种类型的Volume，例如Gluster、Ceph等先进的分布式文件系统。
-
-Volume的使用也比较简单，在大多数情况下，我们先在Pod上声明一个Volume，然后在容器里引用该Volume并Mount到容器里的某个目录上。
 
 
 
-## Service
+
+## 服务
+
+### Service
 
 将运行在一组 [Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 上的应用程序公开为网络服务的抽象方法。
 
@@ -1206,7 +1204,7 @@ Kubernetes `ServiceTypes` 允许指定你所需要的 Service 类型，默认是
 
 上面的这些配置会把标签为`app: mynginx3`的一组pod暴露在外网，并映射节点的80端口到pod的80端口，此时可以通过部署有这些pod的节点的公网IP访问到这些pod内的服务。
 
-## Ingress
+### Ingress
 
 文档：https://kubernetes.github.io/ingress-nginx/deploy/
 
@@ -1221,7 +1219,7 @@ Ingress 可为 Service 提供外部可访问的 URL、负载均衡流量、终�
 
 Ingress 不会公开任意端口或协议。 将 HTTP 和 HTTPS 以外的服务公开到 Internet 时，通常使用 [Service.Type=NodePort](https://kubernetes.io/zh/docs/concepts/services-networking/service/#type-nodeport) 或 [Service.Type=LoadBalancer](https://kubernetes.io/zh/docs/concepts/services-networking/service/#loadbalancer) 类型的 Service
 
-### 环境准备
+#### 环境准备
 
 前提：必须下载ingress控制器，可以选择 [ingress-nginx](https://kubernetes.github.io/ingress-nginx/deploy/)。 也可以从许多 [Ingress 控制器](https://kubernetes.io/zh/docs/concepts/services-networking/ingress-controllers) 中进行选择。
 
@@ -1251,7 +1249,7 @@ service/ingress-nginx-controller-admission   ClusterIP   10.99.15.254   <none>  
 
 此时可以**根据上面查到的ip端口访问查看**是否能够成功访问到ingress-nginx内置的nginx服务。比如此时就可以访问`http://fzk-tx.top:31590`。
 
-### 测试
+#### 测试
 
 创建两个deploy，并分别创建两个service公开访问，yaml如下：
 
@@ -1446,17 +1444,11 @@ kubernetes支持的**卷类型**非常多，在这里做demo的话可以用**nfs
 
 ![image-20220404225141837](Kubernetes.assets/image-20220404225141837.png)
 
-### local卷
+### Volume
 
-`local` 卷所代表的是某个被挂载的本地存储设备，例如磁盘、分区或者目录。
+Volume是**Pod中能够被多个容器访问的共享目录**。Kubernetes的Volume概念、用途和目的与Docker的Volume比较类似，但两者不能等价。首先，Kubernetes中的Volume定义在Pod上，然后被一个Pod里的多个容器挂载到具体的文件目录下；其次，Kubernetes中的Volume中的数据也不会丢失。最后，Kubernetes支持多种类型的Volume，例如Gluster、Ceph等先进的分布式文件系统。
 
-`local` 卷只能用作静态创建的持久卷。尚不支持动态配置。
-
-与 `hostPath` 卷相比，`local` 卷能够以持久和可移植的方式使用，而无需手动将 Pod 调度到节点。系统通过查看 PersistentVolume 的节点亲和性配置，就能了解卷的节点约束。
-
-然而，`local` 卷仍然取决于底层节点的可用性，并不适合所有应用程序。 如果节点变得不健康，那么 `local` 卷也将变得不可被 Pod 访问。使用它的 Pod 将不能运行。 使用 `local` 卷的应用程序必须能够容忍这种可用性的降低，以及因底层磁盘的耐用性特征而带来的潜在的数据丢失风险
-
-
+Volume的使用也比较简单，在大多数情况下，我们先在Pod上声明一个Volume，然后在容器里引用该Volume并Mount到容器里的某个目录上。
 
 ### nfs
 
@@ -1582,7 +1574,7 @@ hello nfs
 
 此时如果用kubectl命令将部署的这个deployment删除的话，其挂载的目录/nfs/data/nginx-pv还是会存在，并不受影响。所以在pod出现问题后，kubernetes重启pod，一切就都恢复正常。
 
-### 持久卷
+### 持久卷PVC
 
 #### 概述
 
@@ -2131,15 +2123,56 @@ Secret 类似于 [ConfigMap](https://kubernetes.io/zh/docs/tasks/configure-pod-c
 
 ```shell
 kubectl create secret docker-registry uestcfzk-docker \
---docker-username=uestcfzk \
---docker-password=fzk010326 \
---docker-email=767719297@qq.com
+--docker-username=你的docker用户名 \
+--docker-password=你的docker密码 \
+--docker-email=你注册docker的邮箱地址
 
 [root@k8s-master ~]# kubectl get  secret
 NAME                  TYPE                                  DATA   AGE
 default-token-8qxx6   kubernetes.io/service-account-token   3      21d
 uestcfzk-docker       kubernetes.io/dockerconfigjson        1      4s
 ```
+
+可以看看创建的secret的配置信息：下面展示的信息
+
+```yaml
+[root@k8s-master ~]# kubectl get secret uestcfzk-docker -oyaml
+apiVersion: v1
+kind: Secret
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJodHRwczovL2luZGV4LmRvY2tlci5pby92MS8iOnsidXNlcm5hbWUiOiJ1ZXN0Y2Z6ayIsInBhc3N3b3JkIjoiZnprMDEwMzI2IiwiZW1haWwiOiI3Njc3MTkyOTdAcXEuY29tIiwiYXV0aCI6ImRXVnpkR05tZW1zNlpucHJNREV3TXpJMiJ9fX0=
+metadata:
+  name: uestcfzk-docker
+  namespace: default
+type: kubernetes.io/dockerconfigjson
+```
+
+这里看到data中的信息不是明文的，但是并不是安全的，因为这仅仅只是一个简单的base64编码而已。
+
+pod使用这个secret
+
+```shell
+[root@k8s-master ~]# docker pull uestcfzk/redis:v1
+Error response from daemon: pull access denied for uestcfzk/redis, repository does not exist or may require 'docker login'
+# 这里可以看到必须登录才能拉去这个redis镜像了，因为把这个redis设置为私有的了
+cat <<EOF | sudo tee secret-redis-demo.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: private-redis
+spec:
+  containers:
+  - name: private-redis
+    image: uestcfzk/redis:v1  # 这个镜像已经在dockerhub上改为私有的了，必须提供账户密码才能获取
+  imagePullSecrets:  # 拉去镜像用的secret
+  - name: uestcfzk-docker
+EOF
+
+# 应用一下捏，可以看到能成功拉到镜像
+kubectl apply -f secret-redis-demo.yaml
+```
+
+
 
 
 
