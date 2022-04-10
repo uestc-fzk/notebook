@@ -282,3 +282,155 @@ func main() {
 ![删除OSS对象测试1](oss.assets/删除OSS对象测试1.png)
 
 其实从这里的打印就能看出来，虽然在阿里云中看着好像把有这些个目录，必然Desktop，但是实际上它只是这些资源的前缀罢了，这里根本查不出来有这个Desktop对象的存在，除非单独去创建这个以`/`结尾的所谓的目录对象。
+
+# aws-sdk-go
+
+文档地址：https://docs.aws.amazon.com/sdk-for-go/?id=docs_gateway
+
+阿里云的OSS服务也可以用亚马逊的S3的API进行操作，提供了大部分的接口兼容。
+
+aws-sdk-go-v2需要go版本在1.15以上，如果版本在这以前，则需要使用aws-sdk-go开发工具包，即v1版本。我发现v2版本操作oss的教程没找到，自己也连不上...，就换成v1的吧。
+
+## 自己简单封装的API
+
+1、依赖下载
+
+```shell
+go get github.com/aws/aws-sdk-go
+```
+
+2、一些常用操作的简单API封装
+
+```go
+package main
+
+import (
+	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"log"
+	"os"
+)
+
+const (
+	AccessKey    = "你的key"
+	AccessSecret = "你的secret"
+	Endpoint     = "oss-cn-shanghai.aliyuncs.com"
+	RegionID     = "oss-cn-shanghai"
+	Bucket       = "你的bucket"
+	Prefix       = "test"
+)
+
+func main() {
+	// 1.新建会话
+	sess, err := session.NewSession(&aws.Config{
+		Endpoint:    aws.String(Endpoint),
+		Region:      aws.String(RegionID),
+		Credentials: credentials.NewStaticCredentials(AccessKey, AccessSecret, ""),
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
+	// 2.创建s3客户端
+	svc := s3.New(sess)
+}
+
+// MyListObjectsWithPrefix 分页查询并将结果返回管道
+func MyListObjectsWithPrefix(svc *s3.S3, prefix string, pageSize int64) (<-chan *s3.Object, error) {
+	if pageSize < 10 {
+		return nil, fmt.Errorf("pageSize必须大于10")
+	}
+	// 1.构建管道
+	outputChan := make(chan *s3.Object, pageSize)
+
+	go func(svcArg *s3.S3, prefixArg string, pageSizeArg int64) {
+		defer close(outputChan) // 必须关闭管道
+
+		// 2.构建参数
+		inputParams := &s3.ListObjectsInput{
+			Bucket:  aws.String(Bucket),
+			MaxKeys: aws.Int64(pageSizeArg),
+			Prefix:  aws.String(prefixArg),
+		}
+
+		// 3.分页查询
+		if err := svcArg.ListObjectsPages(inputParams, func(page *s3.ListObjectsOutput, lastPage bool) bool {
+			for _, obj := range page.Contents {
+				outputChan <- obj // 放入管道
+			}
+			return !lastPage // 退出条件
+		}); err != nil {
+			log.Fatalln(err)
+		}
+	}(svc, prefix, pageSize)
+	return outputChan, nil
+}
+
+// MyPutObjectWithFilePath 上传文件到指定dir，注意：这里的dir并不是真是存在的哦，OSS中没有目录这个概念
+func MyPutObjectWithFilePath(svc *s3.S3, filepath string, dir string) error {
+	// 1.打开文件
+	file, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+	defer file.Close() // 关闭文件
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	// 2.构建参数
+	param := &s3.PutObjectInput{
+		Bucket:        aws.String(Bucket),
+		Key:           aws.String(dir + "/" + fileInfo.Name()),
+		ContentLength: aws.Int64(fileInfo.Size()),
+		Body:          file,
+	}
+	// 3.上传
+	if _, err := svc.PutObject(param); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MyDeleteObjects 批量删除对象
+func MyDeleteObjects(svc *s3.S3, keys []string) error {
+	if len(keys) > 0 {
+		// 1.构建参数
+		toDelete := make([]*s3.ObjectIdentifier, 0, len(keys))
+		for _, k := range keys {
+			toDelete = append(toDelete, &s3.ObjectIdentifier{
+				Key: aws.String(k),
+			})
+		}
+		// 2.删除
+		if _, err := svc.DeleteObjects(&s3.DeleteObjectsInput{
+			Bucket: aws.String(Bucket),
+			Delete: &s3.Delete{
+				Objects: toDelete,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MyDeleteObjectsWithPrefix 删除指定前缀所有对象
+func MyDeleteObjectsWithPrefix(svc *s3.S3, prefix string) error {
+	// 1.创建迭代器
+	iter := s3manager.NewDeleteListIterator(svc, &s3.ListObjectsInput{
+		Bucket: aws.String(Bucket),
+		Marker: aws.String(""),
+		Prefix: aws.String(prefix),
+	})
+	// 2.迭代删除
+	if err := s3manager.NewBatchDeleteWithClient(svc).Delete(aws.BackgroundContext(), iter); err != nil {
+		return err
+	}
+	return nil
+}
+```
+
