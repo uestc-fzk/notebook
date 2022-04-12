@@ -2121,6 +2121,33 @@ Secret 是一种包含少量敏感信息例如密码、令牌或密钥的对象�
 
 Secret 类似于 [ConfigMap](https://kubernetes.io/zh/docs/tasks/configure-pod-container/configure-pod-configmap/) 但专门用于保存机密数据。
 
+#### Secret 的使用
+
+Pod有3种方式使用secret：
+
+1. 作为挂在到容器上的卷中的文件
+2. 作为容器环境变量
+3. 由kubelet在为pod拉取镜像时使用
+
+创建secret
+
+```shell
+# -n 标志确保生成的文件在文本末尾不包含额外的换行符。因为当 kubectl 读取文件并将内容编码为 base64 字符串时，多余的换行符也会被编码
+echo -n 'root' > ./username.txt
+echo -n '123456'> ./password.txt
+# 可以选择使用 --from-file=[key=]source 来设置密钥名称。
+kubectl create secret generic mysql-user-pass \
+	--from-file=username=./username.txt \
+	--from-file=password=./password.txt
+
+# 还可以使用--from-literal=<key>=<value>直接提供secret数据，特殊字符需要手动转义，最简单的转义方法就是单引号括起来
+kubectl create secret generic mysql-user-pass \
+	--from-literal=username='root' \
+	--from-literal=password='!MySQL123456'
+```
+
+
+
 ```shell
 kubectl create secret docker-registry uestcfzk-docker \
 --docker-username=你的docker用户名 \

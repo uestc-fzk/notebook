@@ -38,16 +38,12 @@
 >
 > 这三个随便一个都可以：如果不行可以去百度，也可以去官网看看
 
-
-
-
-
 ## VMware16使用文档
 
-> 中文官方使用文档：https://docs.vmware.com/cn/VMware-Workstation-Pro/index.html
-> 如下图：
->
-> ![VMware16下载5](Linux.assets/VMware16下载5.png)
+中文官方使用文档：https://docs.vmware.com/cn/VMware-Workstation-Pro/index.html
+如下图：
+
+![VMware16下载5](Linux.assets/VMware16下载5.png)
 
 ## ubuntu
 
@@ -117,7 +113,7 @@ su root
     如果只有ssh-agent表示还没启动,需要通过`sudo /etc/init.d/ssh start`启动ssh server.
     如果提醒找不到该命令，说明没有安装openssh-server。（跳到步骤2）
 
-      <img src="pictures/ubuntu2.png" alt="ubuntu2" style="zoom:80%;" />
+      <img src="Linux.assets/ubuntu2.png" alt="ubuntu2" style="zoom:80%;" />
       可通过以下进行Ubuntu内部测试连接SSH服务器
       输入命令：ssh -l 用户名 host，其中用户名为Ubuntu用户名，host为主机名
 
@@ -205,10 +201,6 @@ su root
 
    此时上传到test文件夹必成功。
 
-
-
-
-
 # Linux
 
 ## Linux目录说明
@@ -226,7 +218,7 @@ su root
 9.	root : 该目录为系统管理员目录，root是具有超级权限的用户(只有root用户可以进)
 10.	tmp: 这个目录是用来存放一些临时文件的。
 11.	**usr: 这是一个非常重要的目录，用户的很多应用程序和文件都放在这个目录下，类似与windows下的program files目录**。存放文件。
-12.	var : 这个目录存放着在不断扩充着的东西，我们习惯将那些经常被修改的文件存放在该目录下，比如运行的各种日志文件。
+12.	**var** : 这个目录存放着在不断扩充着的东西，我们习惯将那些经常被修改的文件存放在该目录下，比如运行的各种**日志文件**。
 
 > 在 Linux 系统中，有几个目录是比较重要的，平时需要注意不要误删除或者随意更改内部文件。
 >- **/etc**： 上边也提到了，这个是**系统中的配置文件**，如果你更改了该目录下的某个文件可能会导致系统不能启动。
@@ -291,8 +283,6 @@ su root
 - **/opt**：默认是空的，我们安装额外软件可以放在这个里面。
 
 - **/srv**：存放服务启动后需要提取的数据**（不用服务器就是空）**
-
-
 
 ## Linux常用命令
 >菜鸟教程：https://www.runoob.com/linux/linux-tutorial.html
