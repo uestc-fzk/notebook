@@ -29,6 +29,7 @@
 	- Git
 	- Linux
 	- Nginx
+	- Kubernetes
 - README.md
 ```
 
