@@ -1677,8 +1677,6 @@ Shell 是指一种应用程序，这个应用程序提供了一个界面，用�
 
 Ken Thompson 的 sh 是第一种 Unix Shell，Windows Explorer 是一个典型的图形界面 Shell。
 
-
-
 ### 第一个shell脚本
 
 `Bourne Again Shell`，由于易用和免费，`Bash` 在日常工作中被广泛使用。同时，Bash 也是大多数Linux 系统默认的 Shell。
