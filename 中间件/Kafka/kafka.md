@@ -492,3 +492,181 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 ## 节点服役与退役
 
 看pdf和视频资料：https://www.bilibili.com/video/BV1vr4y1677k?p=24
+
+# Golang操作kafka
+
+golang操作kafka的库有两个，一个是[sarama](https://github.com/Shopify/sarama)，一个是[kafka-go](https://github.com/segmentio/kafka-go)，目前第一个star数更多，本笔记也使用第一个库。
+
+## 生产者
+
+1、用到的常量定义：一般来说，下面这些都是要配置到配置文件中去的，这里简化为写死到常量中
+
+```go
+const (
+	UserRoleAllSyncRequestTopic  = "iam.sync.event.user-role-req.0"    // 全量同步请求topic
+	UserRoleAllSyncResponseTopic = "iam.sync.message.user-role.0"      // 全量同步响应topic
+	UserRoleChangeSyncTopic      = "iam.sync.event.user-role-change.0" // 增量同步topic
+	UserRoleSyncReceiverKey      = "receiver"                          // 消息头中接受者key
+    TestKafkaAddr                = "你的kafka地址host:port"              // kafka地址
+)
+```
+
+2、创建生产者连接的代码：
+
+```go
+var (
+	// 同步生产者
+	producer sarama.SyncProducer
+	// 异步生产者
+	asyncProducer sarama.AsyncProducer
+)
+
+// InitProducer 初始化生产者，在main函数中调用
+func InitProducer() {
+	// 1.准备配置
+	config := sarama.NewConfig()
+	config.Producer.RequiredAcks = sarama.WaitForAll // 发送完数据需要leader和follow都确认，默认WaitForLocal RequiredAcks，即1
+	// 分区器建议用默认的就好，不用改啦，默认情况：有key则hash，无key则粘性分区
+	//config.Producer.Partitioner = sarama.NewRandomPartitioner // 新选出一个partition
+	config.Producer.Return.Errors = true // 发送消息出现异常把错误放入管道，默认true
+
+	//  2.初始化同步生产者
+	initSyncProducerClient(config)
+
+	// 3.初始化异步生产者
+	config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
+	initAsyncProducerClient(config)
+}
+
+// CloseProducer 关闭生产者连接，如果有初始化生产者则必须在main函数中调用
+func CloseProducer() {
+	closeSyncProducerClient()  // 关闭同步生产者
+	closeAsyncProducerClient() // 关闭异步生产者
+}
+
+// SyncPublishMsg 同步推送消息
+func SyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
+	if producer == nil {
+		log.Fatalln("同步生产者客户端未进行初始化，请在main函数中调用InitProducerClient()手动初始化并注册关闭函数CloseProducerClient()")
+	}
+	// 发送消息
+	partitionId, offset, err := producer.SendMessage(producerMsg)
+	if err != nil {
+		fmt.Printf("发送消息失败，产生错误%+v \n", err)
+		return err
+	}
+	fmt.Printf("消息已经成功发送到：topic: %v, partitionId:%v , offset:%v\n", producerMsg.Topic, partitionId, offset)
+	return nil
+}
+
+// AsyncPublishMsg 异步推送消息
+func AsyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
+	if asyncProducer == nil {
+		log.Fatalln("异步生产者客户端未进行初始化，请在main函数中调用InitAsyncProducerClient()手动初始化并注册关闭函数CloseAsyncProducerClient()")
+	}
+	// 异步发送消息： 从AsyncProducer接口的注释得知
+	// 1.必须从asyncProducer.Errors()管道中读取错误信息，否则会造成死锁，除非手动将Producer.Return.Errors设置为false
+	// 2.如果手动将Producer.Return.Successes设置为true，则必须从asyncProducer.Successes()管道中读取成功信息，否则会造成死锁
+	select {
+	// 把消息往管道一放就完事了，再读取一下错误和成功消息免得死锁就行啦
+	case asyncProducer.Input() <- producerMsg:
+		log.Printf("消息已经放入管道，等待异步发送\n")
+	case err := <-asyncProducer.Errors():
+		log.Printf("发送消息失败了: %+v \n", err)
+	case <-asyncProducer.Successes():
+		log.Printf("消息已经成功交付\n")
+	}
+	return nil
+}
+
+// initSyncProducerClient 初始化同步生产者客户端，应在main函数中调用
+func initSyncProducerClient(config *sarama.Config) {
+	var err error
+
+	// 同步的生产者客户端连接
+	producer, err = sarama.NewSyncProducer([]string{TestKafkaAddr}, config) // note：这里先连接自己的kafka
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Printf("同步生产者客户端初始化成功\n")
+}
+
+// closeSyncProducerClient 关闭同步生产者客户端连接，最好放在main函数中
+func closeSyncProducerClient() {
+	if err := producer.Close(); err != nil {
+		fmt.Printf("关闭同步生产者客户端出现异常：%+v \n", err)
+	}
+}
+
+// InitAsyncProducerClient 初始化异步生产者客户端，应在main函数中调用
+func initAsyncProducerClient(config *sarama.Config) {
+	var err error
+
+	// 同步的生产者客户端连接
+	asyncProducer, err = sarama.NewAsyncProducer([]string{TestKafkaAddr}, config) // note：这里先连接自己的kafka
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Printf("异步生产者客户端初始化成功\n")
+}
+
+// closeAsyncProducerClient 关闭异步生产者客户端，应在main函数中调用
+func closeAsyncProducerClient() {
+	if err := asyncProducer.Close(); err != nil {
+		log.Printf("关闭异步生产者客户端出现异常：%+v\n", err)
+	}
+}
+```
+
+3、使用一波
+
+```go
+func main() {
+	user_role_sync.InitProducer()
+	defer user_role_sync.CloseProducer()
+
+	var tenantKey = "CTS"
+	var users = []*user_role_sync.UserMsg{{Username: "fzk", Roles: []*user_role_sync.RoleMsg{{Name: "developer"}}}}
+	if err := user_role_sync.PublishUserChangeSyncMsg(user_role_sync.OptUserAdd, tenantKey, users); err != nil {
+		log.Fatalln(err)
+	}
+}
+
+// PublishUserChangeSyncMsg 广播用户信息改变消息，即增量同步用户信息
+// @param opt 指定操作行为，可选的有user:add,user:update,user:delete
+// @param tenantKey 指定租户的key
+// @param users 用户信息列表
+func PublishUserChangeSyncMsg(opt string, tenantKey string, users []*UserMsg) error {
+	// 0.参数检查
+	if opt != OptUserAdd && opt != OptUserUpdate && opt != OptUserDelete {
+		return errors.New(fmt.Sprintf("增量同步用户信息: opt 只能是 %s 或 %s 或%s，然后传入的opt是%s", OptUserAdd, OptUserUpdate, OptUserDelete, opt))
+	}
+	if tenantKey == "" {
+		return errors.New("增量同步用户信息: 租户key不能为空")
+	}
+	if users == nil || len(users) == 0 {
+		return errors.New("增量同步用户信息: 用户数组不能为空")
+	}
+	// 1.构造消息体
+	valBuf, err := json.Marshal(&UserRoleChangeSyncMsg{
+		Opt:   opt,
+		Users: users,
+	})
+	if err != nil {
+		return err
+	}
+
+	// 2.构造一个消息
+	producerMsg := &sarama.ProducerMessage{
+		Topic:   UserRoleChangeSyncTopic, // 增量同步topic
+		Headers: []sarama.RecordHeader{{Key: []byte(UserRoleSyncReceiverKey), Value: []byte(tenantKey)}},
+		Key:     sarama.StringEncoder("user:" + strconv.FormatInt(users[0].ID, 10)), // 以user:id为key
+		Value:   sarama.ByteEncoder(valBuf),
+	}
+
+	// 3.发送消息
+	return SyncPublishMsg(producerMsg)
+}
+
+```
+
