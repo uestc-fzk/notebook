@@ -529,6 +529,7 @@ func InitProducer() {
 	// 分区器建议用默认的就好，不用改啦，默认情况：有key则hash，无key则粘性分区
 	//config.Producer.Partitioner = sarama.NewRandomPartitioner // 新选出一个partition
 	config.Producer.Return.Errors = true // 发送消息出现异常把错误放入管道，默认true
+    config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
 
 	//  2.初始化同步生产者
 	initSyncProducerClient(config)
@@ -668,5 +669,292 @@ func PublishUserChangeSyncMsg(opt string, tenantKey string, users []*UserMsg) er
 	return SyncPublishMsg(producerMsg)
 }
 
+```
+
+## 消费者
+
+```go
+package main
+
+import (
+	"context"
+	"github.com/Shopify/sarama"
+	"log"
+)
+
+// kafkaConsumerGroup kafka group
+var kafkaConsumerGroup sarama.ConsumerGroup
+
+// KafkaConnectOptions Kafka connect options
+type KafkaConnectOptions struct {
+	Brokers         []string
+	ConsumerGroupId string
+}
+
+func InitKafkaConnect(options *KafkaConnectOptions) {
+	if len(options.Brokers) == 0 {
+		panic("Kafka brokers must be specialized")
+	}
+	config := sarama.NewConfig()
+
+	var err error
+
+	// init kafka consumer group
+	kafkaConsumerGroup, err = sarama.NewConsumerGroup(options.Brokers, options.ConsumerGroupId, config)
+	if err != nil {
+		panic("Init kafka consumer group error, " + err.Error())
+	}
+}
+
+// CloseKafkaConnect defer this function after InitKafkaConnectWithConfig()
+func CloseKafkaConnect() {
+	// close consumer group
+	if err := kafkaConsumerGroup.Close(); err != nil {
+		log.Println("Close kafka consumer group error, ", err)
+	}
+	log.Println("Close kafka consumer group finish")
+}
+
+//-------------------consumer start------------------
+
+type KafkaMessageListener func(message *sarama.ConsumerMessage) error
+
+// KafkaConsumer represents a Sarama consumer group consumer
+type KafkaConsumer struct {
+	ready      chan bool
+	topics     []string
+	listeners  map[string]KafkaMessageListener
+	AutoCommit bool
+}
+
+// NewKafkaConsumer 创建consumer
+func NewKafkaConsumer(autoCommit bool) *KafkaConsumer {
+	consumer := &KafkaConsumer{
+		ready:      make(chan bool),
+		listeners:  make(map[string]KafkaMessageListener),
+		AutoCommit: autoCommit,
+	}
+	return consumer
+}
+
+// AddListener 绑定topic和listener
+func (consumer *KafkaConsumer) AddListener(topic string, listener KafkaMessageListener) *KafkaConsumer {
+	consumer.topics = append(consumer.topics, topic)
+	consumer.listeners[topic] = listener
+	return consumer
+}
+
+// Start 启动消费者，开始消费
+func (consumer *KafkaConsumer) Start(cancelCtx context.Context) {
+	go func(ctx context.Context) {
+		for {
+			// `Consume` should be called inside an infinite loop, when a
+			// server-side rebalance happens, the consumer session will need to be
+			// recreated to get the new claims
+			if err := kafkaConsumerGroup.Consume(ctx, consumer.topics, consumer); err != nil {
+				panic("Error from consumer:" + err.Error())
+			}
+			// check if context was cancelled, signaling that the consumer should stop
+			if ctx.Err() != nil {
+				return
+			}
+			consumer.ready = make(chan bool)
+		}
+	}(cancelCtx)
+	// await till the consumer has been set up
+	<-consumer.ready
+	log.Println("Sarama consumer up and running!...")
+}
+
+// Setup is run at the beginning of a new session, before ConsumeClaim
+func (consumer *KafkaConsumer) Setup(sarama.ConsumerGroupSession) error {
+	// Mark the consumer as ready
+	close(consumer.ready)
+	return nil
+}
+
+// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
+func (consumer *KafkaConsumer) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
+func (consumer *KafkaConsumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	// NOTE:
+	// Do not move the code below to a goroutine.
+	// The `ConsumeClaim` itself is called within a goroutine, see:
+	// https://github.com/Shopify/sarama/blob/master/consumer_group.go#L27-L29
+	for message := range claim.Messages() {
+		log.Printf("Message claimed: value = %s, timestamp = %v, topic = %s \n", string(message.Value), message.Timestamp, message.Topic)
+		topic := message.Topic
+		err := consumer.listeners[topic](message)
+		if err == nil {
+			if consumer.AutoCommit {
+				session.MarkMessage(message, "")
+			}
+		} else {
+			log.Printf("Message claimed handle failed: value = %s, timestamp = %v, topic = %s \n", string(message.Value), message.Timestamp, message.Topic)
+		}
+	}
+	return nil
+}
+
+//-------------------consumer end------------------
+```
+
+main
+
+```go
+package main
+
+import (
+	"context"
+	"github.com/Shopify/sarama"
+	"log"
+)
+
+const (
+	UserRoleAllSyncRequestTopic  = "iam.sync.event.user-role-req.0"    // 全量同步请求topic
+	UserRoleAllSyncResponseTopic = "iam.sync.message.user-role.0"      // 全量同步响应topic
+	UserRoleChangeSyncTopic      = "iam.sync.event.user-role-change.0" // 增量同步topic
+	UserRoleSyncReceiverKey      = "receiver"                          // 消息头中接受者key
+	TestKafkaAddr                = "124.223.192.8:9092"                // kafka地址，当前暂时用自己的
+	TestConsumerGroupId          = "111111111111111"                   // 消费者组id
+)
+
+func main() {
+	// 初始化连接
+	InitKafkaConnect(&KafkaConnectOptions{
+		Brokers:         []string{TestKafkaAddr},
+		ConsumerGroupId: TestConsumerGroupId,
+	})
+	defer CloseKafkaConnect()
+
+	// 注册监听器
+	kafkaConsumer := NewKafkaConsumer(false)
+	kafkaConsumer.AddListener(UserRoleChangeSyncTopic, func(message *sarama.ConsumerMessage) error {
+		log.Printf("收到消息：topic: %s, key: %s, value: %s", message.Topic, string(message.Key), string(message.Value))
+		return nil
+	})
+	// 开始
+	kafkaConsumer.Start(context.Background())
+}
+```
+
+备注：还没有测试！！！
+
+下面是我自己写的，不知道为啥跑不起来：
+
+```go
+package user_role_sync
+
+import (
+	"context"
+	"github.com/Shopify/sarama"
+	"log"
+)
+
+var consumerGroup sarama.ConsumerGroup
+
+// InitConsumer 建议在main函数中调用
+func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Context, topicHandlers ...*MyTopicHandler) {
+	// 1.参数检查
+	if groupId == "" {
+		panic("groupId不能为空")
+	}
+	if topicHandlers == nil || len(topicHandlers) == 0 {
+		panic("必须指定topic处理器")
+	}
+
+	// 2.初始化消费者组
+	var err error
+	consumerGroup, err = sarama.NewConsumerGroup([]string{TestKafkaAddr}, groupId, config)
+	if err != nil {
+		panic("init kafka consumer group error: " + err.Error())
+	}
+
+	// 3.添加topic处理器
+	topics := make([]string, 0, len(topicHandlers))
+	msgHandlers := make(map[string]MyMsgHandler, len(topicHandlers))
+	for _, topicHandler := range topicHandlers {
+		topics = append(topics, topicHandler.Topic)
+		msgHandlers[topicHandler.Topic] = topicHandler.MsgHandler
+	}
+	cgh := MyConsumerGroupHandler{
+		topics:      topics,
+		msgHandlers: msgHandlers,
+	}
+
+	// 4.监听消息
+	go func(cancelContext context.Context) {
+		for {
+			if err := consumerGroup.Consume(cancelContext, topics, &cgh); err != nil {
+				panic("Error from consumer:" + err.Error())
+			}
+			// check if context was cancelled, signaling that the consumer should stop
+			if cancelContext.Err() != nil {
+				return
+			}
+		}
+	}(cancelCtx)
+
+	log.Printf("消费者组已经初始化成功\n")
+}
+
+// CloseConsumer 如果调用了消费者的初始化函数，则必须在main函数中注册此关闭函数
+func CloseConsumer() {
+	if err := consumerGroup.Close(); err != nil {
+		log.Printf("关闭kafka consumer group 出现错误：%+v\n", err)
+	}
+}
+
+// MyTopicHandler topic处理器
+type MyTopicHandler struct {
+	Topic string
+	// 此topic对应的消息处理器
+	MsgHandler MyMsgHandler
+}
+
+// MyMsgHandler 消息处理器
+type MyMsgHandler func(message *sarama.ConsumerMessage) error
+
+// MyConsumerGroupHandler 实现了ConsumerGroupHandler接口
+// 用于处理每个topic/partition 的claims
+// Note：处理器会被几个线程并发调用，确保线程安全
+type MyConsumerGroupHandler struct {
+	topics []string
+	// key为topic，value为topic对应的消息处理器
+	msgHandlers map[string]MyMsgHandler
+}
+
+// Setup 在新建session，调用ConsumerClaim()方法之前允许
+func (handler *MyConsumerGroupHandler) Setup(consumerGroupSession sarama.ConsumerGroupSession) error {
+	// TODO
+	return nil
+}
+
+// Cleanup session结束时允许，一旦所有ConsumerClaim Goroutine退出，但在最后一次提交偏移之前。
+func (handler *MyConsumerGroupHandler) Cleanup(consumerGroupSession sarama.ConsumerGroupSession) error {
+	// TODO
+	return nil
+}
+
+// ConsumeClaim 必须开始一个对于claim.Messages()的消费循环，只要这个管道被关闭，这个处理器必须退出循环处理
+func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.ConsumerGroupSession, consumerGroupClaim sarama.ConsumerGroupClaim) error {
+	// NOTE:
+	// Do not move the code below to a goroutine.
+	// The `ConsumeClaim` itself is called within a goroutine, see:
+	// https://github.com/Shopify/sarama/blob/master/consumer_group.go#L27-L29
+	for message := range consumerGroupClaim.Messages() {
+		// 让每个topic自定的消息处理器进行处理
+		if err := handler.msgHandlers[message.Topic](message); err != nil {
+			// 消息处理错误，但是跳过了
+			log.Printf("message : topic: %+v, key:= %+v, 处理出现错误：%+v\n", message.Topic, message.Key, err)
+		}
+		// 标记信息已经消费
+		consumerGroupSession.MarkMessage(message, "")
+	}
+	return nil
+}
 ```
 
