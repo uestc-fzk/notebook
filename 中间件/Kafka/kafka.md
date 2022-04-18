@@ -85,7 +85,7 @@ Option                                   Description
 --list                                   列出所有topic 
 --describe								 查看topic具体描述
 --partitions <Integer>  				 指定partitions数量
---replication-factor <Integer>           指定每个分区的副本因子
+--replication-factor <Integer>           指定每个分区的副本个数
 ```
 
 测试一下：
@@ -493,9 +493,33 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 
 看pdf和视频资料：https://www.bilibili.com/video/BV1vr4y1677k?p=24
 
+## kafka副本
+
+建议看PDF文档即可。
+
+### leader partition的自动平衡
+
+![image-20220416232827271](kafka.assets/image-20220416232827271.png)
+
+下面关于这个自动平衡的参数可以在kafka官方文档中的broker 配置处找到：
+
+| 参数名称                                                     | 说明                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [auto.create.topics.enable](https://kafka.apache.org/documentation/#brokerconfigs_auto.create.topics.enable) | 默认是 true。 自动 Leader Partition 平衡。生产环境中，leader 重选举的代价比较大，可能会带来性能影响，建议设置为 false 关闭 |
+| [leader.imbalance.per.broker.percentage](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.per.broker.percentage) | 默认是 10%。每个 broker 允许的不平衡的 leader的比率。如果每个 broker 超过了这个值，控制器会触发 leader 的平衡 |
+| [leader.imbalance.check.interval.seconds](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.check.interval.seconds) | 默认值 300 秒。检查 leader 负载是否平衡的间隔时间。          |
+
+## 文件存储
+
+这个挺重要的，多看看PDF文档就可以了。
+
 # Golang操作kafka
 
-golang操作kafka的库有两个，一个是[sarama](https://github.com/Shopify/sarama)，一个是[kafka-go](https://github.com/segmentio/kafka-go)，目前第一个star数更多，本笔记也使用第一个库。
+golang操作kafka的库有两个，一个是[sarama](https://github.com/Shopify/sarama)，一个是[kafka-go](https://github.com/segmentio/kafka-go)，目前第一个star数更多，本笔记使用第一个库。
+
+下载sarama依赖库：`go get github.com/Shopify/sarama`
+
+在下面的生产者和消费者组中：生产者的测试代码都是自己直接写的，消费者组的代码都是模仿官方案例写的。
 
 ## 生产者
 
@@ -503,11 +527,8 @@ golang操作kafka的库有两个，一个是[sarama](https://github.com/Shopify/
 
 ```go
 const (
-	UserRoleAllSyncRequestTopic  = "iam.sync.event.user-role-req.0"    // 全量同步请求topic
-	UserRoleAllSyncResponseTopic = "iam.sync.message.user-role.0"      // 全量同步响应topic
-	UserRoleChangeSyncTopic      = "iam.sync.event.user-role-change.0" // 增量同步topic
-	UserRoleSyncReceiverKey      = "receiver"                          // 消息头中接受者key
-    TestKafkaAddr                = "你的kafka地址host:port"              // kafka地址
+	TestTopic     = "test_topic"         // 测试topic
+	TestKafkaAddr = "124.223.192.8:9092" // kafka连接地址，逗号分隔
 )
 ```
 
@@ -522,21 +543,21 @@ var (
 )
 
 // InitProducer 初始化生产者，在main函数中调用
-func InitProducer() {
+func InitProducer(kafkaAddr []string) {
 	// 1.准备配置
 	config := sarama.NewConfig()
 	config.Producer.RequiredAcks = sarama.WaitForAll // 发送完数据需要leader和follow都确认，默认WaitForLocal RequiredAcks，即1
 	// 分区器建议用默认的就好，不用改啦，默认情况：有key则hash，无key则粘性分区
 	//config.Producer.Partitioner = sarama.NewRandomPartitioner // 新选出一个partition
-	config.Producer.Return.Errors = true // 发送消息出现异常把错误放入管道，默认true
-    config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
+	config.Producer.Return.Errors = true    // 发送消息出现异常把错误放入管道，默认true
+	config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
 
 	//  2.初始化同步生产者
-	initSyncProducerClient(config)
+	initSyncProducerClient(config, kafkaAddr)
 
 	// 3.初始化异步生产者
 	config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
-	initAsyncProducerClient(config)
+	initAsyncProducerClient(config, kafkaAddr)
 }
 
 // CloseProducer 关闭生产者连接，如果有初始化生产者则必须在main函数中调用
@@ -556,7 +577,7 @@ func SyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
 		fmt.Printf("发送消息失败，产生错误%+v \n", err)
 		return err
 	}
-	fmt.Printf("消息已经成功发送到：topic: %v, partitionId:%v , offset:%v\n", producerMsg.Topic, partitionId, offset)
+	fmt.Printf("同步发送方式：消息已经成功发送到：topic: %v, partitionId:%v , offset:%v\n", producerMsg.Topic, partitionId, offset)
 	return nil
 }
 
@@ -571,7 +592,7 @@ func AsyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
 	select {
 	// 把消息往管道一放就完事了，再读取一下错误和成功消息免得死锁就行啦
 	case asyncProducer.Input() <- producerMsg:
-		log.Printf("消息已经放入管道，等待异步发送\n")
+		log.Printf("消息已经放入管道，等待异步发送...\n")
 	case err := <-asyncProducer.Errors():
 		log.Printf("发送消息失败了: %+v \n", err)
 	case <-asyncProducer.Successes():
@@ -581,11 +602,11 @@ func AsyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
 }
 
 // initSyncProducerClient 初始化同步生产者客户端，应在main函数中调用
-func initSyncProducerClient(config *sarama.Config) {
+func initSyncProducerClient(config *sarama.Config, kafkaAddr []string) {
 	var err error
 
 	// 同步的生产者客户端连接
-	producer, err = sarama.NewSyncProducer([]string{TestKafkaAddr}, config) // note：这里先连接自己的kafka
+	producer, err = sarama.NewSyncProducer(kafkaAddr, config) // note：这里先连接自己的kafka
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -600,11 +621,11 @@ func closeSyncProducerClient() {
 }
 
 // InitAsyncProducerClient 初始化异步生产者客户端，应在main函数中调用
-func initAsyncProducerClient(config *sarama.Config) {
+func initAsyncProducerClient(config *sarama.Config, kafkaAddr []string) {
 	var err error
 
 	// 同步的生产者客户端连接
-	asyncProducer, err = sarama.NewAsyncProducer([]string{TestKafkaAddr}, config) // note：这里先连接自己的kafka
+	asyncProducer, err = sarama.NewAsyncProducer(kafkaAddr, config) // note：这里先连接自己的kafka
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -623,246 +644,59 @@ func closeAsyncProducerClient() {
 
 ```go
 func main() {
-	user_role_sync.InitProducer()
-	defer user_role_sync.CloseProducer()
+	// 1.初始化生产者
+	InitProducer(strings.Split(TestKafkaAddr, ","))
+	defer CloseProducer()
 
-	var tenantKey = "CTS"
-	var users = []*user_role_sync.UserMsg{{Username: "fzk", Roles: []*user_role_sync.RoleMsg{{Name: "developer"}}}}
-	if err := user_role_sync.PublishUserChangeSyncMsg(user_role_sync.OptUserAdd, tenantKey, users); err != nil {
+	// 2.构造消息
+	producerMsg := &sarama.ProducerMessage{
+		Topic:     TestTopic,
+		Headers:   []sarama.RecordHeader{{Key: []byte("k1"), Value: []byte("v1")}}, // 可以设置消息头
+		Key:       sarama.StringEncoder("myKey"),                                   // 一般会根据key进行hash 分区
+		Value:     sarama.ByteEncoder("this is a test msg"),
+		Timestamp: time.Now(),
+		//Partition: int32(0), // 分区可以指定，也可以不指定，不指定则默认情况下，有key则hash 分区，无key则粘性分区
+	}
+
+	// 3.同步发送消息
+	if err := SyncPublishMsg(producerMsg); err != nil {
 		log.Fatalln(err)
 	}
-}
 
-// PublishUserChangeSyncMsg 广播用户信息改变消息，即增量同步用户信息
-// @param opt 指定操作行为，可选的有user:add,user:update,user:delete
-// @param tenantKey 指定租户的key
-// @param users 用户信息列表
-func PublishUserChangeSyncMsg(opt string, tenantKey string, users []*UserMsg) error {
-	// 0.参数检查
-	if opt != OptUserAdd && opt != OptUserUpdate && opt != OptUserDelete {
-		return errors.New(fmt.Sprintf("增量同步用户信息: opt 只能是 %s 或 %s 或%s，然后传入的opt是%s", OptUserAdd, OptUserUpdate, OptUserDelete, opt))
-	}
-	if tenantKey == "" {
-		return errors.New("增量同步用户信息: 租户key不能为空")
-	}
-	if users == nil || len(users) == 0 {
-		return errors.New("增量同步用户信息: 用户数组不能为空")
-	}
-	// 1.构造消息体
-	valBuf, err := json.Marshal(&UserRoleChangeSyncMsg{
-		Opt:   opt,
-		Users: users,
-	})
-	if err != nil {
-		return err
-	}
-
-	// 2.构造一个消息
-	producerMsg := &sarama.ProducerMessage{
-		Topic:   UserRoleChangeSyncTopic, // 增量同步topic
-		Headers: []sarama.RecordHeader{{Key: []byte(UserRoleSyncReceiverKey), Value: []byte(tenantKey)}},
-		Key:     sarama.StringEncoder("user:" + strconv.FormatInt(users[0].ID, 10)), // 以user:id为key
-		Value:   sarama.ByteEncoder(valBuf),
-	}
-
-	// 3.发送消息
-	return SyncPublishMsg(producerMsg)
-}
-
-```
-
-## 消费者
-
-```go
-package main
-
-import (
-	"context"
-	"github.com/Shopify/sarama"
-	"log"
-)
-
-// kafkaConsumerGroup kafka group
-var kafkaConsumerGroup sarama.ConsumerGroup
-
-// KafkaConnectOptions Kafka connect options
-type KafkaConnectOptions struct {
-	Brokers         []string
-	ConsumerGroupId string
-}
-
-func InitKafkaConnect(options *KafkaConnectOptions) {
-	if len(options.Brokers) == 0 {
-		panic("Kafka brokers must be specialized")
-	}
-	config := sarama.NewConfig()
-
-	var err error
-
-	// init kafka consumer group
-	kafkaConsumerGroup, err = sarama.NewConsumerGroup(options.Brokers, options.ConsumerGroupId, config)
-	if err != nil {
-		panic("Init kafka consumer group error, " + err.Error())
-	}
-}
-
-// CloseKafkaConnect defer this function after InitKafkaConnectWithConfig()
-func CloseKafkaConnect() {
-	// close consumer group
-	if err := kafkaConsumerGroup.Close(); err != nil {
-		log.Println("Close kafka consumer group error, ", err)
-	}
-	log.Println("Close kafka consumer group finish")
-}
-
-//-------------------consumer start------------------
-
-type KafkaMessageListener func(message *sarama.ConsumerMessage) error
-
-// KafkaConsumer represents a Sarama consumer group consumer
-type KafkaConsumer struct {
-	ready      chan bool
-	topics     []string
-	listeners  map[string]KafkaMessageListener
-	AutoCommit bool
-}
-
-// NewKafkaConsumer 创建consumer
-func NewKafkaConsumer(autoCommit bool) *KafkaConsumer {
-	consumer := &KafkaConsumer{
-		ready:      make(chan bool),
-		listeners:  make(map[string]KafkaMessageListener),
-		AutoCommit: autoCommit,
-	}
-	return consumer
-}
-
-// AddListener 绑定topic和listener
-func (consumer *KafkaConsumer) AddListener(topic string, listener KafkaMessageListener) *KafkaConsumer {
-	consumer.topics = append(consumer.topics, topic)
-	consumer.listeners[topic] = listener
-	return consumer
-}
-
-// Start 启动消费者，开始消费
-func (consumer *KafkaConsumer) Start(cancelCtx context.Context) {
-	go func(ctx context.Context) {
-		for {
-			// `Consume` should be called inside an infinite loop, when a
-			// server-side rebalance happens, the consumer session will need to be
-			// recreated to get the new claims
-			if err := kafkaConsumerGroup.Consume(ctx, consumer.topics, consumer); err != nil {
-				panic("Error from consumer:" + err.Error())
-			}
-			// check if context was cancelled, signaling that the consumer should stop
-			if ctx.Err() != nil {
-				return
-			}
-			consumer.ready = make(chan bool)
-		}
-	}(cancelCtx)
-	// await till the consumer has been set up
-	<-consumer.ready
-	log.Println("Sarama consumer up and running!...")
-}
-
-// Setup is run at the beginning of a new session, before ConsumeClaim
-func (consumer *KafkaConsumer) Setup(sarama.ConsumerGroupSession) error {
-	// Mark the consumer as ready
-	close(consumer.ready)
-	return nil
-}
-
-// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
-func (consumer *KafkaConsumer) Cleanup(sarama.ConsumerGroupSession) error {
-	return nil
-}
-
-// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
-func (consumer *KafkaConsumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	// NOTE:
-	// Do not move the code below to a goroutine.
-	// The `ConsumeClaim` itself is called within a goroutine, see:
-	// https://github.com/Shopify/sarama/blob/master/consumer_group.go#L27-L29
-	for message := range claim.Messages() {
-		log.Printf("Message claimed: value = %s, timestamp = %v, topic = %s \n", string(message.Value), message.Timestamp, message.Topic)
-		topic := message.Topic
-		err := consumer.listeners[topic](message)
-		if err == nil {
-			if consumer.AutoCommit {
-				session.MarkMessage(message, "")
-			}
-		} else {
-			log.Printf("Message claimed handle failed: value = %s, timestamp = %v, topic = %s \n", string(message.Value), message.Timestamp, message.Topic)
+	// 4.异步发送消息
+	for i := 0; i < 5; i++ {
+		if err := AsyncPublishMsg(producerMsg); err != nil {
+			log.Fatalln(err)
 		}
 	}
-	return nil
+	time.Sleep(time.Second * 5) // 主线程等一会
 }
-
-//-------------------consumer end------------------
 ```
 
-main
+## 消费者组
+
+1、常量定义：
 
 ```go
-package main
-
-import (
-	"context"
-	"github.com/Shopify/sarama"
-	"log"
-)
-
 const (
-	UserRoleAllSyncRequestTopic  = "iam.sync.event.user-role-req.0"    // 全量同步请求topic
-	UserRoleAllSyncResponseTopic = "iam.sync.message.user-role.0"      // 全量同步响应topic
-	UserRoleChangeSyncTopic      = "iam.sync.event.user-role-change.0" // 增量同步topic
-	UserRoleSyncReceiverKey      = "receiver"                          // 消息头中接受者key
-	TestKafkaAddr                = "124.223.192.8:9092"                // kafka地址，当前暂时用自己的
-	TestConsumerGroupId          = "111111111111111"                   // 消费者组id
+	TestTopic           = "test_topic"         // 测试topic
+	TestKafkaAddr       = "124.223.192.8:9092" // kafka地址，当前暂时用自己的
+	TestConsumerGroupId = "test_group"         // 消费者组id
 )
-
-func main() {
-	// 初始化连接
-	InitKafkaConnect(&KafkaConnectOptions{
-		Brokers:         []string{TestKafkaAddr},
-		ConsumerGroupId: TestConsumerGroupId,
-	})
-	defer CloseKafkaConnect()
-
-	// 注册监听器
-	kafkaConsumer := NewKafkaConsumer(false)
-	kafkaConsumer.AddListener(UserRoleChangeSyncTopic, func(message *sarama.ConsumerMessage) error {
-		log.Printf("收到消息：topic: %s, key: %s, value: %s", message.Topic, string(message.Key), string(message.Value))
-		return nil
-	})
-	// 开始
-	kafkaConsumer.Start(context.Background())
-}
 ```
 
-备注：还没有测试！！！
-
-下面是我自己写的，不知道为啥跑不起来：
+2、消费者组配置代码
 
 ```go
-package user_role_sync
-
-import (
-	"context"
-	"github.com/Shopify/sarama"
-	"log"
-)
-
 var consumerGroup sarama.ConsumerGroup
 
 // InitConsumer 建议在main函数中调用
-func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Context, topicHandlers ...*MyTopicHandler) {
+func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Context, topicListeners ...*MyTopicListener) {
 	// 1.参数检查
 	if groupId == "" {
 		panic("groupId不能为空")
 	}
-	if topicHandlers == nil || len(topicHandlers) == 0 {
+	if topicListeners == nil || len(topicListeners) == 0 {
 		panic("必须指定topic处理器")
 	}
 
@@ -873,12 +707,12 @@ func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Conte
 		panic("init kafka consumer group error: " + err.Error())
 	}
 
-	// 3.添加topic处理器
-	topics := make([]string, 0, len(topicHandlers))
-	msgHandlers := make(map[string]MyMsgHandler, len(topicHandlers))
-	for _, topicHandler := range topicHandlers {
-		topics = append(topics, topicHandler.Topic)
-		msgHandlers[topicHandler.Topic] = topicHandler.MsgHandler
+	// 3.添加topic监听器
+	topics := make([]string, 0, len(topicListeners))
+	msgHandlers := make(map[string]MyMsgHandler, len(topicListeners))
+	for _, topicListener := range topicListeners {
+		topics = append(topics, topicListener.Topic)
+		msgHandlers[topicListener.Topic] = topicListener.MsgHandler
 	}
 	cgh := MyConsumerGroupHandler{
 		topics:      topics,
@@ -888,6 +722,9 @@ func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Conte
 	// 4.监听消息
 	go func(cancelContext context.Context) {
 		for {
+			// `Consume` should be called inside an infinite loop, when a
+			// server-side rebalance happens, the consumer session will need to be
+			// recreated to get the new claims
 			if err := consumerGroup.Consume(cancelContext, topics, &cgh); err != nil {
 				panic("Error from consumer:" + err.Error())
 			}
@@ -908,8 +745,8 @@ func CloseConsumer() {
 	}
 }
 
-// MyTopicHandler topic处理器
-type MyTopicHandler struct {
+// MyTopicListener topic监听器
+type MyTopicListener struct {
 	Topic string
 	// 此topic对应的消息处理器
 	MsgHandler MyMsgHandler
@@ -930,12 +767,14 @@ type MyConsumerGroupHandler struct {
 // Setup 在新建session，调用ConsumerClaim()方法之前允许
 func (handler *MyConsumerGroupHandler) Setup(consumerGroupSession sarama.ConsumerGroupSession) error {
 	// TODO
+	log.Printf("setup\n")
 	return nil
 }
 
 // Cleanup session结束时允许，一旦所有ConsumerClaim Goroutine退出，但在最后一次提交偏移之前。
 func (handler *MyConsumerGroupHandler) Cleanup(consumerGroupSession sarama.ConsumerGroupSession) error {
 	// TODO
+	log.Printf("cleanup\n")
 	return nil
 }
 
@@ -946,15 +785,55 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 	// The `ConsumeClaim` itself is called within a goroutine, see:
 	// https://github.com/Shopify/sarama/blob/master/consumer_group.go#L27-L29
 	for message := range consumerGroupClaim.Messages() {
-		// 让每个topic自定的消息处理器进行处理
+		// 让每个topic指定的消息处理器进行处理
 		if err := handler.msgHandlers[message.Topic](message); err != nil {
 			// 消息处理错误，但是跳过了
 			log.Printf("message : topic: %+v, key:= %+v, 处理出现错误：%+v\n", message.Topic, message.Key, err)
 		}
 		// 标记信息已经消费
+		// 这里的作用是：此消费者组的groupId对应的这个消息会被标记为已经消费了，
+		// 那么对应kafka而言，之后此groupId的消费者来获取消息，不管它设置的initOffset是-1还是-2，
+		// 它都只能获取到新来的没有被标记为消费过的消息了
+		// 一般来说最好是消费完消息标记已经消费过了
 		consumerGroupSession.MarkMessage(message, "")
 	}
 	return nil
 }
+```
+
+3、main函数
+
+```go
+func main() {
+	// 1.新建配置
+	config := sarama.NewConfig()
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest // 配置为：消费所有未被此消费者组标记已经消费过的历史消息
+
+	// 2.初始化消费者组
+	InitConsumer(GroupId, config, context.Background(), &MyTopicListener{
+		Topic: TestTopic,
+		MsgHandler: func(message *sarama.ConsumerMessage) error {
+			log.Printf("topic: %s, key: %s, value: %s\n", message.Topic, string(message.Key), string(message.Value))
+			return nil
+		},
+	})
+	defer CloseConsumer()
+
+	log.Printf("准备开始休眠\n")
+	time.Sleep(time.Second * 10)
+}
+```
+
+> 注意：此时配置的消费组id是`test_group`，在指定了消费者组id，并且初始的`config.Consumer.Offsets.Initial`配置为-2即消费历史消息和新消息时，此时消费者组只会消费那些没有被此消费者组标记过的消息，比如历史消息中未被标记消费过的，和新到来的消息。
+
+## 可能出现的问题
+
+![image-20220416192437751](kafka.assets/image-20220416192437751.png)
+
+错误信息提示无法找到名为k8s-master的主机名，确实找不到，只能修改host文件，手动指定它到外网ip。在host文件加入下面这些内容：这个k8s-master是我部署kafka的主机名称。
+
+```
+# 这个是连接kafka服务器的
+124.223.192.8 k8s-master
 ```
 
