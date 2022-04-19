@@ -199,6 +199,7 @@ Processed a total of 21 messages
 
 ```java
 /**
+ * 生产者
  * @author fzk
  * @date 2022-04-12 22:53
  */
@@ -512,6 +513,98 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 ## 文件存储
 
 这个挺重要的，多看看PDF文档就可以了。
+
+# kafka消费者
+
+## 消费流程
+
+### 总体流程
+
+![image-20220418222944330](kafka.assets/image-20220418222944330.png)
+
+### 消费者组
+
+![image-20220418223126492](kafka.assets/image-20220418223126492.png)
+
+![image-20220418223200819](kafka.assets/image-20220418223200819.png)
+
+![image-20220418221446366](kafka.assets/image-20220418221446366.png)
+
+![image-20220418222739958](kafka.assets/image-20220418222739958.png)
+
+## 消费者API
+
+消费者API和生产者API是一样的依赖：
+
+```xml
+ <dependency>
+     <groupId>org.apache.kafka</groupId>
+     <artifactId>kafka-clients</artifactId>
+     <version>3.1.0</version>
+ </dependency>
+```
+
+消费者组代码如下：
+
+```java
+/**
+ * 消费者组
+ *
+ * @author fzk
+ * @date 2022-04-18 22:33
+ */
+public class MyConsumer {
+    public static void main(String[] args) {
+        // 0.准备配置
+        Properties properties = new Properties();
+        // 0.1 必须：连接kafka集群：bootstrap.servers
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "124.223.192.8:9092");
+        // 0.2 必须：指定key和value的反序列化方式
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        // 0.3 必须：指定groupId，每个消费者组只能消费某个topic的消息1次，
+        // 当消费组消费此消息时，默认配置enable.auto.commit为true情况下会自动提交此消息，此消息会被打上被此消费者组消费过的标签
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "myGroupId:1");
+
+        // 1.创建消费者组：当然这里只创建了一个消费者，生产环境可以多创建几个
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties);
+        // 查询一些基本信息
+        Map<String, List<PartitionInfo>> listTopics = consumer.listTopics();
+        System.out.println("一共有" + listTopics.size() + "个topic");// 查询所有topic的信息
+        listTopics.forEach((key, partitions) -> {
+            System.out.printf("topic：%s 有%d个分区\n", key, partitions.size());
+        });
+
+        try {
+            // 2.订阅topic
+            // Note；下面这两种订阅方式是互斥的，对于某个消费者，只能有一种订阅方式
+            // 2.1 方式1：直接订阅topic所有分区
+            //consumer.subscribe(List.of("my_topic1", "my_topic2"));
+            // 2.2 方式2：订阅topic指定分区
+            consumer.assign(List.of(new TopicPartition("my_topic1", 0),
+                    new TopicPartition("my_topic1", 1),
+                    new TopicPartition("my_topic2", 0)));
+
+            // 3.消息处理
+            for (int i = 0; i < 10; i++) {
+                // 3.1 消息拉取：配置为每s拉取一次数据
+                ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(1L));
+                // 3.2 消息分派：这里需要对不同topic的消息作不同处理，而且最好是借助线程池做异步处理
+                for (ConsumerRecord<String, String> record : consumerRecords) {
+                    System.out.println(record.toString());
+                }
+            }
+        } finally {
+            // 4.关闭消费者组
+            consumer.close();
+        }
+    }
+}
+```
+
+> 注意：在默认情况下，消费者组会消费**新到来**的且**未标记**为已经消费过的消息，而且我好像没有找到能够配置消费的初始offset，这和golang中的sarama库是不同的。
+>
+> 消息分派：在golang中倒是可以直接用协程跑，Java这边需要专门准备线程池来跑了。好处：可以早点提交消息，避免消费者线程一直忙于消息处理的业务逻辑，而不能即时拉取和处理新消息。即消费者线程应该用于**消息拉取**和**消息分派**。
 
 # Golang操作kafka
 
