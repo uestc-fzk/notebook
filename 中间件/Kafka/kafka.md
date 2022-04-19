@@ -602,9 +602,291 @@ public class MyConsumer {
 }
 ```
 
-> 注意：在默认情况下，消费者组会消费**新到来**的且**未标记**为已经消费过的消息，而且我好像没有找到能够配置消费的初始offset，这和golang中的sarama库是不同的。
+> 注意：在默认情况下，消费者组会消费**新到来**的且**未标记**为已经消费过的消息，auto.offset.reset可以配置初始消费偏移量，默认为latest，即消费新消息。
 >
 > 消息分派：在golang中倒是可以直接用协程跑，Java这边需要专门准备线程池来跑了。好处：可以早点提交消息，避免消费者线程一直忙于消息处理的业务逻辑，而不能即时拉取和处理新消息。即消费者线程应该用于**消息拉取**和**消息分派**。
+
+## 分区分配和再平衡
+
+![image-20220419221532657](kafka.assets/image-20220419221532657.png)
+
+相关的配置
+
+| 参数                          | 描述                                                         |
+| ----------------------------- | ------------------------------------------------------------ |
+| heartbeat.interval.ms         | Kafka 消费者和 coordinator 之间的心跳时间，默认 3s。该条目的值必须小于 session.timeout.ms，典型的应该低于session.timeout.ms 的 1/3。可以调整小点以缩小触发再平衡时间。 |
+| session.timeout.ms            | Kafka 消费者和 coordinator 之间连接超时时间，默认 45s。超过该值，该消费者被移除，消费者组执行再平衡。 |
+| max.poll.interval.ms          | 消费者处理消息的最大时长，默认是 5 分钟。超过该值，该消费者被移除，消费者组执行再平衡。 |
+| partition.assignment.strategy | 消 费 者 分 区 分 配 策 略 ， 默 认 策 略 是 Range +CooperativeSticky。Kafka 可以同时使用多个分区分配策略。可 以 选 择 的 策 略 包 括 ： Range 、 RoundRobin 、 Sticky 、CooperativeSticky |
+
+实现该`org.apache.kafka.clients.consumer.ConsumerPartitionAssignor`接口允许自定义分区分配策略。
+CooperativeSticky类似于粘性分区策略，但是又允许自动平衡。
+
+### 分区策略Range
+
+![image-20220419225631373](kafka.assets/image-20220419225631373.png)
+
+一个有趣的测试案例**RoundRobin** **分区分配策略案例**去看PDF文档
+
+###  分区策略RoundRobin
+
+![image-20220419230330130](kafka.assets/image-20220419230330130.png)
+
+修改分区分配策略为RoundRobin：
+
+```java
+// 0.4 optional：修改分区分配策略为RoundRobin，默认是Range+CooperativeStickyAssignor
+properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, org.apache.kafka.clients.consumer.RoundRobinAssignor.class.getName());
+```
+
+**RoundRobin** **分区分配再平衡案例**去看PDF
+
+### 分区策略Sticky
+
+粘性分区：保证分配是最大平衡的，同时保留尽可能多的现有分区分配结果。可以理解为分配的结果带有“粘性的”。即在执行一次新的分配之前，考虑上一次分配的结果，尽量少的调整分配的变动，可以节省大量的开销。
+
+粘性分区是 Kafka 从 0.11.x 版本开始引入这种分配策略，首先会尽量均衡的放置分区到消费者上面，在出现同一消费者组内消费者出现问题的时候，会尽量保持原有分配的分区不变化。
+
+**Sticky** **分区分配再平衡案例**看PDF文档。
+
+## offset
+
+### offset存储
+
+![image-20220419232141047](kafka.assets/image-20220419232141047.png)
+
+__consumer_offsets 主题里面采用 key 和 value 的方式存储数据。key 是 `group.id+topic+分区号`，value 就是当前 offset 的值。每隔一段时间，kafka 内部会对这个 topic 进行compact，也就是每个 `group.id+topic+分区号`就保留最新数据。
+
+**offset在_consumer_offsets中存储的案例**去看PDF文档。
+
+内部topic默认是不对消费者开放的，需要专门配置一下才能访问：
+
+```java
+// 0.5 optional：配置为不排除内部topic，默认true
+properties.put(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, false);
+```
+
+### 自动提交offset
+
+相关配置：
+
+| 参数                    | 描述                                                         |
+| ----------------------- | ------------------------------------------------------------ |
+| enable.auto.commit      | 消费者是否会自动周期性地向服务器提交偏移量，默认是true       |
+| auto.commit.interval.ms | 如果设置了 enable.auto.commit 的值为 true， 则该值定义了消费者偏移量向 Kafka 提交的频率，默认 5s |
+
+![image-20220419233846870](kafka.assets/image-20220419233846870.png)
+
+配置自动提交：
+
+```java
+// 0.6 optional: 配置offset的自动提交
+properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);// 默认true
+properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 3000);// 默认5000ms
+```
+
+### 手动提交offset
+
+虽然自动提交offset十分简单，但其是基于时间提交的，开发人员难以把握offset提交的时机。所以有时候还得手动提交。
+
+kafka提供两种手动提交方式：都会将本次拉取的一批数据最高的偏移量提交
+
+- commitSync：同步提交，阻塞当前线程，一直到提交成功，自动失败重试
+- commitAsync：异步提交，没有失败重试机制，有可能提交失败，一般用这个，可以在回调方法中进行失败重试
+
+![image-20220419234849720](kafka.assets/image-20220419234849720.png)
+
+
+
+下面是一个同步提交的案例：
+
+1、先关闭自动提交
+
+```java
+// 0.6 optional: 关闭offset的自动提交
+properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);// 默认true
+```
+
+2、消费者组完整代码
+
+```java
+/**
+ * 消费者组
+ *
+ * @author fzk
+ * @date 2022-04-18 22:33
+ */
+public class MyConsumer {
+    public static void main(String[] args) {
+        // 0.准备配置
+        Properties properties = new Properties();
+        // 0.1 必须：连接kafka集群：bootstrap.servers
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "124.223.192.8:9092");
+        // 0.2 必须：指定key和value的反序列化方式
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        // 0.3 必须：指定groupId，每个消费者组只能消费某个topic的消息1次，
+        // 当消费组消费此消息时，默认配置enable.auto.commit为true情况下会自动提交此消息，此消息会被打上被此消费者组消费过的标签
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "myGroupId:2");
+
+        // 0.4 optional：修改分区分配策略为RoundRobin，默认是Range+CooperativeStickyAssignor
+        properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, org.apache.kafka.clients.consumer.RoundRobinAssignor.class.getName());
+        // 0.5 optional：配置为不排除内部topic，默认true
+        properties.put(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, false);
+        // 0.6 optional: 关闭offset的自动提交
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);// 默认true
+        //properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 3000);// 默认5000ms
+
+
+        // 1.创建消费者组：当然这里只创建了一个消费者，生产环境可以多创建几个
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties);
+        // 查询一些基本信息
+        Map<String, List<PartitionInfo>> listTopics = consumer.listTopics();
+        System.out.println("一共有" + listTopics.size() + "个topic");// 查询所有topic的信息
+        listTopics.forEach((key, partitions) -> System.out.printf("topic：%s 有%d个分区\n", key, partitions.size()));
+
+        try {
+            // 2.订阅topic
+            // Note；下面这两种订阅方式是互斥的，对于某个消费者，只能有一种订阅方式
+            // 2.1 方式1：直接订阅topic所有分区
+            consumer.subscribe(List.of("my_topic1", "my_topic2"));
+            // 2.2 方式2：订阅topic指定分区
+            //consumer.assign(List.of(new TopicPartition("my_topic1", 0),
+            //        new TopicPartition("my_topic1", 1),
+            //        new TopicPartition("my_topic2", 0)));
+
+            // 3.消息处理
+            for (int i = 0; i < 10; i++) {
+                // 3.1 消息拉取：配置为每s拉取一次数据
+                ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(1L));
+                // 3.2 消息分派：这里需要对不同topic的消息作不同处理，而且最好是借助线程池做异步处理
+                for (ConsumerRecord<String, String> record : consumerRecords) {
+                    System.out.println(record.toString());
+                }
+                // 3.3 手动提交offset
+                // 3.3.1 方式1：同步提交
+                //consumer.commitSync();
+                // 3.3.2 方式2：异步提交，一般用异步提交
+                consumer.commitAsync();// 这里还能传入一个回调方法，如果出现了错误可以在回调方法里进行失败重试
+            }
+        } finally {
+            // 4.关闭消费者组
+            consumer.close();
+        }
+    }
+}
+```
+
+### 初始offset和指定offset消费
+
+在上面的消费者组的情况下，根据groupId会找到上一次提交的消费偏移量offset。但当此消费者组第一次消费此topic的partition时，初始偏移量由配置`auto.offset.reset`决定。
+
+| 参数              | 可选值       | 描述                                                         |
+| ----------------- | ------------ | ------------------------------------------------------------ |
+| auto.offset.reset | earliest     | 自动将偏移量重置为最早的偏移量，类似于命令行操作消费者指定--from-beginning参数，即消费所有历史消息和新消息 |
+|                   | latest(默认) | 自动将偏移量重置为最新偏移量，即只消费新到来的消息           |
+|                   | none         | 如果未找到消费者组的先前偏移量，则向消费者抛出异常           |
+
+![image-20220420001149889](kafka.assets/image-20220420001149889.png)
+
+配置初始偏移量为earliest
+
+```java
+// 0.7 optional: 配置初始消费偏移量offset，默认latest
+properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");// 初始消费偏移量配置为最小偏移量，即须要消费历史消息
+```
+
+#### 指定offset消费
+
+指定offset的API是KafkaConsumer.seek(TopicPartition partition, long offset)，从参数来看需要传入topic分区和指定偏移量。
+
+示例如下：
+
+```java
+/**
+ * 消费者组
+ *
+ * @author fzk
+ * @date 2022-04-18 22:33
+ */
+public class MyConsumer {
+    public static void main(String[] args) {
+        // 0.准备配置
+        Properties properties = new Properties();
+        // 0.1 必须：连接kafka集群：bootstrap.servers
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "124.223.192.8:9092");
+        // 0.2 必须：指定key和value的反序列化方式
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        // 0.3 必须：指定groupId，每个消费者组只能消费某个topic的消息1次，
+        // 当消费组消费此消息时，默认配置enable.auto.commit为true情况下会自动提交此消息，此消息会被打上被此消费者组消费过的标签
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "myGroupId:2");
+
+        // 0.4 optional：修改分区分配策略为RoundRobin，默认是Range+CooperativeStickyAssignor
+        properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, org.apache.kafka.clients.consumer.RoundRobinAssignor.class.getName());
+
+        // 0.5 optional：配置为不排除内部topic，默认true
+        properties.put(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, false);
+
+        // 0.6 optional: 关闭offset的自动提交
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);// 默认true
+        //properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 3000);// 默认5000ms
+
+        // 0.7 optional: 配置初始消费偏移量offset，默认latest
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");// 初始消费偏移量配置为最小偏移量，即须要消费历史消息
+
+        // 1.创建消费者组：当然这里只创建了一个消费者，生产环境可以多创建几个
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties);
+        // 查询一些基本信息
+        Map<String, List<PartitionInfo>> listTopics = consumer.listTopics();
+        System.out.println("一共有" + listTopics.size() + "个topic");// 查询所有topic的信息
+        listTopics.forEach((key, partitions) -> System.out.printf("topic：%s 有%d个分区\n", key, partitions.size()));
+
+        try {
+            // 2.订阅topic
+            // Note；下面这两种订阅方式是互斥的，对于某个消费者，只能有一种订阅方式
+            // 2.1 方式1：直接订阅topic所有分区
+            consumer.subscribe(List.of("my_topic1", "my_topic2"));
+            // 2.2 方式2：订阅topic指定分区
+            //consumer.assign(List.of(new TopicPartition("my_topic1", 0),
+            //        new TopicPartition("my_topic1", 1),
+            //        new TopicPartition("my_topic2", 0)));
+
+            // 3.指定消费偏移量offset
+            // 3.1 获取消费者分区分配信息（有了分区分配信息才能开始消费）
+            // 这里用循环的原因是须要等待消费者组同kafka服务器沟通出消费方案才能拿到分区分配信息
+            Set<TopicPartition> topicPartitions = consumer.assignment();
+            while (topicPartitions.size() == 0) {
+                consumer.poll(Duration.ofSeconds(1L));
+                topicPartitions = consumer.assignment();
+            }
+
+            // 3.2 遍历所有分区，并指定 offset 从 5 的位置开始消费
+            for (TopicPartition tp : topicPartitions) {
+                consumer.seek(tp, 1);
+            }
+
+            // 4.消息处理
+            for (int i = 0; i < 10; i++) {
+                // 4.1 消息拉取：配置为每s拉取一次数据
+                ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(1L));
+                // 4.2 消息分派：这里需要对不同topic的消息作不同处理，而且最好是借助线程池做异步处理
+                for (ConsumerRecord<String, String> record : consumerRecords) {
+                    System.out.println(record.toString());
+                }
+                // 4.3 手动提交offset
+                // 4.3.1 方式1：同步提交
+                //consumer.commitSync();
+                // 4.3.2 方式2：异步提交，一般用异步提交
+                consumer.commitAsync();// 这里还能传入一个回调方法，如果出现了错误可以在回调方法里进行失败重试
+            }
+        } finally {
+            // 5.关闭消费者组
+            consumer.close();
+        }
+    }
+}
+```
 
 # Golang操作kafka
 
