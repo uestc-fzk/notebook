@@ -691,7 +691,7 @@ const (
 var consumerGroup sarama.ConsumerGroup
 
 // InitConsumer 建议在main函数中调用
-func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Context, topicListeners ...*MyTopicListener) {
+func InitConsumer(groupId string, config *sarama.Config, kafkaAddr []string, cancelCtx context.Context, topicListeners ...*MyTopicListener) {
 	// 1.参数检查
 	if groupId == "" {
 		panic("groupId不能为空")
@@ -702,7 +702,7 @@ func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Conte
 
 	// 2.初始化消费者组
 	var err error
-	consumerGroup, err = sarama.NewConsumerGroup([]string{TestKafkaAddr}, groupId, config)
+	consumerGroup, err = sarama.NewConsumerGroup(kafkaAddr, groupId, config)
 	if err != nil {
 		panic("init kafka consumer group error: " + err.Error())
 	}
@@ -726,7 +726,12 @@ func InitConsumer(groupId string, config *sarama.Config, cancelCtx context.Conte
 			// server-side rebalance happens, the consumer session will need to be
 			// recreated to get the new claims
 			if err := consumerGroup.Consume(cancelContext, topics, &cgh); err != nil {
-				panic("Error from consumer:" + err.Error())
+				// 说明消费者组已经关闭了
+				if err == sarama.ErrClosedConsumerGroup {
+					log.Printf("感知到消费者组已经关闭，监听消息线程将结束...")
+					return
+				}
+				log.Println("Error from consumer:" + err.Error())
 			}
 			// check if context was cancelled, signaling that the consumer should stop
 			if cancelContext.Err() != nil {
@@ -764,17 +769,17 @@ type MyConsumerGroupHandler struct {
 	msgHandlers map[string]MyMsgHandler
 }
 
-// Setup 在新建session，调用ConsumerClaim()方法之前允许
+// Setup 在新建session，调用ConsumerClaim()方法之前执行一次
 func (handler *MyConsumerGroupHandler) Setup(consumerGroupSession sarama.ConsumerGroupSession) error {
 	// TODO
-	log.Printf("setup\n")
+	log.Printf("消费者组 setup\n")
 	return nil
 }
 
-// Cleanup session结束时允许，一旦所有ConsumerClaim Goroutine退出，但在最后一次提交偏移之前。
+// Cleanup session结束时允许，一旦所有ConsumerClaim Goroutine退出，但在最后一次提交偏移之前执行一次
 func (handler *MyConsumerGroupHandler) Cleanup(consumerGroupSession sarama.ConsumerGroupSession) error {
 	// TODO
-	log.Printf("cleanup\n")
+	log.Printf("消费者组 cleanup\n")
 	return nil
 }
 
@@ -790,8 +795,8 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 			// 消息处理错误，但是跳过了
 			log.Printf("message : topic: %+v, key:= %+v, 处理出现错误：%+v\n", message.Topic, message.Key, err)
 		}
-		// 标记信息已经消费
-		// 这里的作用是：此消费者组的groupId对应的这个消息会被标记为已经消费了，
+		// 标记信息已经被此消费者组消费
+		// 作用：此消费者组的groupId对应的这个消息会被标记为已经消费了，
 		// 那么对应kafka而言，之后此groupId的消费者来获取消息，不管它设置的initOffset是-1还是-2，
 		// 它都只能获取到新来的没有被标记为消费过的消息了
 		// 一般来说最好是消费完消息标记已经消费过了
