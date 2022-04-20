@@ -424,3 +424,7 @@ $ git stash pop
 # 生成一个可供发布的压缩包
 $ git archive
 ```
+
+# git提交注意
+
+https://www.oschina.net/news/69705/git-commit-message-and-changelog-guide

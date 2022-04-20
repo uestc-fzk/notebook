@@ -1175,11 +1175,14 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 		// 那么对应kafka而言，之后此groupId的消费者来获取消息，不管它设置的initOffset是-1还是-2，
 		// 它都只能获取到新来的没有被标记为消费过的消息了
 		// 一般来说最好是消费完消息标记已经消费过了
+        // 这里的解释可能有错？commit是提交偏移量的，这个mark函数是？它会调用MarkOffset()函数
 		consumerGroupSession.MarkMessage(message, "")
 	}
 	return nil
 }
 ```
+
+> 注意：在上面这个消费者组的session会话中，函数MarkMessage可能解释错了，Commit()函数是进行提交消费情况的(默认配置为自动提交的情况下无需手动调用)，MarkMessage()函数会调用MarkOffset()函数，好像就单纯是标记元数据作用。
 
 3、main函数
 
@@ -1206,7 +1209,7 @@ func main() {
 
 > 注意：此时配置的消费组id是`test_group`，在指定了消费者组id，并且初始的`config.Consumer.Offsets.Initial`配置为-2即消费历史消息和新消息时，此时消费者组只会消费那些没有被此消费者组标记过的消息，比如历史消息中未被标记消费过的，和新到来的消息。
 
-## 可能出现的问题
+# 可能出现的问题
 
 ![image-20220416192437751](kafka.assets/image-20220416192437751.png)
 
@@ -1217,3 +1220,4 @@ func main() {
 124.223.192.8 k8s-master
 ```
 
+在sarama库这边提示比较快，但是Java库那边就几乎不会提示了，所以最好一来就把主机名配置到DNS配置中。
