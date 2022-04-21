@@ -514,6 +514,12 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 
 这个挺重要的，多看看PDF文档就可以了。
 
+## 高效读写
+
+页缓存+零拷贝技术。
+
+多看看PDF文档。
+
 # kafka消费者
 
 ## 消费流程
@@ -863,7 +869,7 @@ public class MyConsumer {
 
             // 3.2 遍历所有分区，并指定 offset 从 5 的位置开始消费
             for (TopicPartition tp : topicPartitions) {
-                consumer.seek(tp, 1);
+                consumer.seek(tp, 5);
             }
 
             // 4.消息处理
@@ -887,6 +893,183 @@ public class MyConsumer {
     }
 }
 ```
+
+还可以根据时间戳获取到offset，然后再将offset指定消费：
+
+```java
+            // 3.指定消费偏移量offset
+            // 3.1 获取消费者分区分配信息（有了分区分配信息才能开始消费）
+            // 这里用循环的原因是须要等待消费者组同kafka服务器沟通出消费方案才能拿到分区分配信息
+            Set<TopicPartition> topicPartitions = consumer.assignment();
+            while (topicPartitions.size() == 0) {
+                consumer.poll(Duration.ofSeconds(1L));
+                topicPartitions = consumer.assignment();
+            }
+
+            // 3.2 遍历所有分区，并指定 offset 从 昨天 的位置开始消费
+            // 封装每个topic分区对应的需要的时间戳
+            HashMap<TopicPartition, Long> timestampToSearch = new HashMap<>();
+            for (TopicPartition tp : topicPartitions) {
+                timestampToSearch.put(tp, System.currentTimeMillis() - 24 * 60 * 60 * 1000L);
+            }
+            // 取得每个topic分区对应时间戳对应的offset信息
+            Map<TopicPartition, OffsetAndTimestamp> offsetAndTimestampMap
+                    = consumer.offsetsForTimes(timestampToSearch);
+
+            // 指定每个topic分区消费的offset
+            for (TopicPartition tp : topicPartitions) {
+                OffsetAndTimestamp offsetAndTimestamp = offsetAndTimestampMap.get(tp);
+                consumer.seek(tp, offsetAndTimestamp.offset());
+            }
+```
+
+## 消费者事务
+
+![image-20220420230041128](kafka.assets/image-20220420230041128.png)
+
+如果想完成Consumer端的精准一次性消费，那么需要Kafka消费端将消费过程和提交offset过程做原子绑定，即支持事务。
+
+# EFAK监控
+
+**EAGLE FOR APACHE KAFKA**的简称，简单且高性能的监控系统。
+
+此监控框架依赖于zookeeper集群和MySQL数据库。
+
+## 环境搭建
+
+首先得有MySQL数据库，版本最好是8.0以上。
+
+### kafka内存限制扩大
+
+首先要修改kafka服务器的配置
+
+```shell
+vim bin/kafka-server-start.sh # 修改其启动脚本，配置其内存大小限制
+
+# 找到如下的参数值
+if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
+    export KAFKA_HEAP_OPTS="-Xmx1G -Xms1G"
+fi
+
+# 将其内存限制1G修改为2G，并配置端口为9999，修改完成后如下：
+if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
+    export JMX_PORT="9999"
+    export KAFKA_HEAP_OPTS="-Xmx2G -Xms2G"
+fi
+# 开启监控，需要大一点点的内存
+```
+
+### EFAK安装配置
+
+1、先去官网下载安装包：https://www.kafka-eagle.org/，目前最新版是v2.1.0。
+
+2、上传压缩包 kafka-eagle-bin-2.1.0.tar.gz 到云服务器上，解压，然后进去，还有一个压缩包再一次解压才行。
+
+3、修改配置文件system-config.properties，这里可以先搞个副本再修改。
+
+```shell
+[root@k8s-master kafka_2.12-3.0.1]# cd /opt/efak-web-2.1.0/
+[root@k8s-master efak-web-2.1.0]# ls
+bin  conf  db  font  kms  logs
+[root@k8s-master efak-web-2.1.0]# cd conf
+[root@k8s-master conf]# ls
+log4j.properties  system-config.properties  system-config_副本.properties  works
+[root@k8s-master conf]# vim system-config.properties 
+```
+
+要修改的地方如下：
+
+3.1 zookeeper集群地址需要修改
+
+```properties
+######################################
+# multi zookeeper & kafka cluster list
+# Settings prefixed with 'kafka.eagle.' will be deprecated, use 'efak.' instead
+######################################
+efak.zk.cluster.alias=cluster1,cluster2
+cluster1.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
+cluster2.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
+
+# 改成下面这样
+efak.zk.cluster.alias=cluster1
+cluster1.zk.list=localhost:2181/kafka
+```
+
+3.2 offset保存地址也要修改，只需要保存在kafka即可，将第二行保存与zookeeper注释掉即可
+
+```shell
+######################################
+# kafka offset storage
+######################################
+cluster1.efak.offset.storage=kafka
+#cluster2.efak.offset.storage=zk # 将此行注释掉即可
+```
+
+3.3 MySQL连接地址也要改啦，连接的`ke`这个数据库不用提前创建，会自动创建。
+
+```shell
+######################################
+# kafka mysql jdbc driver address
+######################################
+efak.driver=com.mysql.cj.jdbc.Driver # 这是连接MySQL8的驱动程序
+efak.url=jdbc:mysql://你的MySQL地址:3306/ke?useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull
+efak.username=root
+efak.password=123456
+```
+
+注意这个驱动程序，如果是MySQL8以前的，驱动程序为`com.mysql.jdbc.Driver`。
+
+4、添加环境变量`KE_HOME`并导出其bin目录到PATH变量
+
+> 注意：EFAK需要Java环境，会用到JAVA_HOME变量，yum方式安装的open-jdk即使是找到了软链接最终指向的java安装目录并配置好JAVA_HOME，依旧提示找不到某个依赖。所以建议下载oracle jdk安装包，并通过配置环境变量JAVA_HOME来安装java环境。
+
+```shell
+sudo vim /etc/profile.d/my_env.sh
+# kafkaEFAK
+export KE_HOME=/opt/efak-web-2.1.0
+export PATH=$PATH:$KE_HOME/bin
+# java 环境变量
+export JAVA_HOME=/usr/local/java/jdk-17.0.2
+export PATH=$PATH:$JAVA_HOME/bin
+
+# 生效一下
+source /etc/profile
+```
+
+5、启动zookeeper集群和kafka集群，并且MySQL服务器是可以正常访问的，此时就可以启动EFAK了
+进入EFAK安装目录下的bin目录，并输入启动命令`./ke.sh start`
+
+顺利的话，可以看到如下成功提示：并且此时MySQL数据库中`ke`这个数据库也会自动创建。
+
+```shell
+[2022-04-21 22:11:35] INFO: [Job done!]
+Welcome to
+    ______    ______    ___     __ __
+   / ____/   / ____/   /   |   / //_/
+  / __/     / /_      / /| |  / ,<   
+ / /___    / __/     / ___ | / /| |  
+/_____/   /_/       /_/  |_|/_/ |_|  
+( Eagle For Apache Kafka® )
+
+Version 2.1.0 -- Copyright 2016-2022
+*******************************************************************
+* EFAK Service has started success.
+* Welcome, Now you can visit 'http://你的公网ip:8048'
+* Account:admin ,Password:123456
+*******************************************************************
+* <Usage> ke.sh [start|status|stop|restart|stats] </Usage>
+* <Usage> https://www.kafka-eagle.org/ </Usage>
+*******************************************************************
+[root@k8s-master bin]# 
+```
+
+可以按照提示去云服务器的公网ip:8048端口访问，即可进入控制平台了。
+
+6、关闭EFAK命令`./ke.sh stop`
+
+
+
+
 
 # Golang操作kafka
 
@@ -1183,6 +1366,8 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 ```
 
 > 注意：在上面这个消费者组的session会话中，函数MarkMessage可能解释错了，Commit()函数是进行提交消费情况的(默认配置为自动提交的情况下无需手动调用)，MarkMessage()函数会调用MarkOffset()函数，好像就单纯是标记元数据作用。
+>
+> 但是测试又发现，设置为auto commit的情况下，如果不调用MarkMessage()函数，消费者组重启又会消费到之前的消息。
 
 3、main函数
 

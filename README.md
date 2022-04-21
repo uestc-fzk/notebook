@@ -20,7 +20,6 @@
 - 面试
 - 数据结构
 - 数据库
-	- elasticsearch
 	- JDBC
 	- redis
 	- MySQL&Postgresql
@@ -30,6 +29,9 @@
 	- Linux
 	- Nginx
 	- Kubernetes
+- 中间件
+	- Kafka
+	- elasticsearch
 - README.md
 ```
 
