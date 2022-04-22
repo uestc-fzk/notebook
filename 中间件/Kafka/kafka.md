@@ -65,7 +65,271 @@ Follower：每个分区多个副本中的“从”，实时从 Leader 中同步�
 
 ## 快速开始
 
-官方文档单节点kafka快速开始：https://kafka.apache.org/documentation/#quickstart
+### 单节点
+
+官方文档单节点kafka快速开始：https://kafka.apache.org/documentation/#quickstart，适合学习使用。
+
+结合官方文档写的简单的快速启动脚本：
+
+```shell
+[root@k8s-master kafka]# cat quick-allStart-zookeeper-kafka.sh 
+#!/bin/bash
+echo "后台启动zookeeper..."
+bin/zookeeper-server-start.sh config/zookeeper.properties &
+sleep 5 # 休眠5s等待zookeeper启动完成
+echo "start kafka..."
+bin/kafka-server-start.sh config/server.properties
+```
+
+与之对应的快速关闭脚本：
+
+```shell
+[root@k8s-master kafka]# cat quick-allStop-zookeeper-kafka.sh 
+#!/bin/bash
+echo "先关闭kafka"
+./bin/kafka-server-stop.sh
+sleep 5 # 休眠5s等待kafka完全关闭
+echo "5s后关闭zookeeper"
+./bin/zookeeper-server-stop.sh
+```
+
+这种单节点简单部署可以直接用kafka内置的zookeeper。
+
+### kafka集群
+
+前置条件：java环境已搭建(最好以安装包方式安装，别用yum安装)，zookeeper集群已经搭建。
+
+搭建环境：3台云服务器，使用主机名方式搭建，确保各个主机名都能ping通。主机名分别为k8s-master、k8s-node1、k8s-node2。
+
+> 注意：直接指向zookeeper集群的公网ip会报错，提示连接超时。未找到解决措施，所以只能配置为主机名了。
+
+1、下载并解压安装包
+
+```shell
+tar -zxvf kafka_2.12-3.0.1.tgz
+mv kafka_2.12-3.0.1/ kafka  # 把名字搞短点
+```
+
+2、修改配置文件
+
+```shell
+vim config/server.properties
+```
+
+有3个重要的配置必须修改：
+
+```shell
+# broker的id，每个broker必须唯一 
+broker.id=0
+
+# 日志目录，因为kafka靠日志保存数据，因此不能放在默认的/tmp目录下，建议放到 kafka安装目录/logData
+log.dirs=/opt/kafkaDemo/kafka/logData
+
+# zookeeper集群地址
+# 配置连接 Zookeeper 集群地址（在 zk 根目录下创建/kafka，方便管理）
+zookeeper.connect=k8s-master:2181,k8s-node1:2181,k8s-node2:2181/kafka
+```
+
+3个不同的云服务对应的broker.id可以分别为0,1,2。
+
+3、配置环境变量
+
+```shell
+vim /etc/profile
+# 在此文件中新增如下配置
+
+# KAFKA_HOME
+export KAFKA_HOME=你的kafka安装目录
+export PATH=$PATH:$KAFKA_HOME/bin
+
+# 生效一波
+source /etc/profile
+```
+
+4、启动集群，bin目录下的启动命令`bin/kafka-server-start.sh config/server.properties`，停止命令是`bin/kafka-server-stop.sh`。
+后台启动方式：`bin/kafka-server-start.sh -daemon config/server.properties`
+
+5、如果此时搭建kafka集群成功，最好立刻去把kafka监控EFAK也搭建好，这样可以方便学习，也可以更快理解kafka的一些原理。
+
+### EFAK监控
+
+**EAGLE FOR APACHE KAFKA**的简称，简单且高性能的监控系统。
+
+此监控框架依赖于zookeeper集群和MySQL数据库。
+
+**首先得有MySQL数据库，版本最好是8.0以上。**
+
+#### kafka内存限制扩大
+
+首先要修改kafka服务器的配置
+
+```shell
+vim bin/kafka-server-start.sh # 修改其启动脚本，配置其内存大小限制
+
+# 找到如下的参数值
+if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
+    export KAFKA_HEAP_OPTS="-Xmx1G -Xms1G"
+fi
+
+# 将其内存限制1G修改为2G，并配置端口为9999，修改完成后如下：当然，如果修改后启动报错，提示内存不足，也是可以改小点的。
+if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
+    export JMX_PORT="9999"
+    export KAFKA_HEAP_OPTS="-Xmx2G -Xms2G"
+fi
+# 开启监控，需要大一点点的内存
+```
+
+#### EFAK安装配置
+
+1、先去官网下载安装包：https://www.kafka-eagle.org/，目前最新版是v2.1.0。
+
+2、上传压缩包 kafka-eagle-bin-2.1.0.tar.gz 到云服务器上，解压，然后进去，还有一个压缩包再一次解压才行。
+
+3、修改配置文件system-config.properties，这里可以先搞个副本再修改。
+
+```shell
+[root@k8s-master kafka_2.12-3.0.1]# cd /opt/efak-web-2.1.0/
+[root@k8s-master efak-web-2.1.0]# ls
+bin  conf  db  font  kms  logs
+[root@k8s-master efak-web-2.1.0]# cd conf
+[root@k8s-master conf]# ls
+log4j.properties  system-config.properties  system-config_副本.properties  works
+[root@k8s-master conf]# vim system-config.properties 
+```
+
+要修改的地方如下：
+
+3.1 zookeeper集群地址需要修改
+
+```properties
+######################################
+# multi zookeeper & kafka cluster list
+# Settings prefixed with 'kafka.eagle.' will be deprecated, use 'efak.' instead
+######################################
+efak.zk.cluster.alias=cluster1,cluster2
+cluster1.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
+cluster2.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
+
+# 改成下面这样
+efak.zk.cluster.alias=cluster1
+# 如果搭建的zookeeper单机版
+cluster1.zk.list=localhost:2181/kafka
+# 如果是搭建的zookeeper集群的话
+#cluster1.zk.list=k8s-master:2181,k8s-node1:2181,k8s-node2:2181/kafka
+```
+
+3.2 offset保存地址也要修改，只需要保存在kafka即可，将第二行保存与zookeeper注释掉即可
+
+```shell
+######################################
+# kafka offset storage
+######################################
+cluster1.efak.offset.storage=kafka
+#cluster2.efak.offset.storage=zk # 将此行注释掉即可
+```
+
+3.3 MySQL连接地址也要改啦，连接的`ke`这个数据库不用提前创建，会自动创建。
+
+```shell
+######################################
+# kafka mysql jdbc driver address
+######################################
+efak.driver=com.mysql.cj.jdbc.Driver # 这是连接MySQL8的驱动程序
+efak.url=jdbc:mysql://你的MySQL地址:3306/ke?useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull
+efak.username=root
+efak.password=123456
+```
+
+注意这个驱动程序，如果是MySQL8以前的，驱动程序为`com.mysql.jdbc.Driver`。
+
+4、添加环境变量`KE_HOME`并导出其bin目录到PATH变量
+
+> 注意：EFAK需要Java环境，会用到JAVA_HOME变量，yum方式安装的open-jdk即使是找到了软链接最终指向的java安装目录并配置好JAVA_HOME，依旧提示找不到某个依赖。所以建议下载oracle jdk安装包，并通过配置环境变量JAVA_HOME来安装java环境。
+
+```shell
+sudo vim /etc/profile.d/my_env.sh
+# kafkaEFAK
+export KE_HOME=/opt/efak-web-2.1.0
+export PATH=$PATH:$KE_HOME/bin
+# java 环境变量
+export JAVA_HOME=/usr/local/java/jdk-17.0.2
+export PATH=$PATH:$JAVA_HOME/bin
+
+# 生效一下
+source /etc/profile
+```
+
+5、启动zookeeper集群和kafka集群，并且MySQL服务器是可以正常访问的，此时就可以启动EFAK了
+进入EFAK安装目录下的bin目录，并输入启动命令`./ke.sh start`
+
+顺利的话，可以看到如下成功提示：并且此时MySQL数据库中`ke`这个数据库也会自动创建。
+
+```shell
+[2022-04-21 22:11:35] INFO: [Job done!]
+Welcome to
+    ______    ______    ___     __ __
+   / ____/   / ____/   /   |   / //_/
+  / __/     / /_      / /| |  / ,<   
+ / /___    / __/     / ___ | / /| |  
+/_____/   /_/       /_/  |_|/_/ |_|  
+( Eagle For Apache Kafka® )
+
+Version 2.1.0 -- Copyright 2016-2022
+*******************************************************************
+* EFAK Service has started success.
+* Welcome, Now you can visit 'http://你的公网ip:8048'
+* Account:admin ,Password:123456
+*******************************************************************
+* <Usage> ke.sh [start|status|stop|restart|stats] </Usage>
+* <Usage> https://www.kafka-eagle.org/ </Usage>
+*******************************************************************
+[root@k8s-master bin]# 
+```
+
+可以按照提示去云服务器的公网ip:8048端口访问，即可进入控制平台了。
+
+![EFAK成功搭建](kafka.assets/EFAK成功搭建.png)
+
+如果看不到kafka集群或者zookeeper集群的各个节点的存活情况，说明搭建失败了。
+
+6、关闭EFAK命令`./ke.sh stop`
+
+### 集群脚本
+
+到这里，zookeeper集群已经搭建好了，kafka集群已经搭建好了，EFAK监控也搭建好了，但是无论是启动zookeeper还是kafka都很麻烦，所以下面写一个简单的快速启动集群的脚本：
+
+```shell
+[root@k8s-master kafkaDemo]# cat quickStartAllKafka.sh 
+#!/bin/bash
+echo "此命令需要3个服务器同时开始执行哦..."
+echo "1.后台启动zookeeper"
+./zookeeper/bin/zkServer.sh start
+sleep 5 # 等一会
+
+echo "2.后台启动kafka"
+./kafka/bin/kafka-server-start.sh -daemon kafka/config/server.properties
+sleep 5 # 等一会
+
+echo "只有k8s-master主机会启动EFAK监控kafka集群"
+./efak-web-2.1.0/bin/ke.sh start
+```
+
+与之对应的快速关闭脚本：
+
+```shell
+[root@k8s-master kafkaDemo]# cat quickStopAllKafka.sh 
+#!/bin/bash
+echo "停止kafka"
+./kafka/bin/kafka-server-stop.sh
+sleep 3
+
+echo "停止zookeeper"
+./zookeeper/bin/zkServer.sh stop
+sleep 3
+
+echo "停止EFAK"
+./efak-web-2.1.0/bin/ke.sh stop
+```
 
 ## topic命令
 
@@ -928,148 +1192,6 @@ public class MyConsumer {
 ![image-20220420230041128](kafka.assets/image-20220420230041128.png)
 
 如果想完成Consumer端的精准一次性消费，那么需要Kafka消费端将消费过程和提交offset过程做原子绑定，即支持事务。
-
-# EFAK监控
-
-**EAGLE FOR APACHE KAFKA**的简称，简单且高性能的监控系统。
-
-此监控框架依赖于zookeeper集群和MySQL数据库。
-
-## 环境搭建
-
-首先得有MySQL数据库，版本最好是8.0以上。
-
-### kafka内存限制扩大
-
-首先要修改kafka服务器的配置
-
-```shell
-vim bin/kafka-server-start.sh # 修改其启动脚本，配置其内存大小限制
-
-# 找到如下的参数值
-if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
-    export KAFKA_HEAP_OPTS="-Xmx1G -Xms1G"
-fi
-
-# 将其内存限制1G修改为2G，并配置端口为9999，修改完成后如下：
-if [ "x$KAFKA_HEAP_OPTS" = "x" ]; then
-    export JMX_PORT="9999"
-    export KAFKA_HEAP_OPTS="-Xmx2G -Xms2G"
-fi
-# 开启监控，需要大一点点的内存
-```
-
-### EFAK安装配置
-
-1、先去官网下载安装包：https://www.kafka-eagle.org/，目前最新版是v2.1.0。
-
-2、上传压缩包 kafka-eagle-bin-2.1.0.tar.gz 到云服务器上，解压，然后进去，还有一个压缩包再一次解压才行。
-
-3、修改配置文件system-config.properties，这里可以先搞个副本再修改。
-
-```shell
-[root@k8s-master kafka_2.12-3.0.1]# cd /opt/efak-web-2.1.0/
-[root@k8s-master efak-web-2.1.0]# ls
-bin  conf  db  font  kms  logs
-[root@k8s-master efak-web-2.1.0]# cd conf
-[root@k8s-master conf]# ls
-log4j.properties  system-config.properties  system-config_副本.properties  works
-[root@k8s-master conf]# vim system-config.properties 
-```
-
-要修改的地方如下：
-
-3.1 zookeeper集群地址需要修改
-
-```properties
-######################################
-# multi zookeeper & kafka cluster list
-# Settings prefixed with 'kafka.eagle.' will be deprecated, use 'efak.' instead
-######################################
-efak.zk.cluster.alias=cluster1,cluster2
-cluster1.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
-cluster2.zk.list=xdn10:2181,xdn11:2181,xdn12:2181
-
-# 改成下面这样
-efak.zk.cluster.alias=cluster1
-cluster1.zk.list=localhost:2181/kafka
-```
-
-3.2 offset保存地址也要修改，只需要保存在kafka即可，将第二行保存与zookeeper注释掉即可
-
-```shell
-######################################
-# kafka offset storage
-######################################
-cluster1.efak.offset.storage=kafka
-#cluster2.efak.offset.storage=zk # 将此行注释掉即可
-```
-
-3.3 MySQL连接地址也要改啦，连接的`ke`这个数据库不用提前创建，会自动创建。
-
-```shell
-######################################
-# kafka mysql jdbc driver address
-######################################
-efak.driver=com.mysql.cj.jdbc.Driver # 这是连接MySQL8的驱动程序
-efak.url=jdbc:mysql://你的MySQL地址:3306/ke?useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull
-efak.username=root
-efak.password=123456
-```
-
-注意这个驱动程序，如果是MySQL8以前的，驱动程序为`com.mysql.jdbc.Driver`。
-
-4、添加环境变量`KE_HOME`并导出其bin目录到PATH变量
-
-> 注意：EFAK需要Java环境，会用到JAVA_HOME变量，yum方式安装的open-jdk即使是找到了软链接最终指向的java安装目录并配置好JAVA_HOME，依旧提示找不到某个依赖。所以建议下载oracle jdk安装包，并通过配置环境变量JAVA_HOME来安装java环境。
-
-```shell
-sudo vim /etc/profile.d/my_env.sh
-# kafkaEFAK
-export KE_HOME=/opt/efak-web-2.1.0
-export PATH=$PATH:$KE_HOME/bin
-# java 环境变量
-export JAVA_HOME=/usr/local/java/jdk-17.0.2
-export PATH=$PATH:$JAVA_HOME/bin
-
-# 生效一下
-source /etc/profile
-```
-
-5、启动zookeeper集群和kafka集群，并且MySQL服务器是可以正常访问的，此时就可以启动EFAK了
-进入EFAK安装目录下的bin目录，并输入启动命令`./ke.sh start`
-
-顺利的话，可以看到如下成功提示：并且此时MySQL数据库中`ke`这个数据库也会自动创建。
-
-```shell
-[2022-04-21 22:11:35] INFO: [Job done!]
-Welcome to
-    ______    ______    ___     __ __
-   / ____/   / ____/   /   |   / //_/
-  / __/     / /_      / /| |  / ,<   
- / /___    / __/     / ___ | / /| |  
-/_____/   /_/       /_/  |_|/_/ |_|  
-( Eagle For Apache Kafka® )
-
-Version 2.1.0 -- Copyright 2016-2022
-*******************************************************************
-* EFAK Service has started success.
-* Welcome, Now you can visit 'http://你的公网ip:8048'
-* Account:admin ,Password:123456
-*******************************************************************
-* <Usage> ke.sh [start|status|stop|restart|stats] </Usage>
-* <Usage> https://www.kafka-eagle.org/ </Usage>
-*******************************************************************
-[root@k8s-master bin]# 
-```
-
-可以按照提示去云服务器的公网ip:8048端口访问，即可进入控制平台了。
-
-6、关闭EFAK命令`./ke.sh stop`
-
-
-
-
 
 # Golang操作kafka
 
