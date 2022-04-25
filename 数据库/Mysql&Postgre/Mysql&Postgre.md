@@ -1,6 +1,6 @@
-# mysql
+# MySQL
 
-## 安装和卸载的问题
+## 安装和卸载
 
 主要是卸载MySQL：
 
@@ -37,12 +37,6 @@
 安装问题的话可以看CSDN收藏的博客，也可以看自己收藏的软件安装资料里的文档。
 
 ## jdbc.properties
-```properties
-driver=com.mysql.jdbc.Driver
-url=jdbc:mysql://localhost:3306/students
-username=root
-password=010326
-```
 spring boot 的属性配置
 ```properties
 # mysql 5 驱动不同 com.mysql.jdbc.Driver 
@@ -55,12 +49,7 @@ spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=t
 # 主要是要加上时区，其它的参数可以加也可以不加
 spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 ```
-## 导学
-数据库的好处
-
-	1.持久化数据到本地
-	2.可以实现结构化查询，方便管理
-
+## 前言
 数据库相关概念
 
 	1、DB：数据库，保存一组有组织的数据的容器
@@ -69,63 +58,37 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 			数据库是通过 DBMS 创建和操作的容器
 	3、SQL:结构化查询语言，用于和DBMS通信的语言
 
-数据库存储数据的特点
-
-	1、将数据放到表中，表再放到库中
-	2、一个数据库中可以有多个表，每个表都有一个的名字，用来标识自己。表名具有唯一性。
-	3、表具有一些特性，这些特性定义了数据在表中如何存储，类似java中 “类”的设计。
-	4、表由列组成，我们也称为字段。所有表都是由一个或多个列组成的，每一列类似java 中的”属性”
-	5、表中的数据是按行存储的，每一行类似于java中的“对象”。
-
 
 ### 1.启动和停止MySQL服务
-    方式一：通过计算机管理方式 右击计算机—管理—服务—启动或停止MySQL服务 
-    方式二：通过管理员模式命令行方式 启动：net start mysql服务名 停止：net stop mysql服务名
+
+- 通过计算机管理方式 右击计算机—管理—服务—启动或停止MySQL服务 
+- 通过管理员模式命令行方式 启动：`net start mysql`，停止：`net stop mysql`
+
 ### 2.MySQL服务端的登录与退出
 
-    1.通过mysql自带的客户端MySQL 5.5 Command Line Client  然后直接输入用户密码
-    只能是root用户登录 其他用户不能进去 不够灵活 不建议
-    退出 exit或者ctrl+c
-    
-    2. 通过管理员模式命令行方式登录： mysql –h 主机名（自己就是localhost） -P 3306（端口号） –u用户名（root） –p
-    然后输入密码
-    也可以直接在-p后加密码
-    退出 exit
-    3.如果是连接本机的，可以简写：
-    Mysql -u 用户名 –p密码
+```shell
+# 1.通过mysql自带的客户端MySQL 5.5 Command Line Client  然后直接输入用户密码
+# 只能是root用户登录 其他用户不能进去 不够灵活 不建议
+# 退出 exit或者ctrl+c
 
+# 2. 通过管理员模式命令行方式登录： mysql –h 主机名（自己就是localhost） -P 3306（端口号） –u用户名（root） –p
+# 也可以直接在-p后加密码
+# 退出 exit
+# 3.如果是连接本机的，可以简写：
+Mysql -u 用户名 –p密码
+```
 
 ### 3.MySQL的常见命令 
 
-	1.查看当前所有的数据库
-	show databases;
-	2.打开指定的库
-	use 库名
-	    会进入这个库
-	3.查看当前库的所有表
-	show tables;
-	4.查看其它库的所有表
-	    不会调转到其他库
-	show tables from 库名;
-	5.创建表
-	create table 表名(
-	
-		列名 列类型,
-		列名 列类型，
-		...
-	);
-	6.查看表结构
-	desc 表名;
-	
-	7.查看服务器的版本
-	    方式一：登录到mysql服务端
-	    select version();
-	    方式二：没有登录到mysql服务端
-	    mysql --version
-	    或
-	    mysql --V
+1.查看当前所有的数据库`show databases;`
 
+2.打开指定的库`use 库名`；会进入这个库
 
+3.查看当前库的所有表`show tables;`
+
+4.查看其它库的所有表`show tables from 库名;`
+
+5.查看表结构`desc 表名;`
 
 ### 4.MySQL的语法规范
 **重要**
@@ -134,120 +97,74 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
 >2.每条命令最好用分号结尾
 
->3.每条命令根据需要，可以进行缩进或 
-换行(回车)
+>3.每条命令根据需要，可以进行缩进或换行(回车)
 关键字单独一行
 
 >4.注释
     单行注释：#注释文字
     单行注释：-- 注释文字
-        必须加空格
-    多行注释：/* 注释文字  */
+      多行注释：/* 注释文字  */
 
 >6.字符串和日期型常量值必须用单引号引起来，数值型不需要。
 
->7.mysql索引从1开始
+>7.mysql主键从1开始
 
 >8.limit 【offset,】size;
 offset要显示条目的起始索引（起始索引从0开始）
 size 要显示的条目个数
 
-### 5.SQLyog使用技巧
-快捷键
+## 1.DQL数据查询语句
 
-    1.f12  对代码格式化
-着重号 
+Data Query Language
 
-    `  1左边的那个
-    用于区分关键字和字段
-    在字段两边加上`
+建议看《MySQL必知必会》或者菜鸟教程。
 
-字表名
-
-    忘记怎么写的时候，可以直接去双击表名
-    哪里不会点哪里。
-
-
-
-
-## 1.DQL语句
-数据查询语言(Data Query Language)
-
-
-
-## 2.DML语句
+## 2.DML数据操纵语句
 Data Manipulation Language – 数据操纵语言
 - 向表中插入数据
 - 修改现存数据
 - 删除现存数据
 
-### 插入
+### 插入insert
 
-语法：
-- 方式1
-	insert into 表名(字段名，...)
-	values(值1，...),
-	...
-	(值1，...);
--  方式2
-	insert into 表名
-	set 列名=值,列名=值,...
-- 区别：
-	1、方式一支持插入多行,方式二不支持
-	2、方式一支持子查询，方式二不支持
+```sql
+INSERT INTO 
+表名(字段1,...) 
+VALUES(值1,...),...;
 
-		INSERT INTO beauty(id,NAME,phone)
-		SELECT id,boyname,'1234567'
-		FROM boys WHERE id<3;
-	3、所以一般用方式1
+-- 也支持直接查询其它表中的数据进行插入
+INSERT INTO t_user(username,password)
+SELECT username,'1234567'
+FROM t_u
+WHERE id<3;
+```
 
-特点：
+要求：
 
-	1、字段类型和值类型一致或兼容，而且一一对应
-	2、可以为空的字段，可以不用插入值，或用null填充
-	3、不可以为空的字段，必须插入值
-	4、字段个数和值的个数必须一致
-	5、字段可以省略，但默认所有字段，并且顺序和表中的存储顺序一致
+1、字段类型和值类型一致或兼容，而且一一对应
+2、字段可以省略，但默认所有字段，并且顺序和表中的存储顺序一致
 
-### 修改
+### 修改update
 
 修改单表语法：
 
-	update 表名 set 字段=新值,字段=新值
-	【where 条件】
-修改多表的记录【补充】
+```sql
+UPDATE 表名 SET 字段1=新值,字段2=新值... [WHERE 条件] ;
+```
 
-    语法：
-    sql92语法：
-    update 表1 别名,表2 别名
-    set 列=值,...
-    where 连接条件 and 筛选条件;
-    
-    sql99语法：
-    update 表1 别名
-    inner|left|right join 表2 别名
-    on 连接条件
-    set 列=值,...
-    where 筛选条件;
-
-### 删除
+### 删除delete
 
 方式1：delete语句 
 
-单表的删除： ★
-	delete from 表名 【where 筛选条件】【limit 】
-
-多表的删除：
--    sql99语法：
-
-    delete 表1的别名,表2的别名
-    from 表1 别名
-    inner|left|right join 表2 别名 on 连接条件
-    where 筛选条件;
+```sql
+DELETE FROM 表名 [WHERE 条件] [LIMIT n]
+```
 
 方式2：truncate语句  清空数据
 
-	truncate table 表名
+```sql
+TRUNCATE TABLE 表名
+```
 
 
 两种方式的区别?
@@ -260,28 +177,26 @@ Data Manipulation Language – 数据操纵语言
 
 >4.truncate删除不能回滚，delete删除可以回滚
 
->5.truncate删除不能回滚，delete删除可以回滚.
-
-## 3.DDL语句
+## 3.DDL数据定义语句
 数据定义语言(Data Definition Language)
 ### 库和表的管理
 库的管理：
 
 	一、创建库
-	create database 【IF NOT EXISTS】库名 【CHARACTER SET gbk】
+	CREATE DATABASE 【IF NOT EXISTS】库名 【CHARACTER SET gbk】
 	二、删除库
-	drop database 【if exists】 库名
+	DROP DATABASE 【if exists】 库名
 表的管理：
 
 #### 1.创建表 
 
-	create table 【if not exists】 表名(
-		字段名 字段类型 【约束】,
-		字段名 字段类型 【约束】,
-		。。。
-		字段名 字段类型 【约束】 
-	
-	)
+```sql
+create table [if not exists] 表名(
+	字段名 字段类型 [约束],
+	字段名 字段类型 [约束],
+	...
+)
+```
 
 #### 2.修改表 alter
 
@@ -306,25 +221,25 @@ ALTER TABLE studentinfo DROP COLUMN email;
 
 #### 3.删除表
 
-	DROP TABLE [IF EXISTS] studentinfo;
+```sql
+DROP TABLE [IF EXISTS] 表名;
+```
 
 #### 4.表的复制
 
-	(1).仅仅复制表的结构
-	CREATE TABLE copy LIKE author;
-	(2).复制表的结构+数据
-	CREATE TABLE copy2 
-	SELECT * FROM author;
-	(3).只复制部分数据
-	CREATE TABLE copy3
-	SELECT id,au_name
-	FROM author 
-	WHERE nation='中国';
-	(4)仅仅复制某些字段
-	CREATE TABLE copy4 
-	SELECT id,au_name
-	FROM author
-	WHERE 0; #这样所有数据都不会复制过来了，但是把表的部分结构复制了过来
+```sql
+-- (1).仅仅复制表的结构
+CREATE TABLE copy LIKE author;
+-- (2).复制表的结构+数据
+CREATE TABLE copy2 SELECT * FROM author;
+-- (3).只复制部分数据
+CREATE TABLE copy3 SELECT id,au_name FROM author WHERE nation='中国';
+-- (4)仅仅复制某些字段
+CREATE TABLE copy4 
+SELECT id,au_name
+FROM author
+WHERE 0; #这样所有数据都不会复制过来了，但是把表的部分结构复制了过来
+```
 
 ### 索引管理
 
@@ -402,36 +317,24 @@ FROM mk_article
 WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MODE);
 ```
 
-
-
 ## 4.常见数据类型
 
-看菜鸟教程
+看菜鸟教程：https://www.runoob.com/mysql/mysql-data-types.html
 ## 5.常见约束
 ### 约束介绍	
 含义：一种限制规则，用于限制表中的数据，为了保证表中的数据的完整性和一致性。
 
-
-分类：六大约束
-
-	NOT NULL：非空，用于保证该字段的值不能为空
-	比如姓名、学号等
-	DEFAULT:默认，用于保证该字段有默认值
-	比如性别
-	PRIMARY KEY:主键，用于保证该字段的值具有唯一性，并且非空
-	比如学号、员工编号等
-	UNIQUE:唯一，用于保证该字段的值具有唯一性，可以为空
-	比如座位号
-	CHECK:检查约束【mysql中不支持，没效果，但是不会报错，以适配其他数据库】
-	比如年龄、性别
-	FOREIGN KEY:外键，用于限制两个表的关系，用于保证该字段的值必须来自于主表的关联列的值
-		在从表添加外键约束，用于引用主表中某列的值
-	比如学生表的专业编号，员工表的部门编号，员工表的工种编号
+- NOT NULL：非空
+- DEFAULT：设置字段默认值
+- PRIMARY KEY：主键，一般对id字段标注主键，非空唯一
+- UNIQUE：唯一，插入时数据库自动检查是否存在重复，存在重复的话会插入失败并报错
+- CHECK：检查约束，MySQL不支持，postgresql支持，限制字段只能是某些值，如sex字段限制为男、女、未知
+- FOREIGN KEY：外键用于限制两个表的关系，用于保证该字段的值必须来自于主表的关联列的值，在从表添加外键约束，用于引用主表中某列的值
 
 添加约束的时机：
 
-	1.创建表时----列级约束
-	2.修改表时----表级约束
+1. 创建表时----列级约束
+2. 修改表时----表级约束
 
 约束的添加分类：
 
@@ -445,22 +348,17 @@ WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MOD
 	列级约束：	列的后面 语法都支持，但外键没有效果			不可以
 	表级约束：	所有列的下面 默认和非空不支持，其他支持	可以（主键没有效果）
 
-主键和唯一的对比：
+外键：（阿里开发手册建议不要用外键）
 
-		保证唯一性  是否允许为空    一个表中可以有多少个   是否允许组合
-	主键	√		×		至多有1个           √，但不推荐
-	唯一	√		√		可以有多个          √，但不推荐
-外键：
+1、要求在从表设置外键关系
+2、从表的外键列的类型和主表的关联列的类型要求一致或兼容，名称无要求
+3、主表的关联列必须是一个key（一般是主键或唯一）
+4、插入数据时，先插入主表，再插入从表
+删除数据时，先删除从表，再删除主表
 
-	1、要求在从表设置外键关系
-	2、从表的外键列的类型和主表的关联列的类型要求一致或兼容，名称无要求
-	3、主表的关联列必须是一个key（一般是主键或唯一）
-	4、插入数据时，先插入主表，再插入从表
-	删除数据时，先删除从表，再删除主表
 ```sql
 #方式一：级联删除
 ALTER TABLE stuinfo ADD CONSTRAINT fk_stu_major FOREIGN KEY(majorid) REFERENCES major(id) ON DELETE CASCADE;
-
 #方式二：级联置空
 ALTER TABLE stuinfo ADD CONSTRAINT fk_stu_major FOREIGN KEY(majorid) REFERENCES major(id) ON DELETE SET NULL;	
 ```
@@ -469,43 +367,34 @@ ALTER TABLE stuinfo ADD CONSTRAINT fk_stu_major FOREIGN KEY(majorid) REFERENCES 
 ### 一、创建表时添加约束
 
 1.添加列级约束
-语法：
-
-	直接在字段名和类型后面追加 约束类型即可。
-	
-	只支持：默认、非空、主键、唯一
-	
-	但是这样不能添加索引名
-
-查看stuinfo表中的所有索引，包括主键、外键、唯一
-SHOW INDEX FROM stuinfo;
 
 2.添加表级约束
 
-	语法：在各个字段的最下面
-	【constraint 约束名】 约束类型(字段名) 
-	如：
-	CONSTRAINT pk PRIMARY KEY(id),#主键
-	CONSTRAINT uq UNIQUE(seat),#唯一键
-	CONSTRAINT ck CHECK(gender ='男' OR gender  = '女'),#检查
-	
-	constraint 约束名 foreign key(字段名) references 主表（被引用列）
-	CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id)#外键
-	
-	可以添加索引名
+```sql
+-- 语法：在各个字段的最下面
+-- 【constraint 约束名】 约束类型(字段名) 
+-- 如：
+CONSTRAINT pk PRIMARY KEY(id),#主键
+CONSTRAINT uq UNIQUE(seat),#唯一键
+CONSTRAINT ck CHECK(gender ='男' OR gender  = '女'),#检查
+
+constraint 约束名 foreign key(字段名) references 主表（被引用列）
+CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id)#外键
+```
 
 3.通用的写法：★
 
-	CREATE TABLE IF NOT EXISTS stuinfo(
-		id INT PRIMARY KEY,
-		stuname VARCHAR(20),
-		sex CHAR(1),
-		age INT DEFAULT 18,
-		seat INT UNIQUE,
-		majorid INT,
-		CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id)
-		#外键索引名命名最好按以上方式
-	);
+```sql
+CREATE TABLE IF NOT EXISTS stuinfo(
+	id INT PRIMARY KEY,
+	stuname VARCHAR(20),
+	sex CHAR(1),
+	age INT DEFAULT 18,
+	seat INT UNIQUE,
+	majorid INT,
+	CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id) -- 外键索引名命名最好按以上方式
+);
+```
 
 
 ### 二、修改表时添加约束
@@ -519,7 +408,7 @@ alter table 表名 add 【constraint 约束名】 约束类型(字段名) 【外
 
 例子：
 ```sql
-DROP TABLE IF EXISTS stuinfo;
+lDROP TABLE IF EXISTS stuinfo;
 CREATE TABLE stuinfo(
 	id INT,
 	stuname VARCHAR(20),
@@ -577,61 +466,57 @@ SHOW INDEX FROM stuinfo;
 
 特点：
 1、标识列必须和主键搭配吗？不一定，但要求是一个key
+
 2、一个表可以有几个标识列？至多一个！
+
 3、标识列的类型只能是数值型
-4、标识列可以通过 SET auto_increment_increment=3;设置步长
-可以通过 手动插入值，设置起始值
+
+4、标识列可以通过` SET auto_increment_increment=3;`设置步长，可以通过 手动插入值，设置起始值
+
 二、修改表时设置标识列
-ALTER TABLE tab_identity MODIFY COLUMN id INT PRIMARY KEY AUTO_INCREMENT;
+`ALTER TABLE tab_identity MODIFY COLUMN id INT PRIMARY KEY AUTO_INCREMENT;`
 
 三、修改表时删除标识列
-ALTER TABLE tab_identity MODIFY COLUMN id INT ;
+`ALTER TABLE tab_identity MODIFY COLUMN id INT ;`
 
-
-
-## 6.TCL语句
+## 6.TCL事务
 Transaction Control Language 事务控制语言
 
-### 事务：对于DML语句才有事务
+**对于事务的更加详细的说明，最好还是去看书《深入理解分布式事务》。**
+
 >一个或一组sql语句组成一个执行单元，这个执行单元要么全部执行，要么全部不执行。如果单元中某条SQL语句一旦执行失败或产生错误，整个单元将会回滚。
 
-#### 特点
-	（ACID）
-	原子性(Atomicity)：要么都执行，要么都回滚
-	一致性(Consistency)：保证数据的状态操作前和操作后保持一致
-	隔离性(Isolation)：多个事务同时操作相同数据库的同一个数据时，一个事务的执行不受另外一个事务的干扰
-	持久性(Durability)：一个事务一旦提交，则数据将持久化到本地，除非其他事务对其进行修改
+#### 特点ACID
 
-相关步骤：
->1、开启事务
->2、编写事务的一组逻辑操作单元（多条sql语句）
->3、提交事务或回滚事务
+原子性(Atomicity)：要么都执行，要么都回滚。
 
-#### 事务的分类：
+一致性(Consistency)：保证数据的状态操作前和操作后保持一致。
+
+隔离性(Isolation)：多个事务同时操作相同数据库的同一个数据时，一个事务的执行不受另外一个事务的干扰，MySQL通过锁和MVCC机制保证隔离性。
+
+持久性(Durability)：一个事务一旦提交，则数据将持久化到本地，除非其他事务对其进行修改。
+
+#### 事务的分类
 
 1.隐式事务，没有明显的开启和结束事务的标志
 
-```sql
-比如
-insert、update、delete语句本身就是一个事务
-```
+比如`insert、update、delete`语句本身就是一个事务
 
 2.显式事务，具有明显的开启和结束事务的标志
 
 ```sql
-1、开启事务
-取消自动提交事务的功能
+-- 1、开启事务：取消自动提交事务的功能
 set autocommit=0;
-2、编写事务的一组逻辑操作单元（多条sql语句）
+-- 2、编写事务的一组逻辑操作单元（多条sql语句）
 insert
 update
 delete
-可以设置回滚点：
+-- 可以设置回滚点：
 savepoint 回滚点名;
-3、提交事务或回滚事务
-提交：commit;
-回滚：rollback;
-回滚到指定的地方：rollback to 回滚点名;
+-- 3、提交事务或回滚事务
+-- 提交：commit;
+-- 回滚：rollback;
+-- 回滚到指定的地方：rollback to 回滚点名;
 ```
 
 #### 使用到的关键字
@@ -645,95 +530,62 @@ rollback;
 savepoint  断点
 commit to 断点
 rollback to 断点
-```
-
-
-#### 事务的隔离级别:
-
-事务并发问题如何发生？
-
-当多个事务同时操作同一个数据库的相同数据时,事务的并发问题有哪些？
-
->1.脏读：一个事务读取到了另外一个事务未提交的数据
-
->2.不可重复读：同一个事务中，多次读取到的数据不一致
-
->3.幻读：一个事务读取数据时，另外一个事务进行更新，导致第一个事务读取到了没有更新的数据
-
-如何避免事务的并发问题？
-
-	通过设置事务的隔离级别
-	1、READ UNCOMMITTED
-	2、READ COMMITTED 可以避免脏读
-	3、REPEATABLE READ 默认，可以避免脏读、不可重复读和一部分幻读
-	4、SERIALIZABLE可以避免脏读、不可重复读和幻读
-								脏读			不可重复读		  幻读
-	read uncommitted:读未提交     ×                ×              ×        
-	read committed：读已提交      √                ×              ×
-	repeatable read：可重复读     √                √              ×
-	serializable：串行化          √                √              √
-
-设置隔离级别：
-
-```sql
+-- 设置隔离级别：
 set session|global  transaction isolation level 隔离级别名;
+-- 查看隔离级别：
+SELECT @@transaction_isolation;
 ```
-查看隔离级别：
-
-```sql
-select @@tx_isolation;
-```
-
-
 
 ## 7.视图
 含义：理解成一张虚拟的表
 mysql5.1版本出现的新特性，是通过表动态生成的数据
 视图和表的区别：
 
-		使用方式	占用物理空间
-	
-	视图	完全相同	不占用，仅仅保存的是sql逻辑
-	
-	表	完全相同	占用
+|      | 使用方式 | 占用物理空间                |
+| ---- | -------- | --------------------------- |
+| 视图 | 完全相同 | 不占用，仅仅保存的是sql逻辑 |
+| 表   | 完全相同 | 占用                        |
 
 视图的好处：
 
-	1、sql语句提高重用性，效率高
-	2、和表实现了分离，提高了安全性
-	3.提供一定程度上的逻辑独立性
-	4.集中展示用户所感兴趣的特定数据
+1、sql语句提高重用性，效率高
+2、和表实现了分离，提高了安全性
+3、提供一定程度上的逻辑独立性
+4、集中展示用户所感兴趣的特定数据
 
-### 视图的创建
+### 视图操作
+
 ```sql
--- 语法：
-CREATE VIEW  <视图名>
-AS <查询语句>;
+-- 创建语法：
+CREATE VIEW  <视图名> AS <查询语句>;
+
+-- 1、查看视图的数据
+SELECT * FROM my_v4;
+SELECT * FROM my_v1 WHERE last_name='Partners';
+-- 2、插入视图的数据
+INSERT INTO my_v4(last_name,department_id) VALUES('虚竹',90);
+-- 3、修改视图的数据
+UPDATE my_v4 SET last_name ='梦姑' WHERE last_name='虚竹';
+-- 4、删除视图的数据
+DELETE FROM my_v4;
+
+-- 5、视图结构删除
+DROP DROP VIEW 视图名;
+-- 6、视图结构查看
+DESC test_v7;
+SHOW CREATE VIEW test_v7;
 ```
 
-### 视图的增删改查
-	1、查看视图的数据 ★
-	
-	SELECT * FROM my_v4;
-	SELECT * FROM my_v1 WHERE last_name='Partners';
-	
-	2、插入视图的数据
-	INSERT INTO my_v4(last_name,department_id) VALUES('虚竹',90);
-	
-	3、修改视图的数据
-	
-	UPDATE my_v4 SET last_name ='梦姑' WHERE last_name='虚竹';
-	
-	4、删除视图的数据
-	DELETE FROM my_v4;
 
 ### 某些视图不能更新
-	包含以下关键字的sql语句：分组函数、distinct、group  by、having、union或者union all
-	常量视图
-	Select中包含子查询
-	join
-	from一个不能更新的视图
-	where子句的子查询引用了from子句中的表
+```sql
+包含以下关键字的sql语句：分组函数、distinct、group  by、having、union或者union all
+常量视图
+Select中包含子查询
+join
+from一个不能更新的视图
+where子句的子查询引用了from子句中的表
+```
 
 >注意：这里其实尽量不去更新视图，而且大部分视图都是不能更新的。
 
@@ -752,305 +604,29 @@ SELECT employee_id FROM employees;
 
 SELECT * FROM test_v7;
 ```
-### 视图的删除
-```sql
-DROP VIEW test_v1,test_v2,test_v3;
-```
-### 视图结构的查看	
-```sql
-DESC test_v7;
-SHOW CREATE VIEW test_v7;
-```
-
-
-
 ## 8.存储过程
 
+> 注意：阿里开发规范禁用存储过程
+
 含义：一组经过预先编译的sql语句的集合
-好处：
 
-	1、提高了sql语句的重用性，减少了开发程序员的压力
-	2、提高了效率
-	3、减少了传输次数
-
-分类：
-
-	1、无返回无参
-	2、仅仅带in类型，无返回有参
-	3、仅仅带out类型，有返回无参
-	4、既带in又带out，有返回有参
-	5、带inout，有返回有参
-	注意：in、out、inout都可以在一个存储过程中带多个
-
-#### 1.创建存储过程
-语法：
-
-	create procedure 存储过程名(in|out|inout 参数名  参数类型,...)
-	begin
-		存储过程体
-	
-	end
-
-
-
-注意
-```sql
-1、需要临时更改新的命令行使用程序的语句分隔符：
-delimiter 新的结束标记
-示例：
-delimiter $  #除了\ 都可以作为语句分隔符
-
-CREATE PROCEDURE 存储过程名(IN|OUT|INOUT 参数名  参数类型,...)
-BEGIN
-	sql语句1;
-	sql语句2;
-END $
-
-delimiter ;	#改回;作为语句分隔符
-
-2、存储过程体中可以有多条sql语句，存储过程体中的每条sql语句的结尾要求必须加分号。如果仅仅一条sql语句，则可以省略begin end
-
-3、参数前面的符号的意思
-in:该参数只能作为输入 （该参数不能做返回值）
-out：该参数只能作为输出（该参数只能做返回值）
-inout：既能做输入又能做输出
-调用in模式的参数：call sp1（‘值’）;
-调用out模式的参数：set @name; call sp1(@name);select @name;
-调用inout模式的参数：set @name=值; call sp1(@name); select @name;
-```
-
-#### 2.调用存储过程
-	call 存储过程名(实参列表)
-
-#### 3.查看存储过程的信息
-```sql
-DESC myp2;	#错误
-SHOW CREATE PROCEDURE  myp2;
-SHOW PROCEDURE STATUS;	#查看存储过程列表
-```
-#### 4.删除
-	drop procedure 存储过程名;
-
-#### 5.案例
-
-1、创建存储过程或函数实现传入女神名称，返回：女神 and 男神  格式的字符串
-如 传入 ：小昭
-返回： 小昭 AND 张无忌
-
-```sql
-DROP PROCEDURE test_pro5;
-DELIMITER $
-CREATE PROCEDURE test_pro5(IN beautyName VARCHAR(20),OUT str VARCHAR(50))
-BEGIN
-	SELECT CONCAT(beautyName,' and ',IFNULL(boyName,'null')) INTO str
-	FROM boys bo
-	RIGHT JOIN beauty b ON b.boyfriend_id = bo.id
-	WHERE b.name=beautyName;
-END $
-
-CALL test_pro5('柳岩',@str);
-SELECT @str ;
-```
-2、创建存储过程或函数，根据传入的条目数和起始索引，查询beauty表的记录
-```sql
-DROP PROCEDURE test_pro6;
-DELIMITER $
-CREATE PROCEDURE test_pro6(IN startIndex INT,IN size INT)
-BEGIN
-	DECLARE START INT;
-	SET START:=startIndex-1;
-	SELECT * FROM beauty LIMIT START,size;
-END $
-DELIMITER ;
-CALL test_pro6(1,5);
-```
+因开发中一直没有用过这个玩意，所以将原有笔记全部删除，如果需要的话，可以看菜鸟教程：https://www.runoob.com/w3cnote/mysql-stored-procedure.html
 
 ## 9. 函数
+
 含义：一组预先编译好的SQL语句的集合，理解成批处理语句
->1、提高代码的重用性
-
->2、简化操作
-
->3、减少了编译次数并且减少了和数据库服务器的连接次数，提高了效率
 
 
 函数和存储过程的区别：
 >存储过程：可以有0个返回，也可以有多个返回，适合做批量插入、批量更新
-
+>
 >函数：有且仅有1 个返回，适合做处理数据后返回一个结果
 
-### 1.创建语法
+因开发中一直没有自定义函数，只用过内置函数，所以删除原有笔记，并附上菜鸟教程中MySQL内置函数：https://www.runoob.com/mysql/mysql-functions.html
 
-```sql
-delimiter $
-CREATE FUNCTION 函数名(参数列表) RETURNS 返回类型
-BEGIN
-	函数体
-	return 
-END $
-deliter ;
-```
-注意：
+## 10.流程控制语句
 
-	1.参数列表 包含两部分：
-	参数名 参数类型
-	2.函数体：肯定会有return语句，如果没有会报错
-	如果return语句没有放在函数体的最后也不报错，但不建议
-	return 值;
-	3.函数体中仅有一句话，则可以省略begin end
-	4.使用 delimiter语句设置结束标记
-
-### 2.调用语法
-​	`SELECT 函数名(参数列表)`
-
-### 3.查看函数
-​	`SHOW CREATE FUNCTION myf3;`
-
-### 4.删除函数
-​	`DROP FUNCTION myf3;`
-
-
-## 10.流程控制语句：
-	顺序、分支、循环
-
-### 1. 分支结构
-
-1.if函数
-
-	语法：if(条件,值1，值2)
-	功能：实现双分支
-	特点：
-		可以作为表达式放在任何位置
-
-2.case结构
-
-	情况1：类似于switch
-	case 变量或表达式
-	when 值1 then 语句1;
-	when 值2 then 语句2;
-	...
-	else 语句n;
-	end 
-	
-	情况2：
-	case 
-	when 条件1 then 语句1;
-	when 条件2 then 语句2;
-	...
-	else 语句n;
-	end 
-注意：
->可以放在任何位置，
-如果放在begin end 外面，作为表达式结合着其他语句使用
-如果放在begin end 里面，一般作为独立的语句使用
-作为表达式的时候，每个语句后面没有分号，作为独立的语句时，每个语句后面都有分号
-
-3.if结构
-
-	语法：
-	if 条件1 then 语句1;
-	elseif 条件2 then 语句2;
-	....
-	else 语句n;
-	end if;
-	功能：类似于多重if
-
-注意：只能应用在begin end 中
-
-### 2.循环结构
-分类：
-
-	while、loop、repeat
-
-循环控制关键字：
->iterate类似于 continue，继续，结束本次循环，继续下一次
-
->leave 类似于  break，跳出，结束当前所在的循环
-
->使用：leave 标签(如label);
-
-1.while
-
-	语法：
-	【标签:】while 循环条件 do
-		循环体;
-	end while【 标签】;
-
-2.loop
-
-	语法：
-	【标签:】loop
-		循环体;
-	end loop 【标签】;
-
-注意：loop没有结束循环的条件，可以用来模拟简单的死循环；
-要跳出循环，需要使用leave；
-
-3.repeat
-
-	语法：
-	【标签：】repeat
-		循环体;
-	until 结束循环的条件
-	end repeat 【标签】;
-
-
-4.案例1：批量插入，根据次数插入到admin表中多条记录，只插入偶数次
-```sql
-TRUNCATE TABLE admin;
-DROP PROCEDURE if exists test_while1;
-DELIMITER $
-CREATE PROCEDURE test_while1(IN insertCount INT)
-BEGIN
-	DECLARE i INT DEFAULT 0;
-	a:WHILE i<=insertCount DO
-		SET i=i+1;
-		IF MOD(i,2)!=0 THEN ITERATE a;
-		END IF;
-		INSERT INTO admin(username,`password`) 
-		VALUES(CONCAT('xiaohua',i),'0000');
-				
-	END WHILE a;
-END $
-delimiter ;
-
-CALL test_while1(100);
-SELECT * FROM admin;
-```
-
-案例2
-已知表stringcontent
-其中字段：
-id 自增长
-content varchar(20)
-向该表插入指定个数的，随机的字符串
-```sql
-DROP TABLE IF EXISTS stringcontent;
-CREATE TABLE stringcontent(
-	id INT PRIMARY KEY AUTO_INCREMENT,
-	content VARCHAR(20)
-);
-DROP PROCEDURE IF EXISTS test_insert;
-DELIMITER $
-CREATE PROCEDURE test_insert(IN insert_count INT)
-BEGIN 
-	DECLARE i INT DEFAULT 1;
-	DECLARE str VARCHAR(26) DEFAULT 'abcdefghijklmnopqrstuvwxyz';
-	DECLARE len INT DEFAULT 0;
-	DECLARE startindex INT DEFAULT 1;
-	WHILE i<=insert_count DO
-		SET startindex=FLOOR(RAND()*26+1);
-		SET len=FLOOR((26-startindex)*RAND()+1);
-		INSERT INTO stringcontent(content)
-		VALUES(SUBSTR(str,startindex,len));
-		SET i:=i+1;
-		END WHILE;
-END $
-
-TRUNCATE TABLE stringcontent;
-CALL test_insert(20);
-SELECT * FROM stringcontent;
-```
+用在存储过程和函数中。所以就删除原有笔记了。
 
 # 高性能MySQL
 
@@ -1075,15 +651,9 @@ long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录
 
 一篇很好的讲解：https://www.cnblogs.com/nijunyang/p/11406688.html
 
-
-
 ## 3.锁
 
 一篇讲得比较好的博文：https://blog.csdn.net/cy973071263/article/details/105188519
-
-
-
-
 
 # postgresql
 
@@ -1254,8 +824,6 @@ REVOKE DELETE ON table_A from ROLE_A;
 DENY <权限列表> ON <数据库对象> TO <用户|角色>;
 DENY DELETE On table_A TO ROLE_B;
 ```
-
-
 
 ## 数据库应用编程
 
@@ -2356,3 +1924,4 @@ public static void main(String[] args) {
 GUI：先断开与数据库的连接然后在 propriety 里设置 connection中用户名再点击连接输入 密码。
 
 Shell：在SQL Shell中进行用户名和密码的登录
+
