@@ -1,5 +1,7 @@
 # 资料
 
+书籍：《深入理解Kafka 核心设计与实践原理》，作者朱忠华
+
 官网：https://kafka.apache.org/#
 
 尚硅谷资料及视频：https://www.bilibili.com/video/BV1vr4y1677k?p=1
@@ -464,13 +466,298 @@ org.apache.kafka.common.errors.TimeoutException
 Processed a total of 21 messages
 ```
 
+# kafka-kraft模式
+
+## 简介
+
+![image-20220424221751832](kafka.assets/image-20220424221751832.png)
+
+该图为 Kafka 现有架构，元数据在 zookeeper 中，运行时动态选举 controller，由controller 进行 Kafka 集群管理。右图为 kraft 模式架构（实验性），**不再依赖 zookeeper 集群**，而是用三台 controller 节点代替 zookeeper，元数据保存在controller 中，由 controller 直接进行 Kafka 集群管理。
+
+从kafka安装包的config/kraft目录下的README.md得知：
+
+```markdown
+## Warning
+KRaft mode in Kafka 3.1 is provided for testing only, *NOT* for production.  We do not yet support upgrading existing ZooKeeper-based Kafka clusters into this mode.  
+There may be bugs, including serious ones.  You should *assume that your data could be lost at any time* if you try the preview release of KRaft mode.
+```
+
+**kraft模式在目前最新的3.1版本依旧是测试状态，不能用于生产环境**，可能会有bug。用来学习的话还是不错的。
+
+## kfaft集群部署
+
+1、下载安装包并解压
+
+```shell
+wget https://mirrors.aliyun.com/apache/kafka/3.1.0/kafka_2.12-3.1.0.tgz
+```
+
+2、修改配置
+
+注意：kraft配置文件位于安装目录下config/kraft中。三台都需要修改，且需要根据自身情况修改，如node.id需要分别为1,2,3，以下以k8s-master主机为例：
+
+```shell
+vim config/kraft/server.properties
+
+# 将其以下相关配置修改如下
+# The node id associated with this instance's roles
+node.id=1
+# controller控制器的节点列表，集群中所有控制器都必须在此处列出，每个controller和broker都要配置
+# 格式：id1@host1:port1,id2@host2:port2, etc.
+controller.quorum.voters=1@k8s-master:9093,2@k8s-node1:9093,3@k8s-node2:9093
+
+# 此broker将告诉生产者和消费者的host:port. 在这里可以指定公网ip，实现外部生产者消费者直接访问kafka
+# 如果不配置，它会用listeners，如果这个也没配置，它会用 returned from java.net.InetAddress.getCanonicalHostName().
+#advertised.listeners=PLAINTEXT://localhost:9092
+advertised.listeners=PLAINTEXT://k8s-master:9092
+
+# 日志数据目录
+#log.dirs=/tmp/kraft-combined-logs
+log.dirs=/opt/kafkaDemo2/kafka_2.12-3.1.0/data
+```
+
+在 k8s-node1和 k8s-node2主机上 需 要 对 node.id 相应改变 ， 值 需 要 和controller.quorum.voters 对应，并修改相应的advertised.Listeners 地址。
+
+3、初始化集群数据目录
+
+3.1 首先生成存储目录唯一 ID
+
+```shell
+[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-storage.sh random-uuid
+EG9wq5zaRb2nk4QPhrr_Wg
+```
+
+3.2 用该 ID 格式化 kafka 存储目录：3台节点都执行此命令
+
+```shell
+[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-storage.sh format -t EG9wq5zaRb2nk4QPhrr_Wg -c /opt/kafkaDemo2/kafka_2.12-3.1.0/config/kraft/server.properties 
+Formatting /opt/kafkaDemo2/kafka_2.12-3.1.0/data
+```
+
+4、启动kafka-kraft集群：3台节点执行，注意此时选择启动的配置文件必须是config/kraft/server.properties，别搞成config/server.properties了。
+
+```shell
+[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-server-start.sh -daemon config/kraft/server.properties 
+[root@k8s-master kafka_2.12-3.1.0]# jps
+3748 Kafka
+3849 Jps
+```
+
+此时在3台服务器通过jps命令都能发现kafka进程的运行说明正确部署了，如果没有kafka进程，说明部署失败，则用`bin/kafka-server-start.sh config/kraft/server.properties `命令非后台启动查看错误原因。可能的原因是内存不足，此时则需要去修改`kafka-server-start.sh`启动脚本，将其指定的虚拟机内存设置小一点，默认是1G，可以改512m。
+
+5、如果部署成功了， 则用命令行操作测试下
+
+```shell
+# 如果此命令能够正常建立改topic，说明集群肯定部署成功了
+[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic test_topic --create --partitions 3 --replication-factor 3
+
+# 检查创建的topic
+[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic test_topic --describe 
+Topic: test_topic	TopicId: J3B3Gd7XTSKyusq0nRQgLw	PartitionCount: 3	ReplicationFactor: 3	Configs: segment.bytes=1073741824
+	Topic: test_topic	Partition: 0	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2
+	Topic: test_topic	Partition: 1	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3
+	Topic: test_topic	Partition: 2	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
+
+# 接下来也可以用生产者命令和消费者命令测试发送和接受消息是否正常
+```
+
+## server.properties解析
+
+在config/kraft目录下有一些文件可以看一看：建议先看看README.md，它会告诉咱们如何部署kraft集群
+
+```shell
+[root@k8s-master kraft]# ls
+broker.properties  controller.properties  README.md  server.properties
+```
+
+接下来就对server.properties进行解读
+
+```properties
+############################# Server Basics #############################
+
+# 此节点的角色. 设置了这个属性将告知kafka当前是kraft模式，不设置的话就走的是zookeeper模式
+# broker，节点作为broker
+# controller，节点作为集群的controller，控制服务器将参与元数据仲裁，类似于原来的zookeeper作用
+# broker,controller，同时充当代理和控制器的节点称为“组合”节点。主要缺点是控制器与系统其他部分的隔离度较低。例如，如果代理上的活动导致内存条件下，服务器的控制器部分不会与该OOM条件隔离。
+process.roles=broker,controller
+
+# 节点id，全局唯一
+node.id=1
+
+# controller控制器的节点列表，集群中所有控制器都必须在此处列出，每个controller和broker都要配置
+# 格式：id1@host1:port1,id2@host2:port2, etc.
+controller.quorum.voters=1@k8s-master:9093,2@k8s-node1:9093,3@k8s-node2:9093
+
+############################# Socket Server Settings #############################
+
+# The address the socket server listens on. It will get the value returned from
+# java.net.InetAddress.getCanonicalHostName() if not configured.
+#   FORMAT:
+#     listeners = listener_name://host_name:port
+#   EXAMPLE:
+#     listeners = PLAINTEXT://your.host.name:9092
+listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+inter.broker.listener.name=PLAINTEXT
+
+# 此broker将告诉生产者和消费者的host:port. 在这里可以指定公网ip，实现外部生产者消费者直接访问kafka
+# 如果不配置，它会用listeners，如果这个也没配置，它会用 returned from java.net.InetAddress.getCanonicalHostName().
+#advertised.listeners=PLAINTEXT://localhost:9092
+advertised.listeners=PLAINTEXT://k8s-master:9092
+
+# Listener, host name, and port for the controller to advertise to the brokers. If
+# this server is a controller, this listener must be configured.
+controller.listener.names=CONTROLLER
+
+# Maps listener names to security protocols, the default is for them to be the same. See the config documentation for more details
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_SSL:SASL_SSL
+
+# 接受网络request和响应response的线程数量
+num.network.threads=3
+
+# 实际处理request的线程数量
+num.io.threads=8
+
+# The send buffer (SO_SNDBUF) used by the socket server
+socket.send.buffer.bytes=102400
+
+# The receive buffer (SO_RCVBUF) used by the socket server
+socket.receive.buffer.bytes=102400
+
+# The maximum size of a request that the socket server will accept (protection against OOM)
+socket.request.max.bytes=104857600
+
+
+############################# Log Basics #############################
+
+# 日志数据目录，因为kafka以日志格式存储数据，所以最好别放在/tmp目录下
+log.dirs=/opt/kafkaDemo2/kafka_2.12-3.1.0/data
+
+# topic的分区数量. 更多分区数量运行消费者组更大并发，也会产生更多文件，默认1，建议设为broker数量的倍数
+num.partitions=3
+
+# The number of threads per data directory to be used for log recovery at startup and flushing at shutdown.
+# This value is recommended to be increased for installations with data dirs located in RAID array.
+num.recovery.threads.per.data.dir=1
+
+############################# Internal Topic Settings  #############################
+# The replication factor for the group metadata internal topics "__consumer_offsets" and "__transaction_state"
+# 生成环境副本因子最好大于1，比如3
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=1
+transaction.state.log.min.isr=1
+
+############################# Log Flush Policy #############################
+
+# Messages are immediately written to the filesystem but by default we only fsync() to sync
+# the OS cache lazily. The following configurations control the flush of data to disk.
+# There are a few important trade-offs here:
+#    1. Durability: Unflushed data may be lost if you are not using replication.
+#    2. Latency: Very large flush intervals may lead to latency spikes when the flush does occur as there will be a lot of data to flush.
+#    3. Throughput: The flush is generally the most expensive operation, and a small flush interval may lead to excessive seeks.
+# The settings below allow one to configure the flush policy to flush data after a period of time or
+# every N messages (or both). This can be done globally and overridden on a per-topic basis.
+
+# The number of messages to accept before forcing a flush of data to disk
+#log.flush.interval.messages=10000
+
+# The maximum amount of time a message can sit in a log before we force a flush
+#log.flush.interval.ms=1000
+
+############################# Log Retention Policy #############################
+
+# The following configurations control the disposal of log segments. The policy can
+# be set to delete segments after a period of time, or after a given size has accumulated.
+# A segment will be deleted whenever *either* of these criteria are met. Deletion always happens
+# from the end of the log.
+
+# The minimum age of a log file to be eligible for deletion due to age
+log.retention.hours=168
+
+# A size-based retention policy for logs. Segments are pruned from the log unless the remaining
+# segments drop below log.retention.bytes. Functions independently of log.retention.hours.
+#log.retention.bytes=1073741824
+
+# The maximum size of a log segment file. When this size is reached a new log segment will be created.
+log.segment.bytes=1073741824
+
+# The interval at which log segments are checked to see if they can be deleted according
+# to the retention policies
+log.retention.check.interval.ms=300000
+```
+
+### 最佳实践
+
+最好是controller和broker分开，如果是学习环境的话，倒是可以3台服务器直接既当controller，又当broker。
+
+1、`process.roles`，最好是3台controller，3台broker
+
+2、`node.id`以controller为1,2,3，broker分别为4,5,6
+
+3、`controller.quorum.voters`，指明3台controller列表
+
+4、`advertised.listeners`，在学习环境可以指定公网ip，生产环境一般都是内网
+
+5、`log.dirs`，日志数据目录，最好放在kafka安装目录下
+
+6、`num.partitions`，建议为3
+
+7、`offsets.topic.replication.factor`，建议为3
+
+其它的配置其实默认的就很好了。
+
+# kafka Broker
+
+## broker总体工作流程
+
+![image-20220413233415711](kafka.assets/image-20220413233415711.png)
+
+如果leader挂了：
+
+![image-20220413233529297](kafka.assets/image-20220413233529297.png)
+
+## 节点服役与退役
+
+看pdf和视频资料：https://www.bilibili.com/video/BV1vr4y1677k?p=24
+
+## kafka副本
+
+建议看PDF文档即可。
+
+### leader partition的自动平衡
+
+![image-20220416232827271](kafka.assets/image-20220416232827271.png)
+
+下面关于这个自动平衡的参数可以在kafka官方文档中的broker 配置处找到：
+
+| 参数名称                                                     | 说明                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [auto.leader.rebalance.enable](https://kafka.apache.org/documentation/#brokerconfigs_auto.leader.rebalance.enable) | 默认是 true。 自动 Leader Partition 平衡。生产环境中，leader 重选举的代价比较大，可能会带来性能影响，建议设置为 false 关闭 |
+| [leader.imbalance.per.broker.percentage](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.per.broker.percentage) | 默认是 10%。每个 broker 允许的不平衡的 leader的比率。如果每个 broker 超过了这个值，控制器会触发 leader 的平衡 |
+| [leader.imbalance.check.interval.seconds](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.check.interval.seconds) | 默认值 300 秒。检查 leader 负载是否平衡的间隔时间。          |
+
+## 文件存储
+
+这个挺重要的，多看看PDF文档就可以了。
+
+## 高效读写
+
+页缓存+零拷贝技术。
+
+多看看PDF文档。
+
 # kafka生产者
 
 ## 发送流程
 
-在消息发送的过程中，涉及到了**两个线程——****main** **线程和** **Sender** **线程**。在 main 线程中创建了**一个双端队列** **RecordAccumulator**。main 线程将消息发送给 RecordAccumulator，Sender 线程不断从 RecordAccumulator 中拉取消息发送到 Kafka Broker。
+在消息发送的过程中，涉及到了两个线程——**main线程和Sender** **线程**。在 main 线程中创建了**一个双端队列RecordAccumulator**。main 线程将消息发送给 RecordAccumulator，Sender 线程不断从 RecordAccumulator 中拉取消息发送到 Kafka Broker。
 
 ![image-20220412223725676](kafka.assets/image-20220412223725676.png)
+
+`RecordAccumulator`为每个分区维护一个双端队列，队列内容为`ProducerBatch`，即`Deque<ProducerBatch>`。
+
+`ProducerBatch`是消息批次，包含一个或多个生产者消息`ProducerRecord`。
+
+Sender线程将消息封装成<Node,Request>形式，Request在发送之前会保存到`InFlihtRequests`，其存储对象的形式为`Map<NodeId,Deque<Request>>`，缓存已经发送出去但是未收到响应ack的请求，类似于TCP协议中的滑动窗口。参数`max.in.flight.requests.per.connection`指定每个连接(即客户端和broker之间的连接)最多缓存的未响应请求个数，默认5.
 
 ## 生产者API
 
@@ -769,46 +1056,6 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 
 客户端在阻塞之前将在单个连接上发送的未收到ack确认请求的最大数量。默认为5。
 
-# kafka Broker
-
-## broker总体工作流程
-
-![image-20220413233415711](kafka.assets/image-20220413233415711.png)
-
-如果leader挂了：
-
-![image-20220413233529297](kafka.assets/image-20220413233529297.png)
-
-## 节点服役与退役
-
-看pdf和视频资料：https://www.bilibili.com/video/BV1vr4y1677k?p=24
-
-## kafka副本
-
-建议看PDF文档即可。
-
-### leader partition的自动平衡
-
-![image-20220416232827271](kafka.assets/image-20220416232827271.png)
-
-下面关于这个自动平衡的参数可以在kafka官方文档中的broker 配置处找到：
-
-| 参数名称                                                     | 说明                                                         |
-| ------------------------------------------------------------ | ------------------------------------------------------------ |
-| [auto.create.topics.enable](https://kafka.apache.org/documentation/#brokerconfigs_auto.create.topics.enable) | 默认是 true。 自动 Leader Partition 平衡。生产环境中，leader 重选举的代价比较大，可能会带来性能影响，建议设置为 false 关闭 |
-| [leader.imbalance.per.broker.percentage](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.per.broker.percentage) | 默认是 10%。每个 broker 允许的不平衡的 leader的比率。如果每个 broker 超过了这个值，控制器会触发 leader 的平衡 |
-| [leader.imbalance.check.interval.seconds](https://kafka.apache.org/documentation/#brokerconfigs_leader.imbalance.check.interval.seconds) | 默认值 300 秒。检查 leader 负载是否平衡的间隔时间。          |
-
-## 文件存储
-
-这个挺重要的，多看看PDF文档就可以了。
-
-## 高效读写
-
-页缓存+零拷贝技术。
-
-多看看PDF文档。
-
 # kafka消费者
 
 ## 消费流程
@@ -826,6 +1073,8 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 ![image-20220418221446366](kafka.assets/image-20220418221446366.png)
 
 ![image-20220418222739958](kafka.assets/image-20220418222739958.png)
+
+消费者组模型让整体消费能力具备横向伸缩性。
 
 ## 消费者API
 
@@ -944,13 +1193,23 @@ properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, org.apache.k
 
 **Sticky** **分区分配再平衡案例**看PDF文档。
 
+### 再均衡
+
+再均衡指分区所属权从一个消费者转移到另一个消费者的行为。它为消费者组提供了高可用性和伸缩性的保障，使得我们可以方便安全的对消费者组内的消费者进行删除或新增。
+
+再均衡期间，消费者组无法读取消息，会变得不可用。一般情况下，应避免不必要的再均衡，因为它可能造成消息重复消费。
+
+再均衡监听器`ConsumerRebalanceListener`接口可以设定一些再均衡动作前后的准备和收尾动作。比如说在均衡前立刻提交消费偏移，避免重复消费。也可以在均衡后使用seek()方法指定消费位移(如果将消费位移保存在其它地方如数据库中)。
+
+相应的示例代码可以看书。
+
 ## offset
 
 ### offset存储
 
 ![image-20220419232141047](kafka.assets/image-20220419232141047.png)
 
-__consumer_offsets 主题里面采用 key 和 value 的方式存储数据。key 是 `group.id+topic+分区号`，value 就是当前 offset 的值。每隔一段时间，kafka 内部会对这个 topic 进行compact，也就是每个 `group.id+topic+分区号`就保留最新数据。
+`__consumer_offsets` 主题里面采用 key 和 value 的方式存储数据。key 是 `group.id+topic+分区号`，value 就是当前 offset 的值。每隔一段时间，kafka 内部会对这个 topic 进行compact，也就是每个 `group.id+topic+分区号`就保留最新数据。
 
 **offset在_consumer_offsets中存储的案例**去看PDF文档。
 
@@ -971,6 +1230,10 @@ properties.put(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, false);
 | auto.commit.interval.ms | 如果设置了 enable.auto.commit 的值为 true， 则该值定义了消费者偏移量向 Kafka 提交的频率，默认 5s |
 
 ![image-20220419233846870](kafka.assets/image-20220419233846870.png)
+
+自动提交的动作是在poll()方法的逻辑里完成的，每次向服务端发送拉取请求前，都会检查是否有位移可以提交。
+
+自动提交虽然简单，但是有重复消费和消息丢失的问题。问题详情描述可以看书。
 
 配置自动提交：
 
@@ -1072,9 +1335,11 @@ public class MyConsumer {
 }
 ```
 
+异步提交不会使得消费者线程被阻塞，使得消费者性能有一定提高，缺点是可能提交消费位移的结果还未返回之前就开始了新一轮的拉取poll()方法。
+
 ### 初始offset和指定offset消费
 
-在上面的消费者组的情况下，根据groupId会找到上一次提交的消费偏移量offset。但当此消费者组第一次消费此topic的partition时，初始偏移量由配置`auto.offset.reset`决定。
+在上面的消费者组的情况下，根据groupId会找到上一次提交的消费偏移量offset。但当此消费者组第一次消费此topic的partition时(或_consumer_offsets主题中关于此消费者组的位移信息过期被删除时)，初始偏移量由配置`auto.offset.reset`决定。
 
 | 参数              | 可选值       | 描述                                                         |
 | ----------------- | ------------ | ------------------------------------------------------------ |
@@ -1084,7 +1349,7 @@ public class MyConsumer {
 
 ![image-20220420001149889](kafka.assets/image-20220420001149889.png)
 
-配置初始偏移量为earliest
+配置初始偏移量为earliest，建议就默认的
 
 ```java
 // 0.7 optional: 配置初始消费偏移量offset，默认latest
@@ -1218,233 +1483,7 @@ public class MyConsumer {
 
 如果想完成Consumer端的精准一次性消费，那么需要Kafka消费端将消费过程和提交offset过程做原子绑定，即支持事务。
 
-# kafka-kraft模式
 
-![image-20220424221751832](kafka.assets/image-20220424221751832.png)
-
-左图为 Kafka 现有架构，元数据在 zookeeper 中，运行时动态选举 controller，由controller 进行 Kafka 集群管理。右图为 kraft 模式架构（实验性），不再依赖 zookeeper 集群，而是用三台 controller 节点代替 zookeeper，元数据保存在controller 中，由 controller 直接进行 Kafka 集群管理。
-
-## kfaft集群部署
-
-1、下载安装包并解压
-
-```shell
-wget https://mirrors.aliyun.com/apache/kafka/3.1.0/kafka_2.12-3.1.0.tgz
-```
-
-2、修改配置
-
-注意：kraft配置文件位于安装目录下config/kraft中。三台都需要修改，且需要根据自身情况修改，如node.id需要分别为1,2,3，以下以k8s-master主机为例：
-
-```shell
-vim config/kraft/server.properties
-
-# 将其以下相关配置修改如下
-# The node id associated with this instance's roles
-node.id=1
-# The connect string for the controller quorum
-#controller.quorum.voters=1@localhost:9093
-controller.quorum.voters=1@k8s-master:9093,2@k8s-node1:9093,3@k8s-node2:9093
-
-# Hostname and port the broker will advertise to producers and consumers. If not set,
-# it uses the value for "listeners" if configured.  Otherwise, it will use the value
-# returned from java.net.InetAddress.getCanonicalHostName().
-#advertised.listeners=PLAINTEXT://localhost:9092
-advertised.listeners=PLAINTEXT://k8s-master:9092
-
-# 日志数据目录
-#log.dirs=/tmp/kraft-combined-logs
-log.dirs=/opt/kafkaDemo2/kafka_2.12-3.1.0/data
-```
-
-在 k8s-node1和 k8s-node2主机上 需 要 对 node.id 相应改变 ， 值 需 要 和controller.quorum.voters 对应，并修改相应的advertised.Listeners 地址。
-
-3、初始化集群数据目录
-
-3.1 首先生成存储目录唯一 ID
-
-```shell
-[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-storage.sh random-uuid
-EG9wq5zaRb2nk4QPhrr_Wg
-```
-
-3.2 用该 ID 格式化 kafka 存储目录：3台节点都执行此命令
-
-```shell
-[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-storage.sh format -t EG9wq5zaRb2nk4QPhrr_Wg -c /opt/kafkaDemo2/kafka_2.12-3.1.0/config/kraft/server.properties 
-Formatting /opt/kafkaDemo2/kafka_2.12-3.1.0/data
-```
-
-4、启动kafka-kraft集群：3台节点执行，注意此时选择启动的配置文件必须是config/kraft/server.properties，别搞成config/server.properties了。
-
-```shell
-[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-server-start.sh -daemon config/kraft/server.properties 
-[root@k8s-master kafka_2.12-3.1.0]# jps
-3748 Kafka
-3849 Jps
-```
-
-此时在3台服务器通过jps命令都能发现kafka进程的运行说明正确部署了，如果没有kafka进程，说明部署失败，则用`bin/kafka-server-start.sh config/kraft/server.properties `命令非后台启动查看错误原因。可能的原因是内存不足，此时则需要去修改`kafka-server-start.sh`启动脚本，将其指定的虚拟机内存设置小一点，默认是1G，可以改512m。
-
-5、如果部署成功了， 则用命令行操作测试下
-
-```shell
-# 如果此命令能够正常建立改topic，说明集群肯定部署成功了
-[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic test_topic --create --partitions 3 --replication-factor 3
-
-# 检查创建的topic
-[root@k8s-master kafka_2.12-3.1.0]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic test_topic --describe 
-Topic: test_topic	TopicId: J3B3Gd7XTSKyusq0nRQgLw	PartitionCount: 3	ReplicationFactor: 3	Configs: segment.bytes=1073741824
-	Topic: test_topic	Partition: 0	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2
-	Topic: test_topic	Partition: 1	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3
-	Topic: test_topic	Partition: 2	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1
-
-# 接下来也可以用生产者命令和消费者命令测试发送和接受消息是否正常
-```
-
-## server.properties解析
-
-在config/kraft目录下有一些文件可以看一看：建议先看看README.md，它会告诉咱们如何部署kraft集群
-
-```shell
-[root@k8s-master kraft]# ls
-broker.properties  controller.properties  README.md  server.properties
-```
-
-接下来就对server.properties进行解读
-
-```properties
-############################# Server Basics #############################
-
-# 此节点的角色. 设置了这个属性将告知kafka当前是kraft模式，不设置的话就走的是zookeeper模式
-# broker，节点作为broker
-# controller，节点作为集群的controller，控制服务器将参与元数据仲裁，类似于原来的zookeeper作用
-# broker,controller，同时充当代理和控制器的节点称为“组合”节点。主要缺点是控制器与系统其他部分的隔离度较低。例如，如果代理上的活动导致内存条件下，服务器的控制器部分不会与该OOM条件隔离。
-process.roles=broker,controller
-
-# 节点id，全局唯一
-node.id=1
-
-# controller控制器的节点列表，集群中所有控制器都必须在此处列出，每个controller和broker都要配置
-# 格式：id1@host1:port1,id2@host2:port2, etc.
-controller.quorum.voters=1@k8s-master:9093,2@k8s-node1:9093,3@k8s-node2:9093
-
-############################# Socket Server Settings #############################
-
-# The address the socket server listens on. It will get the value returned from
-# java.net.InetAddress.getCanonicalHostName() if not configured.
-#   FORMAT:
-#     listeners = listener_name://host_name:port
-#   EXAMPLE:
-#     listeners = PLAINTEXT://your.host.name:9092
-listeners=PLAINTEXT://:9092,CONTROLLER://:9093
-inter.broker.listener.name=PLAINTEXT
-
-# 此broker将告诉生产者和消费者的host:port. 在这里可以指定公网ip，实现外部生产者消费者直接访问kafka
-# 如果不配置，它会用listeners，如果这个也没配置，它会用 returned from java.net.InetAddress.getCanonicalHostName().
-#advertised.listeners=PLAINTEXT://localhost:9092
-advertised.listeners=PLAINTEXT://k8s-master:9092
-
-# Listener, host name, and port for the controller to advertise to the brokers. If
-# this server is a controller, this listener must be configured.
-controller.listener.names=CONTROLLER
-
-# Maps listener names to security protocols, the default is for them to be the same. See the config documentation for more details
-listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_SSL:SASL_SSL
-
-# 接受网络request和响应response的线程数量
-num.network.threads=3
-
-# 实际处理request的线程数量
-num.io.threads=8
-
-# The send buffer (SO_SNDBUF) used by the socket server
-socket.send.buffer.bytes=102400
-
-# The receive buffer (SO_RCVBUF) used by the socket server
-socket.receive.buffer.bytes=102400
-
-# The maximum size of a request that the socket server will accept (protection against OOM)
-socket.request.max.bytes=104857600
-
-
-############################# Log Basics #############################
-
-# 日志数据目录，因为kafka以日志格式存储数据，所以最好别放在/tmp目录下
-log.dirs=/opt/kafkaDemo2/kafka_2.12-3.1.0/data
-
-# topic的分区数量. 更多分区数量运行消费者组更大并发，也会产生更多文件，默认1，建议和broker数量一致
-num.partitions=3
-
-# The number of threads per data directory to be used for log recovery at startup and flushing at shutdown.
-# This value is recommended to be increased for installations with data dirs located in RAID array.
-num.recovery.threads.per.data.dir=1
-
-############################# Internal Topic Settings  #############################
-# The replication factor for the group metadata internal topics "__consumer_offsets" and "__transaction_state"
-# 生成环境副本因子最好大于1，比如3
-offsets.topic.replication.factor=3
-transaction.state.log.replication.factor=1
-transaction.state.log.min.isr=1
-
-############################# Log Flush Policy #############################
-
-# Messages are immediately written to the filesystem but by default we only fsync() to sync
-# the OS cache lazily. The following configurations control the flush of data to disk.
-# There are a few important trade-offs here:
-#    1. Durability: Unflushed data may be lost if you are not using replication.
-#    2. Latency: Very large flush intervals may lead to latency spikes when the flush does occur as there will be a lot of data to flush.
-#    3. Throughput: The flush is generally the most expensive operation, and a small flush interval may lead to excessive seeks.
-# The settings below allow one to configure the flush policy to flush data after a period of time or
-# every N messages (or both). This can be done globally and overridden on a per-topic basis.
-
-# The number of messages to accept before forcing a flush of data to disk
-#log.flush.interval.messages=10000
-
-# The maximum amount of time a message can sit in a log before we force a flush
-#log.flush.interval.ms=1000
-
-############################# Log Retention Policy #############################
-
-# The following configurations control the disposal of log segments. The policy can
-# be set to delete segments after a period of time, or after a given size has accumulated.
-# A segment will be deleted whenever *either* of these criteria are met. Deletion always happens
-# from the end of the log.
-
-# The minimum age of a log file to be eligible for deletion due to age
-log.retention.hours=168
-
-# A size-based retention policy for logs. Segments are pruned from the log unless the remaining
-# segments drop below log.retention.bytes. Functions independently of log.retention.hours.
-#log.retention.bytes=1073741824
-
-# The maximum size of a log segment file. When this size is reached a new log segment will be created.
-log.segment.bytes=1073741824
-
-# The interval at which log segments are checked to see if they can be deleted according
-# to the retention policies
-log.retention.check.interval.ms=300000
-```
-
-### 最佳实践
-
-最好是controller和broker分开，如果是学习环境的话，倒是可以3台服务器直接既当controller，又当broker。
-
-1、`process.roles`，最好是3台controller，3台broker
-
-2、`node.id`以controller为1,2,3，broker分别为4,5,6
-
-3、`controller.quorum.voters`，指明3台controller列表
-
-4、`advertised.listeners`，在学习环境可以指定公网ip，生产环境一般都是内网
-
-5、`log.dirs`，日志数据目录，最好放在kafka安装目录下
-
-6、`num.partitions`，建议为3
-
-7、`offsets.topic.replication.factor`，建议为3
-
-其它的配置其实默认的就很好了。
 
 # Golang操作kafka
 
@@ -1455,6 +1494,8 @@ golang操作kafka的库有两个，一个是[sarama](https://github.com/Shopify/
 在下面的生产者和消费者组中：生产者的测试代码都是自己直接写的，消费者组的代码都是模仿官方案例写的。
 
 ## 生产者
+
+### 生产者API封装
 
 1、用到的常量定义：一般来说，下面这些都是要配置到配置文件中去的，这里简化为写死到常量中
 
@@ -1606,6 +1647,151 @@ func main() {
 }
 ```
 
+### 异步发送消息失败的问题
+
+**背景**
+
+在测试环境中，发现用户角色信息的全量同步存在问题，即全量同步响应消息有时候有消息，有时候则没有任何消息，但是呢，查询数据库的操作已经执行了，说明请求消息已经收到，且进行了处理，但是响应消息没有发出去。最终定位到异步发送存在问题：有时候消息可以发送成功，有时候则不会发送且没有提示异常。
+
+**问题分析**
+
+先看看此时异步发送流程：
+
+```go
+// AsyncPublishMsg 异步推送消息
+func AsyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
+	if asyncProducer == nil {
+		log.Fatalln("异步生产者客户端未进行初始化，请在main函数中调用InitAsyncProducerClient()手动初始化并注册关闭函数CloseAsyncProducerClient()")
+	}
+	// 异步发送消息： 从AsyncProducer接口的注释得知
+	// 1.必须从asyncProducer.Errors()管道中读取错误信息，否则会造成死锁，除非手动将Producer.Return.Errors设置为false
+	// 2.如果手动将Producer.Return.Successes设置为true，则必须从asyncProducer.Successes()管道中读取成功信息，否则会造成死锁
+	select {
+	// 把消息往管道一放就完事了，再读取一下错误和成功消息免得死锁就行啦
+	case asyncProducer.Input() <- producerMsg:
+		log.Printf("消息已经放入管道，等待异步发送...\n")
+	case err := <-asyncProducer.Errors():
+		log.Printf("发送消息失败了: %+v \n", err)
+	case <-asyncProducer.Successes():
+		log.Printf("消息已经成功交付\n")
+	}
+	return nil
+}
+```
+
+它看起来似乎没有问题，因为sarama库就是这么建议你写的：
+
+```go
+type AsyncProducer interface {
+	
+   // 异步消息往这个管道塞就行
+   Input() chan<- *ProducerMessage
+
+   // Successes is the success output channel back to the user when Return.Successes is
+   // enabled. If Return.Successes is true, you MUST read from this channel or the
+   // Producer will deadlock. It is suggested that you send and read messages
+   // together in a single select statement.
+   Successes() <-chan *ProducerMessage
+
+   // 错误消息会放入这个管道.你必须从这个管道读消息，否则当管道满了生产者会死锁. 
+   // 你也可以把 Producer.Return.Errors 设为false, 这样就不会返回异常消息了，可是也就不知道发送失败了哦
+   Errors() <-chan *ProducerError
+}
+```
+
+就看这个成功消息`Successes() <-chan *ProducerMessage`的管道，**它建议你把发消息和读成功消息放在一个select**。
+
+但是select关键字是多路复用的，它会监听多个通道，所有通道都没消息，则阻塞，任何一个通道可读或者可写，则处理该分支流程，如果多个都可读或可写，则随机选择一个分支处理。
+
+那么可以得出，当第一批次的消息都发送出去之后，一定时间后会得到这一批次的成功消息放入管道`Successes() <-chan *ProducerMessage`中。此时如果再进行一批次的消息异步发送，则select会优先处理该成功消息管道所在那个分支，所以这一批次的消息就全部忽略了，这样就出现了背景描述中所说的有时候有消息，有时候没有。
+
+**解决方法**
+
+既然成功消息管道和异常消息管道内的消息都必须处理，那么就单独起一个协程来处理它们。
+
+修改之后的异步生产者代码如下：
+
+```go
+var (
+	// 异步生产者
+	asyncProducer sarama.AsyncProducer
+	// 异常处理协程的关闭信号
+	asyncCloseSignal chan bool
+)
+// InitProducer 初始化生产者，在main函数中调用
+func InitProducer(kafkaAddr []string) {
+	// 1.准备配置
+	config := sarama.NewConfig()
+	config.Producer.RequiredAcks = sarama.WaitForAll // 发送完数据需要leader和follow都确认，默认WaitForLocal RequiredAcks，即1
+	// 分区器建议用默认的就好，不用改啦，默认情况：有key则hash，无key则粘性分区
+	//config.Producer.Partitioner = sarama.NewRandomPartitioner // 新选出一个partition
+	config.Producer.Return.Errors = true    // 发送消息出现异常把错误放入管道，默认true
+	config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
+
+	// 2.初始化异步生产者
+	config.Producer.Return.Successes = true // 异步发送最好开启消息发送成功后返回通知并放入管道，默认false
+	asyncCloseSignal = make(chan bool, 1)
+	initAsyncProducerClient(config, kafkaAddr, asyncCloseSignal)
+}
+// InitAsyncProducerClient 初始化异步生产者客户端，应在main函数中调用
+func initAsyncProducerClient(config *sarama.Config, kafkaAddr []string, closeSignal <-chan bool) {
+	var err error
+
+	// 同步的生产者客户端连接
+	asyncProducer, err = sarama.NewAsyncProducer(kafkaAddr, config)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Infof("异步生产者客户端初始化成功\n")
+
+	// 必须异步处理异常和成功消息
+	go asyncHandleError(closeSignal)
+}
+
+// 异常处理方法：异步发送消息必须处理返回的成功消息和可能的失败消息，此方法必须 异步 调用
+func asyncHandleError(closeSignal <-chan bool) {
+	//处理异常消息和成功消息的
+	for {
+		// 异步发送消息： 从AsyncProducer接口的注释得知
+		// 1.必须从asyncProducer.Errors()管道中读取错误信息，否则会造成死锁，除非手动将Producer.Return.Errors设置为false
+		// 2.如果手动将Producer.Return.Successes设置为true，则必须从asyncProducer.Successes()管道中读取成功信息，否则会造成死锁
+		select {
+		case err := <-asyncProducer.Errors():
+			log.Errorf("发送消息失败了: %+v\n", err)
+		case <-asyncProducer.Successes():
+			//log.Infof("消息已经成功交付\n")
+		case <-closeSignal: // 监听到结束信号
+			log.Infof("kafka处理异常的协程收到结束信号，已经结束...\n")
+			return
+		}
+	}
+}
+// AsyncPublishMsg 异步推送消息
+func AsyncPublishMsg(producerMsg *sarama.ProducerMessage) error {
+	if asyncProducer == nil {
+		log.Fatalln("异步生产者客户端未进行初始化，请在main函数中调用InitAsyncProducerClient()手动初始化并注册关闭函数CloseAsyncProducerClient()")
+	}
+	// 异步发送消息： 从AsyncProducer接口的注释得知
+	// 1.必须从asyncProducer.Errors()管道中读取错误信息，否则会造成死锁，除非手动将Producer.Return.Errors设置为false
+	// 2.如果手动将Producer.Return.Successes设置为true，则必须从asyncProducer.Successes()管道中读取成功信息，否则会造成死锁
+	// 把消息往管道一放就完事了，再读取一下错误和成功消息免得死锁就行啦
+	asyncProducer.Input() <- producerMsg
+	return nil
+}
+// closeAsyncProducerClient 关闭异步生产者客户端，应在main函数中调用
+func closeAsyncProducerClient() {
+	// 1.先关闭异常处理协程
+	asyncCloseSignal <- true
+	defer close(asyncCloseSignal)
+	// 2.再关闭异步生产者
+	if err := asyncProducer.Close(); err != nil {
+		log.Errorf("关闭异步生产者客户端出现异常：%+v\n", err)
+	}
+}
+```
+
+> 改进如下：初始化异步生产者的时候，新起一个异常处理协程死循环监听异步消息的成功消息通道、失败消息通道和关闭信号通道；关闭异步生产者之前先发信号关闭此异常处理协程，再关闭生产者。
+
 ## 消费者组
 
 1、常量定义：
@@ -1730,8 +1916,6 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 		}
 		// 标记信息已经被此消费者组消费
 		// 作用：此消费者组的groupId对应的这个消息会被标记为已经消费了，
-		// 那么对应kafka而言，之后此groupId的消费者来获取消息，不管它设置的initOffset是-1还是-2，
-		// 它都只能获取到新来的没有被标记为消费过的消息了
 		// 一般来说最好是消费完消息标记已经消费过了
         // 这里的解释可能有错？commit是提交偏移量的，这个mark函数是？它会调用MarkOffset()函数
 		consumerGroupSession.MarkMessage(message, "")
@@ -1740,9 +1924,7 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 }
 ```
 
-> 注意：在上面这个消费者组的session会话中，函数MarkMessage可能解释错了，Commit()函数是进行提交消费情况的(默认配置为自动提交的情况下无需手动调用)，MarkMessage()函数会调用MarkOffset()函数，好像就单纯是标记元数据作用。
->
-> 但是测试又发现，设置为auto commit的情况下，如果不调用MarkMessage()函数，消费者组重启又会消费到之前的消息。
+> 备注：经过对源码中这两个函数MarkMessage()和Commit()的分析，明确了MarkMessage()函数会把此消息的偏移量offset更新到与此Topic的partition相关的partitionOffsetManager中。而Commit()函数则会提交每个Topic每个Partition的消费偏移量，这个offset就来自于前面的partitionOffsetManager。
 
 3、main函数
 
