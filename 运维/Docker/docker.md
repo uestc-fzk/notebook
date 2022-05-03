@@ -458,3 +458,4 @@ maxmemory 100mb
 maxmemory-policy allkeys-lru
 ```
 
+启动命令：`docker run -d -p6379:6379 uestcfzk/redis:v1`
