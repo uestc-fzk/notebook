@@ -385,6 +385,7 @@ Option                                   Description
 # 新建topic
 [root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic my_topic1 --create
 Created topic my_topic1.
+# 列举所有topic
 [root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 my_log
 my_topic
@@ -534,7 +535,7 @@ EG9wq5zaRb2nk4QPhrr_Wg
 Formatting /opt/kafkaDemo2/kafka_2.12-3.1.0/data
 ```
 
-4、启动kafka-kraft集群：3台节点执行，注意此时选择启动的配置文件必须是config/kraft/server.properties，别搞成config/server.properties了。
+4、后台启动kafka-kraft集群：3台节点执行，注意此时选择启动的配置文件必须是config/kraft/server.properties，别搞成config/server.properties了。
 
 ```shell
 [root@k8s-master kafka_2.12-3.1.0]# bin/kafka-server-start.sh -daemon config/kraft/server.properties 
@@ -560,6 +561,8 @@ Topic: test_topic	TopicId: J3B3Gd7XTSKyusq0nRQgLw	PartitionCount: 3	ReplicationF
 
 # 接下来也可以用生产者命令和消费者命令测试发送和接受消息是否正常
 ```
+
+6、关闭集群命令`bin/kafka-server-stop.sh`
 
 ## server.properties解析
 
@@ -1915,9 +1918,7 @@ func (handler *MyConsumerGroupHandler) ConsumeClaim(consumerGroupSession sarama.
 			log.Printf("message : topic: %+v, key:= %+v, 处理出现错误：%+v\n", message.Topic, message.Key, err)
 		}
 		// 标记信息已经被此消费者组消费
-		// 作用：此消费者组的groupId对应的这个消息会被标记为已经消费了，
-		// 一般来说最好是消费完消息标记已经消费过了
-        // 这里的解释可能有错？commit是提交偏移量的，这个mark函数是？它会调用MarkOffset()函数
+		// 作用：此消费者组的groupId对应的这个消息会被标记为已经消费了，一般来说最好是消费完消息标记已经消费过了
 		consumerGroupSession.MarkMessage(message, "")
 	}
 	return nil
