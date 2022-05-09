@@ -175,6 +175,125 @@ func GetUsers(engine *xorm.Engine) (*[]*User, error) {
 
 > 注意：Postgresql和MySQL不同的是，在查询表的时候，需要在限定其schema，默认是public，比如查询所有就是`SELECT * FROM public.user`，在Postgresql中用双引号默认使用public的schema，如`SELECT * FROM "user"`也是可以的，在打开XORM的SQL输出的时候，看到的SQL就是这样用双引号来查询的
 
+## 事务管理
+
+事务管理一般都是在service层实现。go中并没有Spring那么强大的框架，没有AOP实现事务的声明式管理，但是总不能在每个service层方法中都去创建事务、提交事务或回滚事务吧。
+
+可以参考AOP的实现模式：**代理模式**。在Java中代理模式以类class为基础，分为静态代理和动态代理，动态代理又分为cglib动态代理和jdk动态代理。
+
+在go中基础的对象是函数，那么可以对这个函数进行一层静态代理，在go中又称为闭包。
+
+下面以xorm框架为例子：
+
+```go
+// transactionWrapper 事务包装器
+// 要是有泛型的话这里会更方便，而且 Go 1.18 已经支持泛型了
+// 注意：确保正确情况下返回结果必不为nil，否则返回nil,err
+func transactionWrapper(serviceFunc func(sess *xorm.Session) (interface{}, error)) func() (interface{}, error) {
+	return func() (interface{}, error) {
+		// 1.开事务
+		sess := postgresql.Engine.NewSession()
+		if err := sess.Begin(); err != nil {
+			log.BizLogger.Errorf("新建session事务失败: %s", err.Error())
+			return nil, err
+		}
+		defer func() {
+			sess.Close()
+		}()
+
+		// 2.调用service方法
+		result, err := serviceFunc(sess)
+		if err != nil {
+			return nil, err
+		}
+
+		// 3.提交事务
+		if err := sess.Commit(); err != nil {
+			log.BizLogger.Errorf("用户组操作事务提交失败: %+v, %+v", err, result)
+			return nil, err
+		}
+		// 4.返回结果
+		return result, nil
+	}
+}
+```
+
+那么如何用这个包装器呢？
+
+从下面的代码可以看出，将service层方法中的事务管理抽离出去了，service层几乎只关心业务逻辑，看着非常舒服。
+
+```go
+// UpdateUserGroup 修改用户组
+func UpdateUserGroup(opts *userGroupEntity.UpdateUserGroupOptions) (*userGroupEntity.UserGroup, *userGroupEntity.UserGroup, error) {
+	wrapper := transactionWrapper(func(sess *xorm.Session) (interface{}, error) {
+		// 1.检查id是否存在
+		oldUserGroup, err := userGroupRepo.GetUserGroupById(opts.Id, sess)
+		if err != nil {
+			return nil, err
+		}
+		if oldUserGroup == nil {
+			return nil, errors.New(fmt.Sprintf("id=%d的userGroup不存在", opts.Id))
+		}
+		// 2.检查username是否重复
+		exits, err := userGroupRepo.CheckGroupNameExits(opts.GroupName, opts.Id, sess)
+		if err != nil {
+			return nil, err
+		}
+		if exits {
+			return nil, errors.New(fmt.Sprintf("groupName=%s的用户组已经存在", opts.GroupName))
+		}
+		// 3.更新操作
+		newUserGroup := &userGroupEntity.UserGroup{
+			Id:        oldUserGroup.Id,
+			GroupName: opts.GroupName,
+			Director:  opts.Director,
+
+			Deleted:    oldUserGroup.Deleted,
+			CreateTime: oldUserGroup.CreateTime,
+			CreateBy:   oldUserGroup.CreateBy,
+			ModifyTime: time.Now(),
+			ModifyBy:   opts.OperatedBy,
+		}
+		if err := userGroupRepo.UpdateUserGroup(newUserGroup, sess); err != nil {
+			return nil, err
+		}
+
+		return []*userGroupEntity.UserGroup{oldUserGroup, newUserGroup}, nil
+	})
+	result, err := wrapper()
+	if err != nil {
+		return nil, nil, err
+	}
+	userGroups := result.([]*userGroupEntity.UserGroup)
+	return userGroups[0], userGroups[1], nil
+}
+```
+
+关于事务的session的处理？在Spring管理的事务中，session会话被保存到线程缓存ThreadLocal中，dao层直接获取该session对象即可，因此可以只关注于SQL的逻辑。
+
+而xorm框架的话，可以在dao层的每个方法都加上一个session的参数，将service层的session传入即可。如下：
+
+```go
+// GetUserGroupById 通过id查询userGroup，不存在返回nil
+func GetUserGroupById(id int64, sess *xorm.Session) (*userGroupEntity.UserGroup, error) {
+	if sess == nil {
+		sess = postgresql.Engine.NewSession()
+		defer sess.Close()
+	}
+	userGroup := &userGroupEntity.UserGroup{}
+	exits, err := sess.ID(id).Where("deleted=0").Get(userGroup)
+	if err != nil {
+		return nil, err
+	}
+	if exits {
+		return userGroup, nil
+	}
+	return nil, nil
+}
+```
+
+没有三元运算符确实有点sb。
+
 ## xorm时间类型转换失败
 
 背景：在xorm的低版本如v1.0.5中，查询数据库，如果以一个entity实体结构对应接受，是没有用问题的。但是，如果是像下面这种查询单个字段并只返回单条结果的情况下，并且用的是一个结构体去接受如time.Time就会有一定问题。
