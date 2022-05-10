@@ -345,11 +345,18 @@ datadir = /var/lib/mysql
 character_set_server = utf8mb4
 
 # set slow query on 
+# 日志输出格式，FILE或TABLE
 log_output=file
+# 开启慢查询日志
 slow_query_log=on
+# 慢查询日志文件位置
 slow_query_log_file = /tmp/mysql-slow.log
-log_queries_not_using_indexes=on
+# 慢查询阈值，大于此值的SQL语句会被记录，单位s
 long_query_time = 1
+# 未使用索引也放入慢查询日志中
+log_queries_not_using_indexes=on
+# 每分钟允许记录到slow log的且未使用索引的SQL语句次数，默认0
+log_throttle_queries_not_using_indexes=10
 ```
 
 > 这里要注意这个慢查询日志的路径必须得有权限，因为MySQL会以mysql用户运行，所以权限最少得是`666`，这个tmp在容器内的权限为`777`，完全没问题。

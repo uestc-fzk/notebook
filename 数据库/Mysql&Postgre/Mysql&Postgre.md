@@ -636,7 +636,7 @@ SELECT * FROM test_v7;
 
 在Linux服务器上的配置文件my.cnf下如下配置：
 
-```shell
+```properties
 # 慢查询日志
 slow_query_log=on # 这个参数设置为ON，可以捕获执行时间超过一定数值的SQL语句
 slow_query_log_file=/opt/mysql/mysql_slow_query.log  # 记录日志的文件名，必须有写权限
@@ -644,6 +644,24 @@ long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录
 ```
 
 重启MySQL服务即可。
+
+也可以选择将未使用索引的查询语句也记录都slow log中：
+
+```properties
+# set slow query on 
+# 日志输出格式，FILE或TABLE
+log_output=file
+# 开启慢查询日志
+slow_query_log=on
+# 慢查询日志文件位置
+slow_query_log_file = /tmp/mysql-slow.log
+# 慢查询阈值，大于此值的SQL语句会被记录，单位s
+long_query_time = 1
+# 未使用索引也放入慢查询日志中
+log_queries_not_using_indexes=on
+# 每分钟允许记录到slow log的且未使用索引的SQL语句次数，默认0
+log_throttle_queries_not_using_indexes=10
+```
 
 ## 2.索引
 
