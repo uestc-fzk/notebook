@@ -383,22 +383,22 @@ Option                                   Description
 
 ```shell
 # 新建topic
-[root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic my_topic1 --create
-Created topic my_topic1.
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic my_topic1 --create --partition 3 --replication-factor 3
+
 # 列举所有topic
 [root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 my_log
 my_topic
 my_topic1
 web_log
-# 修改分区数量为3
-[root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic web_log --alter --partitions 3
+
+# 修改分区数量
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic web_log --alter --partitions 3
 [root@k8s-master kafka_2.12-3.0.1]# bin/kafka-topics.sh --bootstrap-server localhost:9092 --topic web_log --describe
 Topic: web_log	TopicId: mpav7dCVQWSJYovnmjBlpw	PartitionCount: 3	ReplicationFactor: 1	Configs: segment.bytes=1073741824
 	Topic: web_log	Partition: 0	Leader: 0	Replicas: 0	Isr: 0
 	Topic: web_log	Partition: 1	Leader: 0	Replicas: 0	Isr: 0
 	Topic: web_log	Partition: 2	Leader: 0	Replicas: 0	Isr: 0
-[root@k8s-master kafka_2.12-3.0.1]# 
 ```
 
 > 注意：分区数量修改的时候，只能增加不能减少，否则报错。

@@ -113,71 +113,7 @@ Mysql -u 用户名 –p密码
 offset要显示条目的起始索引（起始索引从0开始）
 size 要显示的条目个数
 
-## 1.DQL数据查询语句
-
-Data Query Language
-
-建议看《MySQL必知必会》或者菜鸟教程。
-
-## 2.DML数据操纵语句
-Data Manipulation Language – 数据操纵语言
-- 向表中插入数据
-- 修改现存数据
-- 删除现存数据
-
-### 插入insert
-
-```sql
-INSERT INTO 
-表名(字段1,...) 
-VALUES(值1,...),...;
-
--- 也支持直接查询其它表中的数据进行插入
-INSERT INTO t_user(username,password)
-SELECT username,'1234567'
-FROM t_u
-WHERE id<3;
-```
-
-要求：
-
-1、字段类型和值类型一致或兼容，而且一一对应
-2、字段可以省略，但默认所有字段，并且顺序和表中的存储顺序一致
-
-### 修改update
-
-修改单表语法：
-
-```sql
-UPDATE 表名 SET 字段1=新值,字段2=新值... [WHERE 条件] ;
-```
-
-### 删除delete
-
-方式1：delete语句 
-
-```sql
-DELETE FROM 表名 [WHERE 条件] [LIMIT n]
-```
-
-方式2：truncate语句  清空数据
-
-```sql
-TRUNCATE TABLE 表名
-```
-
-
-两种方式的区别?
-
->1.truncate不能加where条件，而delete可以加where条件
-
->2.truncate的效率高一丢丢，删除原来的表，重新建一个表，delete是逐行删除表中的数据
-
->3.truncate 删除带自增长的列的表后，如果再插入数据，数据从1开始；delete 删除带自增长列的表后，如果再插入数据，数据从上一次的断点处开始
-
->4.truncate删除不能回滚，delete删除可以回滚
-
-## 3.DDL数据定义语句
+## DDL数据定义语句
 数据定义语言(Data Definition Language)
 ### 库和表的管理
 库的管理：
@@ -317,169 +253,7 @@ FROM mk_article
 WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MODE);
 ```
 
-## 4.常见数据类型
-
-看菜鸟教程：https://www.runoob.com/mysql/mysql-data-types.html
-## 5.常见约束
-### 约束介绍	
-含义：一种限制规则，用于限制表中的数据，为了保证表中的数据的完整性和一致性。
-
-- NOT NULL：非空
-- DEFAULT：设置字段默认值
-- PRIMARY KEY：主键，一般对id字段标注主键，非空唯一
-- UNIQUE：唯一，插入时数据库自动检查是否存在重复，存在重复的话会插入失败并报错
-- CHECK：检查约束，MySQL不支持，postgresql支持，限制字段只能是某些值，如sex字段限制为男、女、未知
-- FOREIGN KEY：外键用于限制两个表的关系，用于保证该字段的值必须来自于主表的关联列的值，在从表添加外键约束，用于引用主表中某列的值
-
-添加约束的时机：
-
-1. 创建表时----列级约束
-2. 修改表时----表级约束
-
-约束的添加分类：
-
-	列级约束：
-		六大约束语法上都支持，但外键约束没有效果
-		
-	表级约束：		
-		除了非空、默认，其他的都支持
-	区别：		
-	位置			支持的约束类型			   			是否可以起约束名
-	列级约束：	列的后面 语法都支持，但外键没有效果			不可以
-	表级约束：	所有列的下面 默认和非空不支持，其他支持	可以（主键没有效果）
-
-外键：（阿里开发手册建议不要用外键）
-
-1、要求在从表设置外键关系
-2、从表的外键列的类型和主表的关联列的类型要求一致或兼容，名称无要求
-3、主表的关联列必须是一个key（一般是主键或唯一）
-4、插入数据时，先插入主表，再插入从表
-删除数据时，先删除从表，再删除主表
-
-```sql
-#方式一：级联删除
-ALTER TABLE stuinfo ADD CONSTRAINT fk_stu_major FOREIGN KEY(majorid) REFERENCES major(id) ON DELETE CASCADE;
-#方式二：级联置空
-ALTER TABLE stuinfo ADD CONSTRAINT fk_stu_major FOREIGN KEY(majorid) REFERENCES major(id) ON DELETE SET NULL;	
-```
-
-
-### 一、创建表时添加约束
-
-1.添加列级约束
-
-2.添加表级约束
-
-```sql
--- 语法：在各个字段的最下面
--- 【constraint 约束名】 约束类型(字段名) 
--- 如：
-CONSTRAINT pk PRIMARY KEY(id),#主键
-CONSTRAINT uq UNIQUE(seat),#唯一键
-CONSTRAINT ck CHECK(gender ='男' OR gender  = '女'),#检查
-
-constraint 约束名 foreign key(字段名) references 主表（被引用列）
-CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id)#外键
-```
-
-3.通用的写法：★
-
-```sql
-CREATE TABLE IF NOT EXISTS stuinfo(
-	id INT PRIMARY KEY,
-	stuname VARCHAR(20),
-	sex CHAR(1),
-	age INT DEFAULT 18,
-	seat INT UNIQUE,
-	majorid INT,
-	CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id) -- 外键索引名命名最好按以上方式
-);
-```
-
-
-### 二、修改表时添加约束
-
->1、添加列级约束
-alter table 表名 modify column 字段名 字段类型 新约束; # 不加就是默认约束，所以要注意不能随便用
-
->2、添加表级约束
-alter table 表名 add 【constraint 约束名】 约束类型(字段名) 【外键的引用】;
-
-
-例子：
-```sql
-lDROP TABLE IF EXISTS stuinfo;
-CREATE TABLE stuinfo(
-	id INT,
-	stuname VARCHAR(20),
-	gender CHAR(1),
-	seat INT,
-	age INT,
-	majorid INT
-)
-DESC stuinfo;
-#1.添加非空约束
-ALTER TABLE stuinfo MODIFY COLUMN stuname VARCHAR(20)  NOT NULL;
-#2.添加默认约束
-ALTER TABLE stuinfo MODIFY COLUMN age INT DEFAULT 18;
-#3.添加主键
-#①列级约束
-ALTER TABLE stuinfo MODIFY COLUMN id INT PRIMARY KEY;
-#②表级约束
-ALTER TABLE stuinfo ADD PRIMARY KEY(id);
-
-#4.添加唯一
-
-#①列级约束
-ALTER TABLE stuinfo MODIFY COLUMN seat INT UNIQUE;
-#②表级约束
-ALTER TABLE stuinfo ADD UNIQUE(seat);
-
-
-#5.添加外键
-ALTER TABLE stuinfo ADD CONSTRAINT fk_stuinfo_major FOREIGN KEY(majorid) REFERENCES major(id); 
-```
-
-### 三、修改表时删除约束
-```sql
-#1.删除非空约束
-ALTER TABLE stuinfo MODIFY COLUMN stuname VARCHAR(20) NULL;
-
-#2.删除默认约束
-ALTER TABLE stuinfo MODIFY COLUMN age INT ;
-
-#3.删除主键
-ALTER TABLE stuinfo DROP PRIMARY KEY;
-
-#4.删除唯一
-ALTER TABLE stuinfo DROP INDEX seat;
-
-#5.删除外键
-ALTER TABLE stuinfo DROP FOREIGN KEY fk_stuinfo_major;
-
-SHOW INDEX FROM stuinfo;
-```
-
-### 四、标识列
-又称为自增长列
-含义：可以不用手动的插入值，系统提供默认的序列值
-
-特点：
-1、标识列必须和主键搭配吗？不一定，但要求是一个key
-
-2、一个表可以有几个标识列？至多一个！
-
-3、标识列的类型只能是数值型
-
-4、标识列可以通过` SET auto_increment_increment=3;`设置步长，可以通过 手动插入值，设置起始值
-
-二、修改表时设置标识列
-`ALTER TABLE tab_identity MODIFY COLUMN id INT PRIMARY KEY AUTO_INCREMENT;`
-
-三、修改表时删除标识列
-`ALTER TABLE tab_identity MODIFY COLUMN id INT ;`
-
-## 6.TCL事务
+## TCL事务
 Transaction Control Language 事务控制语言
 
 **对于事务的更加详细的说明，最好还是去看书《深入理解分布式事务》。**
@@ -536,7 +310,7 @@ set session|global  transaction isolation level 隔离级别名;
 SELECT @@transaction_isolation;
 ```
 
-## 7.视图
+## 视图
 含义：理解成一张虚拟的表
 mysql5.1版本出现的新特性，是通过表动态生成的数据
 视图和表的区别：
@@ -604,29 +378,7 @@ SELECT employee_id FROM employees;
 
 SELECT * FROM test_v7;
 ```
-## 8.存储过程
-
-> 注意：阿里开发规范禁用存储过程
-
-含义：一组经过预先编译的sql语句的集合
-
-因开发中一直没有用过这个玩意，所以将原有笔记全部删除，如果需要的话，可以看菜鸟教程：https://www.runoob.com/w3cnote/mysql-stored-procedure.html
-
-## 9. 函数
-
-含义：一组预先编译好的SQL语句的集合，理解成批处理语句
-
-
-函数和存储过程的区别：
->存储过程：可以有0个返回，也可以有多个返回，适合做批量插入、批量更新
->
->函数：有且仅有1 个返回，适合做处理数据后返回一个结果
-
-因开发中一直没有自定义函数，只用过内置函数，所以删除原有笔记，并附上菜鸟教程中MySQL内置函数：https://www.runoob.com/mysql/mysql-functions.html
-
-## 10.流程控制语句
-
-用在存储过程和函数中。所以就删除原有笔记了。
+---
 
 # 高性能MySQL
 
