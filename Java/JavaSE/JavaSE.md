@@ -2274,21 +2274,68 @@ Externalizable接口和Serializable接口功能类似，不过此接口强制用
 
 
 
+# Java NIO
 
+## 资料
 
+尚硅谷的PDF课件
 
+Java17源码nio包
 
+## 概述
 
+### IO概述
 
+IO操作分为：
 
+1、BIO，同步阻塞
 
+2、**NIO，同步非阻塞**
 
+Java NIO(New IO 或 Non  Blocking IO)是Java1.4支持的API。NIO支持面向缓冲区、基于通道的IO操作。NIO基于**Reactor模式**，IO调用不会阻塞。
 
+NIO中实现非阻塞IO的核心对象是Selector(多路复用器)，它可以注册各种IO事件，当某个事件发生的时候，它就会通知我们。一个连接器线程可以同时处理成千上万个连接，而不用创建大量线程，大大减小了系统开销。
 
+3、**AIO，异步非阻塞IO**
 
+AIO是NIO 2，Java7引入改进版NIO 2，异步非阻塞模型。
 
+AIO是基于事件和回调机制实现的，即AIO不需要Selector操作，而是事件驱动形式。Java AIO其实是**Proactor模式**的应用，和Reactor模式类似。
 
+- Reactor与Proactor的区别
+  主要区别就是**真正的读取和写入操作是有谁来完成的**， Reactor 中需要应用程序自己读取或者写入数据，而 Proactor 模式中，应用程序不需要进行实际的读写过程，它只需要**从缓存区读取或者写入即可**，操作系统会读取缓存区或者写入缓存区到真正的 IO 设备。
 
+### NIO核心组件
+
+Java NIO核心组件类有：Channels、Buffers、Selectors。其它组件如Pipe和FileLock只是与这3个核心组件共同使用的工具类。
+
+1、Channel，通道
+
+与IO中的Stream(流)是差不多一个等级的。Stream是单向的，如InputStream、OutputStream。Channel是双向的，可读可写。
+
+主要实现有FileChannel、DatagramChannel、SocketChannel和ServerSocketChannel，分别对应文件IO、UDP、TCP(Server和Client)
+
+2、Buffer
+
+3、Selector，多路复用连接器
+
+运行单个线程处理多个channel。如果打开了多个通道，但每个通道流量都不高，就可以用这个。比如聊天服务器。
+
+4、3者关系
+
+Channel像流，读数据到Buffer，Buffer写数据到channel
+
+![image-20220519143815960](JavaSE.assets/image-20220519143815960.png)
+
+Selector使用一个线程处理多个channel
+
+![image-20220519143900113](JavaSE.assets/image-20220519143900113.png)
+
+## Channel
+
+### FileChannel
+
+用于读取，写入，映射和操作文件的通道。文件通道可以安全使用多个并发线程。
 
 
 

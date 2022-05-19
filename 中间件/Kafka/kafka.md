@@ -267,7 +267,16 @@ efak.password=123456
 
 注意这个驱动程序，如果是MySQL8以前的，驱动程序为`com.mysql.jdbc.Driver`。
 
-4、添加环境变量`KE_HOME`并导出其bin目录到PATH变量
+4、修改内存配置
+
+在实际使用中发现这个efak监控软件需要的内存大的吓人，居然默认配置的2G，简直丧心病狂！
+
+```shell
+vim bin/ke.sh
+# 将里面的Xms 和Xmx修改小一点，经过测试，Xmx=512m,Xms=256m就够用了
+```
+
+5、添加环境变量`KE_HOME`并导出其bin目录到PATH变量
 
 > 注意：EFAK需要Java环境，会用到JAVA_HOME变量，yum方式安装的open-jdk即使是找到了软链接最终指向的java安装目录并配置好JAVA_HOME，依旧提示找不到某个依赖。所以建议下载oracle jdk安装包，并通过配置环境变量JAVA_HOME来安装java环境。
 
@@ -284,7 +293,7 @@ export PATH=$PATH:$JAVA_HOME/bin
 source /etc/profile
 ```
 
-5、启动zookeeper集群和kafka集群，并且MySQL服务器是可以正常访问的，此时就可以启动EFAK了
+6、启动zookeeper集群和kafka集群，并且MySQL服务器是可以正常访问的，此时就可以启动EFAK了
 进入EFAK安装目录下的bin目录，并输入启动命令`./ke.sh start`
 
 顺利的话，可以看到如下成功提示：并且此时MySQL数据库中`ke`这个数据库也会自动创建。
@@ -317,7 +326,7 @@ Version 2.1.0 -- Copyright 2016-2022
 
 如果看不到kafka集群或者zookeeper集群的各个节点的存活情况，说明搭建失败了。
 
-6、关闭EFAK命令`./ke.sh stop`
+7、关闭EFAK命令`./ke.sh stop`
 
 ## 集群脚本
 
