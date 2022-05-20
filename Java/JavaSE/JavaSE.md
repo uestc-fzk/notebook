@@ -2335,13 +2335,134 @@ Selector使用一个线程处理多个channel
 
 ### FileChannel
 
-用于读取，写入，映射和操作文件的通道。文件通道可以安全使用多个并发线程。
+用于读取，写入，映射和操作文件的通道。文件通道**可以安全使用多个并发线程**。
 
+在FileChannelImpl中，默认的锁实现是synchronized (positionLock) 
 
+```java
+// Lock for operations involving position and size
+private final Object positionLock = new Object();
+```
 
+`FileInputStream`, `FileOutputStream`,`RandomAccessFile`对象的`getChannel()`方法返回被连接到相同的基本文件的文件信道。还可以直接调FileChannel.open静态方法开文件通道。
 
+1、简单使用：读文件写文件管道
 
+```java
+public static void main(String[] args) throws IOException {
+    // 1.打开文件
+    RandomAccessFile accessFile = new RandomAccessFile("D:/test.txt", "rw");
+    // 2.获取FileChannel
+    FileChannel fileChannel = accessFile.getChannel();
+    // 3.分配buffer
+    // buffer中有一个byte数组，position表示下个操作的索引，limit表示最大索引(exclusive)，capacity表数组长度
+    ByteBuffer buf = ByteBuffer.allocate(64); 
+    // 4.从文件管道读到buffer
+    int count = fileChannel.read(buf);
+    while (count != -1) {
+        System.out.printf("读取字节数：%d \n", count);
+        // 将buffer的limit设为当前position，然后将position置0，准备读数据
+        buf.flip();
+        while (buf.hasRemaining()) {
+            System.out.printf("%c", (char) buf.get());
+        }
+        buf.clear();
+        count = fileChannel.read(buf);
+    }
+    System.out.println();
+    // 读完不用了记得clear
+    buf.clear();
+    buf.put("New String".getBytes(StandardCharsets.UTF_8));
+    // 将limit设为当前position，然后将position置0，准备读数据
+    buf.flip();
+    while (buf.hasRemaining()) {
+        fileChannel.write(buf);
+    }
+    // 读完不用了记得clear，将position置0，limit=capacity，并设置mark=-1
+    buf.clear();
+    fileChannel.force(true);// 强制落盘
+    // 关闭channel
+    accessFile.close();// 会先去关闭channel
+}
+```
 
+2、文件管道互相读写：可用于文件复制
+
+```java
+public static void main(String[] args) {
+    try (
+        FileChannel fromChannel = FileChannel.open(Path.of("D:/test1.txt"), StandardOpenOption.READ);
+        FileChannel toChannel = FileChannel.open(Path.of("D:/test2.txt"), StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE)
+    ) {
+        long position = toChannel.size();
+        long count = fromChannel.size();
+        // position参数表示从何处开始写数据,count 表示最多写多少字节
+        toChannel.transferFrom(fromChannel, position, count);
+        // 这里的第一个参数position指从何处开始读数据，并读count字节，然后写入到目标管道
+        fromChannel.transferTo(0L, count, toChannel);
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+```
+
+3、**Scatter/Gather** 
+
+scatter/gather 用于描述从 Channel 中读取或 者写入到 Channel 的操作。
+
+分散指将从 Channel 中读取的数据`分散(scatter)`到多个 Buffer 中。 
+
+聚集将多个 Buffer 中的数据`聚集(gather)`后发送到 Channel。
+
+scatter / gather 经常用于需要将传输的数据分开处理的场合，例如传输一个由消息头和消息体组成的消息，你可能会将消息体和消息头分散到不同的 buffer 中，这样你可以方便的处理消息头和消息体
+
+3.1 分散读
+
+缺点：不适应动态消息，这要求消息头长度固定。
+
+```java
+public static void main(String[] args) {
+    try (FileChannel fileChannel = FileChannel.open(Path.of("D:/test2.txt"), StandardOpenOption.READ)) {
+        ByteBuffer header = ByteBuffer.allocate(64); // 64字节头部信息
+        ByteBuffer body = ByteBuffer.allocate(1024); // 消息体
+        ByteBuffer[] arrayBuf = {header, body};
+
+        fileChannel.read(arrayBuf); // 按顺序首先会写入header，写满后再写下一个buffer
+
+        header.flip(); // 将limit设为当前position，然后将position置0，准备读数据
+        System.out.println("header:");
+        while (header.hasRemaining()) {
+            System.out.printf("%c", (char) header.get());
+        }
+        System.out.println("\nbody:");
+        body.flip();
+        while (body.hasRemaining()) {
+            System.out.printf("%c", (char) body.get());
+        }
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+
+}
+```
+
+3.2 聚集写
+
+```java
+static void testGather() {
+    try (FileChannel fileChannel = FileChannel.open(Path.of("D:/test2.txt"), StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
+        ByteBuffer header = ByteBuffer.wrap("i am the header".getBytes(StandardCharsets.UTF_8));
+        ByteBuffer body = ByteBuffer.wrap("i am the body".getBytes(StandardCharsets.UTF_8));
+        ByteBuffer[] arrayBuf = {header, body};
+
+        fileChannel.write(arrayBuf);
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+```
+
+这个聚集和分散感觉有点...
 
 
 
