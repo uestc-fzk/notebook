@@ -2331,6 +2331,189 @@ Selector使用一个线程处理多个channel
 
 ![image-20220519143900113](JavaSE.assets/image-20220519143900113.png)
 
+## Buffer
+
+Java NIO 中的 Buffer 用于和 NIO 通道进行交互。数据是从通道读入缓冲区，从缓冲区写入到通道中的。
+
+缓冲区本质上是一块可以写入数据和读取数据的内存。这块内存被包装成 NIO Buffer 对象，并提供了一组方法方便操作该内存。缓冲区实际上是一个容器对象，更直接的说，**其实就是一个数组**。
+在 NIO 库中，所有数据都是用缓冲区处理的。在读取数据时，直接读到缓冲区中的； 在写入数据时，从缓冲区中写入的；任何时候访问 NIO 中的数据，都是将它放到缓冲区中。而在面向流 I/O 系统中，所有数据都是直接写入或者直接将数据读取到 Stream 对象中。
+
+![image-20220522214617519](JavaSE.assets/image-20220522214617519.png)
+
+最常用的是`ByteBuffer`。
+
+```java
+/**
+ * 缓冲区是特定原始类型元素的线性、有限序列
+ * 线程安全：多个并发线程使用缓冲区是不安全的。如果一个缓冲区要被多个线程使用，那么对缓冲区的访问应该由适当的同步控制 
+ */
+public abstract class Buffer {
+    // Invariants: mark <= position <= limit <= capacity
+    private int mark = -1; // 标记位
+    // 缓冲区的位置position是要读取或写入的下一个元素的索引
+    private int position = 0;
+    // 缓冲区的限制是不应读取或写入的第一个元素的索引
+    private int limit;
+    // 缓冲区的容量capacity是它包含的元素数，即数组长度
+    private int capacity;
+    
+    // 将此时的position设置为标记位mark
+   	public Buffer mark() {
+        mark = position;
+        return this;
+    }
+    
+  	/** 重置position为之前标记的mark */
+    public Buffer reset() {
+        int m = mark;
+        if (m < 0) throw new InvalidMarkException();
+        position = m;
+        return this;
+    }
+    
+    /**
+     * 翻转缓冲区. 设置limit=position, 重置position=0, 清除mark=-1
+     * 一般是把数据写入缓冲区后准备从缓存区读数据之前调用，如：管道写、get()
+     * 如：
+     * buf.put(magic);    // Prepend header
+     * in.read(buf);      // Read data into rest of buffer
+     * buf.flip();        // Flip buffer
+     * out.write(buf);    // Write header + data to channel
+     *
+     * 在将数据从一个地方传输到另一个地方时，此方法通常与compact方法结合使用。
+     */
+    public Buffer flip() {
+        limit = position;
+        position = 0;
+        mark = -1;
+        return this;
+    }
+    
+    /**
+     * 回退缓冲区. 重置position=0，清除mark=-1。多次从缓冲区读数据的时候适用
+     * 如：管道写、get()
+     * out.write(buf);    // Write remaining data
+     * buf.rewind();      // Rewind buffer
+     * buf.get(array);    // Copy data into array
+     */
+    public Buffer rewind() {
+        position = 0;
+        mark = -1;
+        return this;
+    }
+    
+    /** 在position和limit间是否还有数据 */
+    public final boolean hasRemaining() {
+        return position < limit;
+    }
+    
+    /**
+     * 清空缓冲区.  重置position=0，重置limit=capacity，清除mark=-1
+     * 一般在准备向缓冲区写入数据之前调用，如：管道读、put()
+     * buf.clear();     // Prepare buffer for reading
+     * in.read(buf);    // Read data
+     * 此方法实际上没有擦除缓冲区中的数据，因为在结合position和limit使用时，没必要将数据重置为0
+     */
+    public Buffer clear() {
+        position = 0;
+        limit = capacity;
+        mark = -1;
+        return this;
+    }
+}
+
+```
+
+> 注意：有两种方式能清空缓冲区：clear()或 compact()方法。clear()方法会清空整个缓冲区。compact()方法只会清除已经读过的数据。任何未读的数据都被移到缓冲区的起始处，新写入的数据将放到缓冲区未读数据的后面。
+>
+> 在上面给出的几个控制position等的方法一般是常用情况，也可以直接用 position(int) 和 limit(int) 方法控制这两个变量以实现业务逻辑。
+
+关于Buffer的使用案例这里不给出，因为下面的通道使用案例会用到ByteBuffer。
+
+### ByteBuffer
+
+```java
+
+public abstract class ByteBuffer extends Buffer 
+    implements Comparable<ByteBuffer> {
+    // Cached array base offset
+    private static final long ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
+
+    // These fields are declared here rather than in Heap-X-Buffer in order to
+    // reduce the number of virtual method invocations needed to access these
+    // values, which is especially costly when coding small buffers.
+    //
+    final byte[] hb;                  // Non-null only for heap buffers
+    final int offset;
+    boolean isReadOnly;
+    
+    /**
+     * 创建一个字节缓冲区切片，其内容是此缓冲区内容的共享子序列。
+     * 新缓冲区的内容将从该缓冲区中的index位置开始，并将包含length元素。此缓冲区内容的更改将在新缓冲区中可见，反之亦然；两个缓冲区的position、limit和mark值将是独立的。
+     * 新缓冲区的position为零，其capacity和limit为length ，其mark=-1，其字节顺序将为BIG_ENDIAN
+     * 当且仅当此缓冲区是直接的时，新缓冲区将是直接的，并且当且仅当此缓冲区是只读的时，它将是只读的
+     * @since 13
+     */
+    @Override
+    public abstract ByteBuffer slice(int index, int length);
+    
+    /**
+     * 创建一个共享此缓冲区内容的只读缓冲区
+     * 此缓冲区内容的更改将在新缓冲区中可见；但是，新缓冲区本身将是只读的，并且不允许修改共享内容。
+     * 两个缓冲区的位置、限制和标记值将是独立的。
+     * 如果此缓冲区本身是只读的，则此方法的行为方式与duplicate方法完全相同
+     */
+    public abstract ByteBuffer asReadOnlyBuffer();
+}
+```
+
+#### 直接缓冲区
+
+字节缓冲区有直接的与非直接的。
+
+```java
+ ByteBuffer buffer = ByteBuffer.allocateDirect(128);
+```
+
+直接字节缓冲区，Java 虚拟机将尽最大努力直接在其上执行本机 I/O 操作。也就是说，它将尝试避免在每次调用底层操作系统的本机 I/O 操作之一之前（或之后）将缓冲区的内容复制到（或从）中间缓冲区。
+
+特点：
+
+1、具有**更高的分配和释放成本**。
+2、其内容可能**驻留在正常的垃圾收集堆之外**，因此它们对应用程序内存占用的影响可能并不明显。
+
+因此，建议将直接缓冲区主要分配给受底层系统的本机 I/O 操作影响的大型、长期存在的缓冲区。通常，最好**仅在直接缓冲区对程序性能产生可衡量的增益时才分配它们**。
+
+也可以通过将文件的区域直接mapping到内存来创建直接字节缓冲区。 Java 平台的实现可以选择支持通过 JNI 从本机代码创建直接字节缓冲区。如果其中一种缓冲区的实例引用了不可访问的内存区域，则访问该区域的尝试不会更改缓冲区的内容，并且会在访问时或稍后引发未指定的异常时间。
+
+#### 内存映射文件I/O
+
+使用案例：RocketMQ保存消息的日志文件就是用的此内存映射文件I/O。
+
+内存映射文件 I/O 是一种读和写文件数据的方法，它可以比常规的基于流或者基于通道的 I/O 快的多。内存映射文件 I/O 是通过使文件中的数据出现为 内存数组的内容来完成的，这其初听起来似乎不过就是将整个文件读到内存中，但是事实上并不是这样。 
+
+一般来说，只有文件中**实际读取或者写入的部分才会映射到内存中**。
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-05-22 22:49
+ */
+public class FileChannelTest {
+    @Test
+    void FileMapIOTest() {
+        try (RandomAccessFile file = new RandomAccessFile("D:/test.txt", "rw")) {
+            FileChannel fileChannel = file.getChannel();
+            int start = 0, size = 1024;
+            MappedByteBuffer mbb = fileChannel.map(FileChannel.MapMode.READ_WRITE, start, size);
+            mbb.put(2, (byte) 'a');
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
 ## Channel
 
 ### FileChannel
@@ -2464,5 +2647,228 @@ static void testGather() {
 
 这个聚集和分散感觉有点...
 
+### NetworkChannel
 
+这个接口是通用的对应于套接字的通道。它是服务器端套接字通道和客户端套接字通道的父接口。
 
+```java
+/**
+ * 网络套接字的通道
+ * @since 1.7
+ */
+public interface NetworkChannel extends Channel {
+    /** 将通道的套接字绑定到本地地址 */
+    NetworkChannel bind(SocketAddress local) throws IOException;
+
+    /**
+     * 返回此通道的套接字绑定到的套接字地址
+     * 如果通道bind到 Internet 协议套接字地址，则此方法的返回值是java.net.InetSocketAddress类型
+     */
+    SocketAddress getLocalAddress() throws IOException;
+}
+```
+
+#### ServerSocketChannel
+
+是一个基于通道的 socket 服务端监听器。它增加了通道语义，因此能够在非阻塞模式下运行。
+
+```java
+/**
+ * 监听socket的面向流的selectable通道.
+ * 调用open()方法可以创建server-socket channel(服务器套接字通道)
+ * 新创建的server-socket channel 打开了但还没有绑定端口. 可以bind()方法绑定
+ * 使用setOption方法配置套接字选项。 Internet 协议套接字的服务器套接字通道支持以下选项：
+ * SO_RCVBUF 套接字接收缓冲区的大小
+ * SO_REUSEADDR 重用地址
+ * @since 1.4
+ */
+public abstract class ServerSocketChannel extends AbstractSelectableChannel implements NetworkChannel
+{
+    /**
+     * 打开Internet协议套接字的服务器套接字通道
+     * 新通道是通过调用系统范围默认SelectorProvider对象的openServerSocketChannel方法创建的
+     * 新通道的套接字最初是未绑定的；在接受连接之前，它必须通过其套接字的bind方法之一绑定到特定地址
+     */
+    public static ServerSocketChannel open() throws IOException {
+        return SelectorProvider.provider().openServerSocketChannel();
+    }
+    
+    /**
+     * 将通道的套接字绑定到本地地址并配置套接字以侦听连接
+     * 它会调用ServerSocketChannelImpl.netBind()方法
+     */
+    public final ServerSocketChannel bind(SocketAddress local) throws IOException {
+        return bind(local, 0);
+    }
+    
+    /** 调整此通道的阻塞模式 */
+    public final SelectableChannel configureBlocking(boolean block) throws IOException
+    {
+        synchronized (regLock) {
+            if (!isOpen())
+                throw new ClosedChannelException();
+            boolean blocking = !nonBlocking;
+            if (block != blocking) {
+                if (block && haveValidKeys())
+                    throw new IllegalBlockingModeException();
+                implConfigureBlocking(block);
+                nonBlocking = !block;
+            }
+        }
+        return this;
+    }
+    
+    /**
+     * 接受与此通道的套接字建立的连接。
+     * 非阻塞模式：如果没有挂起的连接，此方法将立即返回null
+     * 阻塞模式：将无限期地阻塞，直到有新的连接可用或发生 I/O 错误
+     */
+    public abstract SocketChannel accept() throws IOException;
+}
+```
+
+![ServerSocketChannelImpl](JavaSE.assets/ServerSocketChannelImpl.png)
+
+#### SocketChannel
+
+是一个连接到 TCP 网络套接字的selectable通道，可以被多路复用。
+
+```java
+
+/**
+ * 面向流的连接套接字的selectable通道。
+ * 支持非阻塞连接：可以创建一个套接字通道，并且可以通过connect方法启动建立到远程套接字的链接的过程，以便稍后通过finishConnect方法完成。
+ * 支持异步关闭，类似于Channel类中指定的异步关闭操作。
+ * 如果套接字的输入端被一个线程关闭，而另一个线程在套接字通道上的读取操作中被阻塞，则阻塞线程中的读取操作将在不读取任何字节的情况下完成，并将返回-1 。
+ * 如果套接字的输出端被一个线程关闭，而另一个线程在套接字通道上的写操作中被阻塞，则被阻塞的线程将收到AsynchronousCloseException 。
+ * 可以使用setOption方法配置套接字选项，有哪些选项直接看源码注释吧，这里不列出。
+ * @since 1.4
+ */
+public abstract class SocketChannel extends AbstractSelectableChannel
+    implements ByteChannel, ScatteringByteChannel, GatheringByteChannel, NetworkChannel
+{
+    /**
+     * 打开一个套接字通道并将其连接到一个远程地址   
+     * @param remote 可以传入一个IP套接字地址或UNIX域套接字地址
+     */
+    public static SocketChannel open(SocketAddress remote) throws IOException
+    {
+        SocketChannel sc;
+        requireNonNull(remote);
+        if (remote instanceof InetSocketAddress)
+            sc = open();
+        else if (remote instanceof UnixDomainSocketAddress)
+            sc = open(StandardProtocolFamily.UNIX);
+        else
+            throw new UnsupportedAddressTypeException();
+
+        try {
+            sc.connect(remote);
+        } catch (Throwable x) {
+            try {
+                sc.close();
+            } catch (Throwable suppressed) {
+                x.addSuppressed(suppressed);
+            }
+            throw x;
+        }
+        assert sc.isConnected();
+        return sc;
+    }
+    
+    public abstract int write(ByteBuffer src) throws IOException;
+}
+```
+
+![SocketChannelImpl](JavaSE.assets/SocketChannelImpl.png)
+
+#### 简单使用
+
+下面案例简单的用服务端接受来自客户端的消息。
+
+```java
+/**
+ * @author fzk
+ * @date 2022-05-22 17:35
+ */
+public class NetworkChannelTest {
+    // 服务端
+    @Test
+    void serverTest() {
+        ByteBuffer buffer = ByteBuffer.allocate(128);
+        // 1.打开服务套接字通道，并监听8080端口
+        try (ServerSocketChannel ssc = ServerSocketChannel.open()) {
+            ssc.bind(new InetSocketAddress(8080));
+            ssc.configureBlocking(false); // 设置为非阻塞模式
+
+            while (true) {
+                System.out.println("waiting for connection...");
+                /*
+                2.异步等待连接
+                如果此通道处于非阻塞模式，则没有挂起的连接将立即返回null;
+                否则它将无限期地阻塞，直到有新的连接可用或发生I/O 错误
+                */
+                SocketChannel sc = ssc.accept();
+                if (sc == null) {
+                    Thread.sleep(5000L);
+                } else {
+                    // 3.获取到连接接受数据
+                    System.out.printf("收到来自%s的请求 \n", sc.getRemoteAddress());
+                    buffer.clear();// 清空缓存区
+                    // 从连接中读数据到缓冲区
+                    System.out.print("收到数据：");
+                    int count = 0;
+                    while ((count = sc.read(buffer)) != -1) {
+                        buffer.flip(); // 翻转缓冲区，limit=position，position=0
+                        System.out.printf("\n收到%d字节数据: ", count);
+                        while (buffer.hasRemaining()) {
+                            System.out.printf("%c", (char) buffer.get());
+                        }
+                        buffer.clear();
+                    }
+                    System.out.println();
+                    buffer.clear();
+
+                    sc.close(); // 关闭连接
+                }
+            }
+
+        } catch (IOException | InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    // 客户端
+    @Test
+    void clientTest() {
+        try (
+                // 1.以IP协议打开并连接到8080端口
+                SocketChannel socketChannel = SocketChannel.open(new InetSocketAddress("localhost", 8080))
+        ) {
+            // 设置为非阻塞模式
+            socketChannel.configureBlocking(false);
+            ByteBuffer buffer = ByteBuffer.allocate(128);
+            // 2.向服务端发数据
+            buffer.put("hello, i am client.".getBytes(StandardCharsets.UTF_8));
+            buffer.flip();// 翻转缓冲区，limit=position, position=0, 准备从缓存区读数据
+            for (int i = 0; i < 50; i++) {
+                buffer.rewind(); // 回退缓冲区，position=0，用于从缓冲区重读
+                socketChannel.write(buffer);
+            }
+            buffer.clear();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
+#### DatagramChannel
+
+待续...
+
+## Selector
+
+Selector 一般称 为选择器 ，也可以翻译为 多路复用器 。它是 Java NIO 核心组件中的一个，用于检查一个或多个 NIO Channel（通道）的状态是否处于可读、可写。如 此可以实现单线程管理多个 channels,也就是可以管理多个网络链接。
+
+使用 Selector 的好处在于： 使用更少的线程来就可以来处理通道了， 相比使用多个线程，避免了线程上下文切换带来的开销。
