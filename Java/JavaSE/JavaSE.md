@@ -2869,6 +2869,224 @@ public class NetworkChannelTest {
 
 ## Selector
 
-Selector 一般称 为选择器 ，也可以翻译为 多路复用器 。它是 Java NIO 核心组件中的一个，用于检查一个或多个 NIO Channel（通道）的状态是否处于可读、可写。如 此可以实现单线程管理多个 channels,也就是可以管理多个网络链接。
+Selector 一般称为**选择器** ，也可以翻译为**多路复用器** 。它是 Java NIO 核心组件中的一个，用于检查一个或多个 NIO Channel（通道）的状态是否处于可读、可写。如 此可以实现单线程管理多个 channels,也就是可以管理多个网络链接。
 
 使用 Selector 的好处在于： 使用更少的线程来就可以来处理通道了， 相比使用多个线程，避免了线程上下文切换带来的开销。
+
+```java
+/**
+ * SelectableChannel可选管道的多路复用器
+ * 可以通过open方法来创建选择器，该方法将使用系统的默认值selector provider创建一个新的选择器。 还可以通过调用自定义选择器提供程序的openSelector方法来创建选择器。
+ * SelectionKey对象代表SelectableChannel在Selector的注册，selector保留selection key的3种集合：
+ * 1.key set：包含此选择器当前注册的SelectionKey。管道调用register方法注册到选择器中，会把相关的key放入key set。
+ * 2.selected-key set：该集合中的SelectionKey的管道至少有一个位于兴趣集中的操作已经准备就绪。总是key set 的子集。
+ * 3.cancelled-key set：该集合中的选择键都取消了，但是其中的管道还没有从此选择器注销。总是key set 的子集。注销的key在下次选择操作时会从所有key集合中移除
+ * <h2>Selection</h2>
+ * 选择操作查询底层操作系统，以更新每个已注册通道执行其key interest set兴趣集标识的任何操作的准备情况。有两种形式的选择操作：
+ * 		1.select()、select(long)和selectNow()方法将准备执行操作的通道的键添加到selected-key set中，或更新已在selected-key set中的键的ready-operation set
+ * 		2.select(Consumer)、select(Consumer，long)和selectNow(Consumer)方法对准备执行操作的每个通道的键执行操作。这些方法不会添加到selected-key set
+ * <h3>Selection operations that add to the selected-key set</h3>
+ * 在每次选择操作期间，可以向选择器的selected-key set添加key，也可以从其selected-key set和cancelled-key set删除key。
+ * 选择由select(),select(long),selectNow() 方法执行, 包含3步：
+ * 		1.cancelled-key set中的每个key都将从其所属的每个key set中删除，并注销其管道。此步骤将cancelled-key set保留为空。
+ *		2.查询底层操作系统，以更新每个剩余通道在选择操作开始时执行其key兴趣集中操作的准备情况。对于准备好的管道将执行以下两个操作之一：
+ *			a.如果通道的键不在seleted-key set中，则将其添加到该键集中，并修改其就绪操作集
+ *			b.否则，通道的键已在seleted-key set中，其就绪操作集将被修改，以标识通道已就绪的任何新操作。保留之前记录在就绪集中的任何就绪信息；换句话说，底层系统返回的就绪集按位分离到键的当前就绪集。
+ *		3.如果在执行步骤（2）时向cancelled-key set中添加了任何key，则将按照步骤（1）处理这些密钥。
+ *
+ * <h2>并发性</h2>
+ * 	选择器本身和key set是线程安全的，但是它的seleted-key set和cancelled-key set不是
+ */
+public abstract class Selector implements Closeable {
+    /**
+     * 选择一组管道已经准备好I/O操作的key
+     * 此方法执行上面描述的阻塞selection operation操作。只有在至少选择一个管道后，此选择器的wakeup()才会被调用，或当前线程中断
+     * @return  返回就绪操作集更新的key的数量，可能为0
+     */
+    public abstract int select() throws IOException;
+    
+    /** 此方法同上，不过在超时后也会返回。此方法不提供实时保证: 就像调用Object.wait(long)方法一样 */
+    public abstract int select(long timeout) throws IOException;
+    
+    /**
+     * 选择一组管道已经准备好I/O操作的key
+     * 此方法与上面不同，执行的是 非阻塞 selection operation，如果key set中没有管道可选择，则立即返回0
+     * 调用此方法将清除任何先前调用wakeup方法的影响。
+     */
+    public abstract int selectNow() throws IOException;
+    
+    /**
+     * 选择一组管道已经准备好I/O操作的key，并对它们执行给定的操作
+     * 此方法执行上面描述的阻塞selection operation操作。只有在至少选择一个管道后，此选择器的wakeup()才会被调用，或当前线程中断
+     * @since 11
+     */
+    public int select(Consumer<SelectionKey> action, long timeout) throws IOException {
+        if (timeout < 0)
+            throw new IllegalArgumentException("Negative timeout");
+        return doSelect(Objects.requireNonNull(action), timeout);
+    }
+    
+    /**
+     * Default implementation of select(Consumer) and selectNow(Consumer).
+     */
+    private int doSelect(Consumer<SelectionKey> action, long timeout) throws IOException {
+        synchronized (this) {
+            Set<SelectionKey> selectedKeys = selectedKeys();
+            synchronized (selectedKeys) {
+                selectedKeys.clear();
+                // 1.选择已经准备好的管道
+                int numKeySelected;
+                if (timeout < 0) {
+                    numKeySelected = selectNow();
+                } else {
+                    numKeySelected = select(timeout);
+                }
+
+                // copy selected-key set as action may remove keys
+                Set<SelectionKey> keysToConsume = Set.copyOf(selectedKeys);
+                assert keysToConsume.size() == numKeySelected;
+                selectedKeys.clear();
+
+                // 2.对每个key执行操作
+                keysToConsume.forEach(k -> {
+                    action.accept(k);
+                    if (!isOpen())
+                        throw new ClosedSelectorException();
+                });
+
+                return numKeySelected;
+            }
+        }
+    }
+}
+```
+
+通过 Selector 的 `select()`方法，可以查询出已经就绪的通道操作。
+
+### SelectableChannel
+
+**可选管道**。不是所有Channel都是多路复用的，如FileChannel。只有继承了`SelectableChannel`抽象类的才能被Selector复用。
+
+```java
+/**
+ * 通过Selector实现多路复用的管道
+ * 注册：管道要先注册到Selector中才能被复用，返回一个新的SelectionKey对象，表示通道与选择器的注册
+ * 取消注册：管道不能直接取消注册，代表它的注册的key必须取消才行，取消key会使得复用器在下次复用此管道操作时对其取消注册
+ * close：管道close的时候此管道的所有注册key都会被取消
+ *
+ * selectable管道是线程安全的
+ *
+ * 新创建的selectable管道总是阻塞模式的，非阻塞模式和多路复用器结合会很有用；复用管道在注册到复用器的时候必须是非阻塞模式的
+ */
+public abstract class SelectableChannel extends AbstractInterruptibleChannel implements Channel {
+    /**
+     * 使用给定的选择器注册此管道，返回一个代表注册的SelectionKey
+     * 
+     * @param sel 注册到哪个选择器
+     * @param ops 指定选择器对该管道的操作；有4种操作，用 位或 运算可以选择多种操作
+     * 			 SelectionKey.OP_READ = 1 << 0; 可读
+     *   		 SelectionKey.OP_WRITE = 1 << 2; 可写
+     * 			 SelectionKey.OP_CONNECT = 1 << 3; 连接
+     *   		 SelectionKey.OP_ACCEPT = 1 << 4; 接收
+     * @param att The attachment for the resulting key; 可为null
+     * @return  表示该管道与选择器注册的key
+     */
+    public abstract SelectionKey register(Selector sel, int ops, Object att)
+        throws ClosedChannelException;
+    /**
+     * 取回代表此管道注册在给定选择器的key
+     * @return key 或 null
+     */
+    public abstract SelectionKey keyFor(Selector sel);
+}
+```
+
+选择器查询的不是管道的操作，而是通道的某个操作的一种就绪状态。
+
+什么是操作的就绪状态？一旦通道具备完成某个操作的条件，表示该通道的某个操作已经就绪，就可以被 Selector 查询到，程序可以对通道进行对应的操作。如 SocketChannel 通道可以连接到一个服务器，则处于`连接就绪OP_CONNECT`。 一个 ServerSocketChannel 服务器通道准备好接收新进入的连接，则处于 `接收就绪OP_ACCEPT`状态。一个有数据可读的通道，可以说是 `读就绪OP_READ`。一个等待写数据的通道可以说是`写就绪OP_WRITE`。
+
+> 注意：一个通道，并没有一定要支持所有的四种操作。比如服务器通道 ServerSocketChannel 支持 Accept 接受操作，而 SocketChannel 客户端通道则不支持。 可以通过通道上的 validOps()方法，来获取特定通道下所有支持的操作集合。
+
+### SelectionKey
+
+**选择键**。选择键的概念，和事件的概念比较相似。一个选择键**类似监听器模式里边的一个事件**。由于 Selector 不是事件触发的模式，而是主动去查询的模式，所以不叫事件 Event，而是叫 SelectionKey 选择键。
+
+```java
+/**
+ * 一个代表一个SelectableChannel与Selector的注册的令牌token
+ * 每当通道被选择器注册时，都会创建一个选择键；取消键不会立即将其从选择器中删除，而是在下一个选择操作期间添加到选择器的cancelled-key set中以进行删除
+ * 选择键包含两个表示为整数值的操作集，操作集的每一位表示由通道支持的可选择操作的类别
+ * 1.interest set，兴趣集，决定哪些操作会被selector选择器测试是否处于就绪状态
+ * 2.ready set，就绪集，管道哪些操作已经被选择器标记为就绪
+ * Selection keys 是线程安全的
+ */
+
+public abstract class SelectionKey {
+    /** 读操作位 */
+    public static final int OP_READ = 1 << 0;
+
+    /** 写操作位 */
+    public static final int OP_WRITE = 1 << 2;
+
+    /** 用于套接字连接操作的操作集位 */
+    public static final int OP_CONNECT = 1 << 3;
+
+    /** socket-accept的操作集位 */
+    public static final int OP_ACCEPT = 1 << 4;
+    /**
+     * 取消此key的通道与其选择器的注册.
+     * 返回时，此key将无效，并将被添加到其选择器的cancelled-key set中，
+     * 在下一次选择操作期间，key将从所有选择器的key sets中移除。
+     */
+    public abstract void cancel();
+    
+}
+```
+
+### 示例
+
+未完成
+
+```java
+/**
+ * @author fzk
+ * @date 2022-05-23 12:13
+ */
+public class SelectorTest {
+    public static void main(String[] args) {
+        try (
+                // 1.创建选择器selector
+                Selector selector = Selector.open();
+                // 2.创建服务端socket管道并设置为非阻塞
+                ServerSocketChannel ssc1 = ServerSocketChannel.open();
+                ServerSocketChannel ssc2 = ServerSocketChannel.open();
+        ) {
+            ssc1.configureBlocking(false); // 设置为非阻塞
+            ssc1.bind(new InetSocketAddress(8080));// 监听端口
+            ssc2.configureBlocking(false); // 设置为非阻塞
+            ssc2.bind(new InetSocketAddress(9090));// 监听端口
+
+            // 3.管道注册到选择器中, 指定兴趣集为接收事件
+            // 与 Selector 一起使用时，Channel 必须处于非阻塞模式下
+            ssc1.register(selector, SelectionKey.OP_ACCEPT);
+            ssc2.register(selector, SelectionKey.OP_ACCEPT);
+
+            // 4.选择器查询就绪管道
+            while (selector.select() > 0) {
+                // 5.取出selected-key set对其进行操作
+                Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                for (SelectionKey sk : selectionKeys) {
+                    if (sk.isAcceptable()) {
+                        ServerSocketChannel ssc = (ServerSocketChannel) sk.channel();
+                        
+                    }
+                }
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
