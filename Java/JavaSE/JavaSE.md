@@ -2486,34 +2486,6 @@ public abstract class ByteBuffer extends Buffer
 
 也可以通过将文件的区域直接mapping到内存来创建直接字节缓冲区。 Java 平台的实现可以选择支持通过 JNI 从本机代码创建直接字节缓冲区。如果其中一种缓冲区的实例引用了不可访问的内存区域，则访问该区域的尝试不会更改缓冲区的内容，并且会在访问时或稍后引发未指定的异常时间。
 
-#### 内存映射文件I/O
-
-使用案例：RocketMQ保存消息的日志文件就是用的此内存映射文件I/O。
-
-内存映射文件 I/O 是一种读和写文件数据的方法，它可以比常规的基于流或者基于通道的 I/O 快的多。内存映射文件 I/O 是通过使文件中的数据出现为 内存数组的内容来完成的，这其初听起来似乎不过就是将整个文件读到内存中，但是事实上并不是这样。 
-
-一般来说，只有文件中**实际读取或者写入的部分才会映射到内存中**。
-
-```java
-/**
- * @author fzk
- * @datetime 2022-05-22 22:49
- */
-public class FileChannelTest {
-    @Test
-    void FileMapIOTest() {
-        try (RandomAccessFile file = new RandomAccessFile("D:/test.txt", "rw")) {
-            FileChannel fileChannel = file.getChannel();
-            int start = 0, size = 1024;
-            MappedByteBuffer mbb = fileChannel.map(FileChannel.MapMode.READ_WRITE, start, size);
-            mbb.put(2, (byte) 'a');
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-}
-```
-
 ## Channel
 
 ### FileChannel
@@ -2646,6 +2618,104 @@ static void testGather() {
 ```
 
 这个聚集和分散感觉有点...
+
+#### 内存映射文件I/O
+
+使用案例：RocketMQ保存消息的日志文件就是用的此内存映射文件I/O。
+
+内存映射文件 I/O 是一种读和写文件数据的方法，它可以比常规的基于流或者基于通道的 I/O 快的多。内存映射文件 I/O 是通过使文件中的数据出现为 内存数组的内容来完成的，这其初听起来似乎不过就是将整个文件读到内存中，但是事实上并不是这样。 
+
+一般来说，只有文件中**实际读取或者写入的部分才会映射到内存中**。
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-05-22 22:49
+ */
+public class FileChannelTest {
+    @Test
+    void FileMapIOTest() {
+        try (RandomAccessFile file = new RandomAccessFile("D:/test.txt", "rw")) {
+            FileChannel fileChannel = file.getChannel();
+            int start = 0, size = 1024;
+            MappedByteBuffer mbb = fileChannel.map(FileChannel.MapMode.READ_WRITE, start, size);
+            mbb.put(2, (byte) 'a');
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
+#### FileLock文件锁
+
+文件锁在 OS 中很常见，如果多个程序同时访问、修改同一个文件，很容易因为文件数据不同步而出现问题。给文件加一个锁，同一时间，只能有一个程序修改此文件，或者程序都只能读此文件，这就解决了同步问题。 
+
+**文件锁是进程级别的**，不是线程级别的。文件锁可以解决多个进程并发访问、修改同一个文件的问题，但不能解决多线程并发访问、修改同一文件的问题。使用文件锁时，同一进程内的多个线程，可以同时访问、修改此文件。
+
+**文件锁是不可重入**的。
+
+```java
+public abstract class FileChannel extends AbstractInterruptibleChannel
+    implements SeekableByteChannel, GatheringByteChannel, ScatteringByteChannel
+{
+	/**
+     * 获取对该通道文件的 给定区域 的锁定。
+     * 此方法的调用将阻塞，直到可以锁定区域，或关闭此通道或中断调用线程
+	 * 由position和size参数指定的区域不需要包含在实际的底层文件中，甚至不需要重叠。
+	 * 锁定区域的大小是固定的；如果锁定区域最初包含文件的结尾，并且文件超出该区域，则文件的新部分将不会被锁定覆盖。
+	 * 如果预期文件的大小会增长并且需要锁定整个文件，则应锁定从零开始且不小于文件预期最大大小的区域。零参数lock()方法只是锁定一个大小为Long.MAX_VALUE的区域。
+	 * 某些操作系统不支持共享锁，在这种情况下，共享锁请求会自动转换为排他锁请求。
+	 * 新获取的锁是共享的还是独占的，可以通过调用生成的锁对象的isShared方法来测试。
+	 * 文件锁代表整个 Java 虚拟机持有。它们不适用于控制同一虚拟机内的多个线程对文件的访问。
+	 * @param shared true 共享锁，false 排它锁
+     */
+    public abstract FileLock lock(long position, long size, boolean shared)
+        throws IOException;
+    public abstract FileLock tryLock(long position, long size, boolean shared)
+        throws IOException;
+}
+```
+
+例子：
+
+```java
+/**
+ * @author fzk
+ * @date 2022-05-23 22:55
+ */
+public class FileLockTest {
+    public static void main(String[] args) throws IOException {
+        ByteBuffer buf = ByteBuffer.wrap("hello fileLock\n".getBytes());
+
+        FileChannel channel = FileChannel.open(Path.of("D:/test.txt"),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+        channel.position(channel.size()); // 将position定位到末尾
+        // 获取整个文件排它锁
+        FileLock lock = channel.tryLock(0, Long.MAX_VALUE, false);
+        System.out.println("是共享锁吗: " + lock.isShared());
+
+        channel.write(buf);
+        channel.close();
+        System.out.println("写操作完成.");
+        //读取数据
+        readPrint("D:/test.txt");
+    }
+
+    public static void readPrint(String path) throws IOException {
+        FileReader filereader = new FileReader(path);
+        BufferedReader bufferedreader = new BufferedReader(filereader);
+        String tr = bufferedreader.readLine();
+        System.out.println("读取内容: ");
+        while (tr != null) {
+            System.out.println(" " + tr);
+            tr = bufferedreader.readLine();
+        }
+        filereader.close();
+        bufferedreader.close();
+    }
+}
+```
 
 ### NetworkChannel
 
@@ -3043,50 +3113,261 @@ public abstract class SelectionKey {
 }
 ```
 
-### 示例
-
-未完成
+### NIO编程示例
 
 ```java
 /**
  * @author fzk
- * @date 2022-05-23 12:13
+ * @date 2022-05-23 20:35
  */
 public class SelectorTest {
-    public static void main(String[] args) {
+    @Test
+    // 服务端启动这一个就行，它可以处理多个客户端连接
+    void serverTest() {
         try (
                 // 1.创建选择器selector
                 Selector selector = Selector.open();
                 // 2.创建服务端socket管道并设置为非阻塞
-                ServerSocketChannel ssc1 = ServerSocketChannel.open();
-                ServerSocketChannel ssc2 = ServerSocketChannel.open();
+                ServerSocketChannel ssc = ServerSocketChannel.open();
         ) {
-            ssc1.configureBlocking(false); // 设置为非阻塞
-            ssc1.bind(new InetSocketAddress(8080));// 监听端口
-            ssc2.configureBlocking(false); // 设置为非阻塞
-            ssc2.bind(new InetSocketAddress(9090));// 监听端口
+            ssc.configureBlocking(false); // 设置为非阻塞
+            ssc.bind(new InetSocketAddress("localhost", 8080));// 监听端口
 
             // 3.管道注册到选择器中, 指定兴趣集为接收事件
             // 与 Selector 一起使用时，Channel 必须处于非阻塞模式下
-            ssc1.register(selector, SelectionKey.OP_ACCEPT);
-            ssc2.register(selector, SelectionKey.OP_ACCEPT);
+            ssc.register(selector, SelectionKey.OP_ACCEPT);
+
+            ByteBuffer readBuf = ByteBuffer.allocate(1024);
+            ByteBuffer writeBuf = ByteBuffer.allocate(128);
+            writeBuf.put("received".getBytes(StandardCharsets.UTF_8));
+            writeBuf.flip();
 
             // 4.选择器查询就绪管道
             while (selector.select() > 0) {
-                // 5.取出selected-key set对其进行操作
-                Set<SelectionKey> selectionKeys = selector.selectedKeys();
-                for (SelectionKey sk : selectionKeys) {
-                    if (sk.isAcceptable()) {
-                        ServerSocketChannel ssc = (ServerSocketChannel) sk.channel();
-                        
+                System.out.println("准备开始处理，selectedKey数量为：" + selector.selectedKeys().size());
+                // 5.取出selected-key set的迭代器对其进行操作
+                Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
+                while (keyIterator.hasNext()) {
+                    SelectionKey key = keyIterator.next();
+                    if (key.isAcceptable()) {
+                        // 创建新的连接，并且把连接注册到 selector 上
+                        // 声明这个 channel 只对读操作感兴趣
+                        SocketChannel socketChannel = ssc.accept();
+                        socketChannel.configureBlocking(false);// 设置为非阻塞
+                        socketChannel.register(selector, SelectionKey.OP_READ);
+                    } else if (key.isReadable()) {
+                        SocketChannel socketChannel = (SocketChannel) key.channel();
+                        if (!socketChannel.isConnected()) {
+                            key.cancel();// 取消key，从selector中注销
+                            System.out.println(key + "取消了");
+                            continue;
+                        }
+                        readBuf.clear();
+                        socketChannel.read(readBuf);
+                        readBuf.flip();
+                        System.out.println("服务端收到消息: " + new String(Arrays.copyOf(readBuf.array(), readBuf.limit())));
+                        // 将此键的兴趣值改为写操作
+                        key.interestOps(SelectionKey.OP_WRITE);
+                    } else if (key.isWritable()) {
+                        SocketChannel socketChannel = (SocketChannel) key.channel();
+                        if (!socketChannel.isConnected()) {
+                            key.cancel();// 取消key，从selector中注销
+                            System.out.println(key + "取消了");
+                            continue;
+                        }
+                        writeBuf.rewind();
+                        socketChannel.write(writeBuf);
+                        // 将此键的兴趣值改为读操作
+                        key.interestOps(SelectionKey.OP_READ);
+                    } else {
+                        System.out.println(key + "取消了");
+                        key.cancel();
                     }
+                    // 6.必须将key从selected-key set中移除，否则下次处理又会有这个key
+                    keyIterator.remove();
                 }
             }
-
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
+
+    @Test
+    // 这个客户端可以启动很多个相同的
+    void clientTest() {
+        try (SocketChannel socketChannel = SocketChannel.open()) {
+            socketChannel.connect(new InetSocketAddress("localhost", 8080));
+            ByteBuffer writeBuf = ByteBuffer.allocate(32);
+            ByteBuffer readBuf = ByteBuffer.allocate(32);
+
+            for (int i = 0; i < 5; i++) {
+                // 发送消息
+                writeBuf.clear();
+                writeBuf.put(("hello i am client " + i).getBytes(StandardCharsets.UTF_8));
+                writeBuf.flip();
+                socketChannel.write(writeBuf);
+
+                // 接受消息
+                readBuf.clear();
+                socketChannel.read(readBuf);
+                readBuf.flip();
+                System.out.println("客户端收到消息: " + new String(Arrays.copyOf(readBuf.array(), readBuf.limit())));
+                Thread.sleep(1000);
+            }
+            socketChannel.finishConnect();
+        } catch (IOException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
 }
+```
+
+## Pipe
+
+Java NIO 管道是 2 个线程之间的单向数据连接。Pipe 有一个 source 通道和一个 sink 通道。数据会被写到 sink 通道，从 source 通道读取。
+
+![Pipe](JavaSE.assets/Pipe.png)
+
+```java
+/**
+ * 一对实现单向管道的通道。
+ * 管道由一对通道组成：一个可写的接收sink通道和一个可读的source通道。一旦一些字节被写入接收器通道，它们就可以完全按照它们被写入的顺序从源通道中读取。
+ * 将字节写入管道的线程是否会阻塞，直到另一个线程从管道读取这些字节或一些先前写入的字节是系统相关的，因此未指定。许多管道实现将在接收器和源通道之间缓冲多达一定数量的字节，但不应假定这种缓冲
+ */
+public abstract class Pipe {
+    /** 可读取source管道 */
+    public abstract SourceChannel source();
+
+    /** 可写入sink管道 */
+    public abstract SinkChannel sink();
+
+    public static Pipe open() throws IOException {
+        return SelectorProvider.provider().openPipe();
+    }
+}
+```
+
+注意：从这里可以看出`Pipe`是没有继承SelectableChannel抽象类的，即不能多路复用，这与Go中的`chan`管道是不同的。
+
+测试代码
+
+```java
+/**
+ * @author fzk
+ * @date 2022-05-23 21:54
+ */
+public class PipeTest {
+    @Test
+    void pipeTest() {
+        Pipe.SinkChannel sinkChannel = null;
+        try {
+            // 1.打开管道
+            Pipe pipe = Pipe.open();
+            // 2.获取sinkChannel
+            sinkChannel = pipe.sink();
+
+            ByteBuffer writeBuf = ByteBuffer.allocate(64);
+            writeBuf.put(("hello pipe" + System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8));
+            writeBuf.flip();
+            // 3.往sinkChannel写消息
+            while (writeBuf.hasRemaining())
+                sinkChannel.write(writeBuf);
+
+            // 4.新建线程并从sourceChannel读消息
+            Thread t2 = new Thread(() -> {
+                Pipe.SourceChannel sourceChannel = null;
+                try {
+                    sourceChannel = pipe.source();
+                    ByteBuffer readBuf = ByteBuffer.allocate(16);
+                    while ((sourceChannel.read(readBuf) != -1)) {
+                        readBuf.flip();
+                        System.out.println("收到消息: " + new String(Arrays.copyOf(readBuf.array(), readBuf.limit())));
+                        readBuf.clear();
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } finally {
+                    fastClose(sourceChannel);// sink管道和source管道都要关闭
+                }
+            });
+            t2.start();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            fastClose(sinkChannel);// sink管道和source管道都要关闭
+        }
+    }
+
+    void fastClose(Closeable toClose) {
+        if (toClose != null) {
+            try {
+                toClose.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+```
+
+## file
+
+这里的file指的是java.nio.file包，这里面定义Java虚拟机访问文件，文件属性和文件系统的接口和类。
+
+### Path
+
+`java.nio.file.Path` 实例表示文件系统中的路径。一个路径可以指向一个文件或一个目录。路径可以是绝对路径，也可以是相对路径。
+
+`Path` 接口类似于`java.io.File`类，但是有一些差别。不过，在许多情况下，可以使用 Path 接口来替换 File 类的使用。
+
+```java
+// 此接口的实现是不可变的，并且可以安全地供多个并发线程使用
+public interface Path extends Comparable<Path>, Iterable<Path>, Watchable {
+    /** 返回一个路径，该路径是消除了冗余名称元素(.或..)的路径 */
+    Path normalize();
+    /**
+     * Returns a {@code Path} by converting a URI.
+     * @since 11
+     */
+    public static Path of(URI uri) {
+        String scheme =  uri.getScheme();
+        if (scheme == null)
+            throw new IllegalArgumentException("Missing scheme");
+
+        // check for default provider to avoid loading of installed providers
+        if (scheme.equalsIgnoreCase("file"))
+            return FileSystems.getDefault().provider().getPath(uri);
+
+        // try to find provider
+        for (FileSystemProvider provider: FileSystemProvider.installedProviders()) {
+            if (provider.getScheme().equalsIgnoreCase(scheme)) {
+                return provider.getPath(uri);
+            }
+        }
+        throw new FileSystemNotFoundException("Provider \"" + scheme + "\" not installed");
+    }
+}
+```
+
+normalize()方法和of()方法的区别在于前者会先把路径中的`.`和`..`清除再进行文件系统的查找，而后者不会。只要路劲正确，两者都能找到文件，只是toString()方法返回的路劲不同而已。
+
+### Files
+
+java.nio.file.Files
+
+```java
+/**
+ * This class consists exclusively of static methods that operate on files,
+ * directories, or other types of files.
+ *
+ * <p> In most cases, the methods defined here will delegate to the associated
+ * file system provider to perform the file operations.
+ *
+ * @since 1.7
+ */
+
+public final class Files {
+    // buffer size used for reading and writing
+    private static final int BUFFER_SIZE = 8192;
 ```
 
