@@ -2505,6 +2505,8 @@ private final Object positionLock = new Object();
 
 `FileInputStream`, `FileOutputStream`,`RandomAccessFile`对象的`getChannel()`方法返回被连接到相同的基本文件的文件信道。还可以直接调FileChannel.open静态方法开文件通道。
 
+#### 常用API
+
 1、简单使用：读文件写文件管道
 
 ```java
@@ -2623,6 +2625,14 @@ static void testGather() {
 
 这个聚集和分散感觉有点...
 
+#### force()落盘
+
+FileChannel.force()方法将通道里尚未写入磁盘的数据强制写到磁盘上。出于性能方面的考虑，操作系统会将数据缓存在内存中，所以无法保证写入到 FileChannel 里的数据一定会即时写到磁盘上。要保证这一点，需要调用 force()方法。 
+
+force()方法有一个 boolean 类型的参数，指明是否同时将文件元数据（权限信息等） 写到磁盘上。
+
+> 如RocketMQ中，消息接受是将生产者发的消息读入ByteBuffer，消息提交commit只是将消息写入FileChannel，而落盘flush操作则是调用FileChannel.force(false)方法进行强制写盘。
+
 #### 内存映射文件I/O
 
 使用案例：RocketMQ保存消息的日志文件就是用的此内存映射文件I/O。
@@ -2720,8 +2730,6 @@ public class FileLockTest {
     }
 }
 ```
-
-
 
 ### AsynchronousFileChannel(待续)
 
@@ -3657,7 +3665,53 @@ public class FilesTest {
 }
 ```
 
+## Charset
+
+字符集
+
+java.nio包最后一部分是字符集java.nio.charset，这一部分就简略带过。
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-05-25 22:00
+ */
+public class CharsetTest {
+    public static void main(String[] args) {
+        // 所有支持的字符集
+        //SortedMap<String, Charset> charsets = Charset.availableCharsets();
+        //charsets.forEach((key, value) -> System.out.println(key));
+        
+        // 默认的字符集UTF-8
+        System.out.printf("默认字符集: UTF-8? %b \n", Charset.defaultCharset() == StandardCharsets.UTF_8);
+
+
+        // 编码方法：encode(String)，返回一个字节缓冲区
+        ByteBuffer encode = Charset.forName("GBK").encode("这个世界很残酷");
+        while (encode.hasRemaining()) {
+            System.out.printf("%d", (int) encode.get());
+        }
+        encode.rewind();// 回退缓冲区
+        // 解码方法：decode(ByteBuffer)返回一个字符缓冲区
+        CharBuffer decode = Charset.forName("GBK").decode(encode);
+        System.out.println("\n" + decode);
+    }
+}
+// 执行结果如下：
+/*
+默认字符集: UTF-8? true 
+-43-30-72-10-54-64-67-25-70-36-78-48-65-31
+这个世界很残酷
+*/
+```
+
+因为`encode(String)`方法会返回一个ByteBuffer，所以以后将String转换为ByteBuffer，也可以用这个编码方法。
+
 ## NIO 网络编程
+
+### 编程步骤
+
+![编程步骤总结](JavaSE.assets/编程步骤总结.png)
 
 ### 服务端
 
@@ -3759,26 +3813,31 @@ public class ChatServer {
 }
 ```
 
-因为I/O是比较费时的，所以可以新建Sender线程来专门发消息
+因为广播消息I/O是比较费时的，所以可以新建Sender线程来专门发消息，从而让主线程一直监听selector选择器：
 
 ```java
 /**
  * 服务端
+ * 发送者线程
  *
  * @author fzk
- * @date 2022-05-25 12:23
+ * @datetime 2022-05-25 21:13
  */
-public class ChatServer {
+public class AsyncChatServer {
     public static void main(String[] args) {
         try {
-            new ChatServer().startServer();
+            new AsyncChatServer(10).startServer();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
     // 阻塞队列：放入有消息到来的套接字通道
-    private final BlockingQueue<SocketChannel> blockingQueue = new ArrayBlockingQueue<>(10);
+    private final BlockingQueue<MessageHolder> blockingQueue;
+
+    public AsyncChatServer(int capacity) {
+        blockingQueue = new ArrayBlockingQueue<>(capacity);
+    }
 
     public void startServer() throws IOException {
         try (
@@ -3818,9 +3877,23 @@ public class ChatServer {
                     }
                     // 8.监听到客户端发新消息
                     else if (next.isReadable()) {
-                        // 取出发送者通道并交给发送者线程去处理
+                        // 8.1 取出发送者通道并交给发送者线程去处理
                         SocketChannel sendChan = (SocketChannel) next.channel();
-                        blockingQueue.put(sendChan);
+
+                        // 8.2 读取消息
+                        /* 这里可以改为读一批字节就发一批字节，
+                        下面这种把字节数组解码变字符串又编码回字节数组发送给客户端的做法只是为了展示消息 */
+                        StringBuilder sb = new StringBuilder(128);
+                        ByteBuffer buf = ByteBuffer.allocate(128);
+                        while (sendChan.read(buf) > 0) {
+                            buf.flip();
+                            sb.append(StandardCharsets.UTF_8.decode(buf));
+                            buf.clear();
+                        }
+                        String message = sb.toString();
+                        System.out.printf("服务端收到来自%s的消息：%s\n", sendChan.getRemoteAddress(), message);
+                        // 8.3 把消息放入队列
+                        blockingQueue.put(new MessageHolder(message, sendChan));
                     }
                 }
             }
@@ -3830,11 +3903,11 @@ public class ChatServer {
         }
     }
 
-    static class Sender implements Runnable {
-        private Selector selector;
-        private BlockingQueue<SocketChannel> queue;
+    private static class Sender implements Runnable {
+        private final Selector selector;
+        private final BlockingQueue<MessageHolder> queue;
 
-        public Sender(Selector selector, BlockingQueue<SocketChannel> queue) {
+        public Sender(Selector selector, BlockingQueue<MessageHolder> queue) {
             this.selector = selector;
             this.queue = queue;
         }
@@ -3843,30 +3916,18 @@ public class ChatServer {
         public void run() {
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    // 1.取出发送者通道
-                    SocketChannel sendChan = queue.take();
-                    // 2.读取消息
-                /* 这里可以改为读一批字节就发一批字节，
-                    下面这种把字节数组解码变字符串又编码回字节数组发送给客户端的做法只是为了展示消息 */
-                    StringBuilder sb = new StringBuilder(128);
-                    ByteBuffer buf = ByteBuffer.allocate(128);
-                    while (sendChan.read(buf) > 0) {
-                        buf.flip();
-                        sb.append(StandardCharsets.UTF_8.decode(buf));
-                        buf.clear();
-                    }
-                    String message = sb.toString();
-                    System.out.printf("服务端收到来自%s的消息：%s\n", sendChan.getRemoteAddress(), message);
+                    // 1.取出消息
+                    MessageHolder msgHolder = queue.take();
 
-                    // 3.广播消息到其它客户端
+                    // 2.广播消息到其它客户端
                     Set<SelectionKey> keys = selector.keys();
-                    ByteBuffer msgBuf = ByteBuffer.wrap(message.getBytes(StandardCharsets.UTF_8));
+                    ByteBuffer msgBuf = ByteBuffer.wrap(msgHolder.message.getBytes(StandardCharsets.UTF_8));
                     for (SelectionKey key : keys) {
                         SelectableChannel tarChan = key.channel();
                         // 跳过服务器
                         if (tarChan instanceof ServerSocketChannel) continue;
                         // 跳过发送者
-                        if (tarChan == sendChan) continue;
+                        if (tarChan == msgHolder.sendChan) continue;
 
                         msgBuf.rewind();// 回退缓冲区
                         ((SocketChannel) tarChan).write(msgBuf);// 发送消息
@@ -3878,10 +3939,18 @@ public class ChatServer {
             }
         }
     }
+
+    private static class MessageHolder {
+        private final String message;
+        private final SocketChannel sendChan;
+
+        public MessageHolder(String message, SocketChannel sendChan) {
+            this.message = message;
+            this.sendChan = sendChan;
+        }
+    }
 }
 ```
-
-
 
 ### 客户端
 
@@ -3934,7 +4003,7 @@ public class ChatClient {
         }
     }
 
-    static class Receiver implements Runnable {
+    private static class Receiver implements Runnable {
         private Selector selector;
         private String clientName;
 
@@ -3977,3 +4046,38 @@ public class ChatClient {
 }
 ```
 
+### 测试结果
+
+测试的时候起两个客户端，并且由于客户端监听了Console，所以不要在一个类中以线程形式启动两个客户端，两个客户端要分开启动：
+
+客户端A：
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-05-25 21:07
+ */
+public class ClientA {
+    public static void main(String[] args) {
+        new ChatClient().startClient("ClientA");
+    }
+}
+```
+
+客户端B：
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-05-25 21:08
+ */
+public class ClientB {
+    public static void main(String[] args) {
+        new ChatClient().startClient("ClientB");
+    }
+}
+```
+
+先启动服务端，再分别启动两个客户端，然后发送和接受消息的结果如下：
+
+![image-20220525215447713](JavaSE.assets/image-20220525215447713.png)
