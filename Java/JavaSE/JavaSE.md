@@ -2331,6 +2331,10 @@ Selector使用一个线程处理多个channel
 
 ![image-20220519143900113](JavaSE.assets/image-20220519143900113.png)
 
+### nio包
+
+![java.nio](JavaSE.assets/java.nio.png)
+
 ## Buffer
 
 Java NIO 中的 Buffer 用于和 NIO 通道进行交互。数据是从通道读入缓冲区，从缓冲区写入到通道中的。
@@ -2717,6 +2721,12 @@ public class FileLockTest {
 }
 ```
 
+
+
+### AsynchronousFileChannel(待续)
+
+异步文件管道。
+
 ### NetworkChannel
 
 这个接口是通用的对应于套接字的通道。它是服务器端套接字通道和客户端套接字通道的父接口。
@@ -2933,7 +2943,7 @@ public class NetworkChannelTest {
 }
 ```
 
-#### DatagramChannel
+#### DatagramChannel(待续)
 
 待续...
 
@@ -3357,17 +3367,613 @@ java.nio.file.Files
 
 ```java
 /**
- * This class consists exclusively of static methods that operate on files,
- * directories, or other types of files.
- *
- * <p> In most cases, the methods defined here will delegate to the associated
- * file system provider to perform the file operations.
- *
+ * 该类只包含对文件，目录或其他类型文件进行操作的静态方法。
+ * 在大多数情况下，这里定义的方法将委托给相关的文件系统提供程序来执行文件操作
  * @since 1.7
  */
-
 public final class Files {
     // buffer size used for reading and writing
     private static final int BUFFER_SIZE = 8192;
+    // 它的各个静态方法在下面逐一说明
+}
+```
+
+#### 创建目录
+
+创建目录有两个方法: `createDirectory()`和`createDirectories()`，后者与前者的区别在于会级联创建不存在的父目录。
+
+```java
+/** 创建所有不存在的父目录来创建目录，当目录早已存在时不会像createDirectory方法那样报错 */
+public static Path createDirectories(Path dir, FileAttribute<?>... attrs) throws IOException {
+    // 1.尝试直接创建目录，这里会调用createDirectory()方法
+    try {
+        createAndCheckIsDirectory(dir, attrs);
+        return dir;
+    } catch (FileAlreadyExistsException x) {
+        // file exists and is not a directory
+        throw x;
+    } catch (IOException x) {
+        // parent may not exist or other reason
+    }
+    SecurityException se = null;
+    try {
+        dir = dir.toAbsolutePath();
+    } catch (SecurityException x) {
+        // don't have permission to get absolute path
+        se = x;
+    }
+    // 2.寻找存在的父目录
+    Path parent = dir.getParent();
+    while (parent != null) {
+        try {
+            provider(parent).checkAccess(parent);
+            break;
+        } catch (NoSuchFileException x) {
+            // does not exist
+        }
+        parent = parent.getParent();
+    }
+    if (parent == null) {
+        // unable to find existing parent
+        if (se == null) {
+            throw new FileSystemException(dir.toString(), null,
+                                          "Unable to determine if root directory exists");
+        } else {
+            throw se;
+        }
+    }
+
+    // 3.层层创建目录
+    Path child = parent;
+    for (Path name: parent.relativize(dir)) {
+        child = child.resolve(name);
+        createAndCheckIsDirectory(child, attrs);
+    }
+    return dir;
+}
+```
+
+可以看到`createDirectories()`方法是对目录各个不存在的父目录进行层层调用`createDirectory()`进行创建的。
+
+#### copy、move、delete
+
+```java
+/**
+ * 将文件复制到目标文件
+ * 如果支持符号链接，并且文件是符号链接，那么链接的最终目标将被复制。 
+ * 如果文件是目录，那将在目标位置创建一个空目录.该方法可以使用walkFileTree方法复制目录和目录中的所有条目，或者需要的整个文件树
+ *
+ * 复制文件不是原子操作。如果抛出一个IOException ，则目标文件可能不完整，或者某些文件属性尚未从源文件复制。当指定了REPLACE_EXISTING选项并且目标文件存在时，将替换目标文件。 对于其他文件系统活动，检查文件的存在和创建新文件可能不是原子的。
+ */
+public static Path copy(Path source, Path target, CopyOption... options) throws IOException {
+    FileSystemProvider provider = provider(source);
+    if (provider(target) == provider) {
+        // same provider
+        provider.copy(source, target, options);
+    } else {
+        // different providers
+        CopyMoveHelper.copyToForeignTarget(source, target, options);
+    }
+    return target;
+}
+
+/**
+ * 移动或重命名文件
+ * 默认情况下，此方法尝试将文件移动到目标文件，如果目标文件存在，则失败
+ * 如果文件是符号链接，则移动符号链接本身，而不是链接的目标被移动。
+ * 可以调用此方法来移动空目录。移动文件树可能涉及复制而不是移动目录，并且可以使用copy方法与Files.walkFileTree实用程序方法结合使用。
+ * 当作为非原子操作执行移动，并且抛出IOException时，则不会定义文件的状态。 原始文件和目标文件都可能存在，目标文件可能不完整，或者某些文件属性可能未被复制到原始文件中。
+ */
+public static Path move(Path source, Path target, CopyOption... options) throws IOException {
+    FileSystemProvider provider = provider(source);
+    if (provider(target) == provider) {
+        // same provider
+        provider.move(source, target, options);
+    } else {
+        // different providers
+        CopyMoveHelper.moveToForeignTarget(source, target, options);
+    }
+    return target;
+}
+
+public enum StandardCopyOption implements CopyOption {
+    /** 如果存在则替换，不指定的情况下呢，如果存在会报错FileAlreadyExistsException */
+    REPLACE_EXISTING,
+    /** 复制文件属性 */
+    COPY_ATTRIBUTES,
+    /** 以原子方式移动文件 */
+    ATOMIC_MOVE;
+}
+/**
+ * 删除文件
+ * 如果文件是符号链接，那么符号链接本身而不是链接的最终目标被删除。
+ * 如果文件是目录，那么该目录必须为空。
+ * 该方法可以使用walkFileTree方法来删除目录和目录中的所有条目，或者需要的整个文件树。
+ * 在某些操作系统上，当文件打开并被该Java虚拟机或其他程序使用时，可能无法删除文件。
+ */
+public static void delete(Path path) throws IOException {
+    provider(path).delete(path);
+}
+```
+
+#### 遍历文件树
+
+在上面的几个方法，都不能对非空目录进行操作，因为目录需要对每个条目都进行处理。Files提供了一些遍历目录的方法，如`walk()`、`walkFileTree()`
+
+```java
+/**
+ * 遍历文件树
+ * 将以一个给定的起始文件为根。文件树遍历深度优先于给定FileVisitor调用所遇到的每个文件。
+ 
+ * @param options 如果options参数包含FOLLOW_LINKS选项，则遵循符号链接，且此时会检查是否出现循环目录，循环检测是通过记录目录的file-key，或者如果file-key不可用，则通过调用isSameFile方法来测试目录是否与祖先相同的文件来完成。 当检测到一个循环时，它被视为I/O错误，向visitFileFailed方法传入一个FileSystemLoopException的异常。
+ * @param maxDepth 是要访问的目录的最大级别数。0即只有起始文件被访问，当访问层数超过maxDepth，会调用visitFileFailed方法
+ */
+public static Path walkFileTree(Path start,
+                                Set<FileVisitOption> options,
+                                int maxDepth,
+                                FileVisitor<? super Path> visitor) throws IOException {
+    /**
+         * Create a FileTreeWalker to walk the file tree, invoking the visitor
+         * for each event.
+         */
+    try (FileTreeWalker walker = new FileTreeWalker(options, maxDepth)) {
+        FileTreeWalker.Event ev = walker.walk(start);
+        do {
+            FileVisitResult result = switch (ev.type()) {
+                case ENTRY -> {
+                    IOException ioe = ev.ioeException();
+                    if (ioe == null) {
+                        assert ev.attributes() != null;
+                        yield visitor.visitFile(ev.file(), ev.attributes());
+                    } else {
+                        yield visitor.visitFileFailed(ev.file(), ioe);
+                    }
+                }
+                case START_DIRECTORY -> {
+                    var res = visitor.preVisitDirectory(ev.file(), ev.attributes());
+
+                    // if SKIP_SIBLINGS and SKIP_SUBTREE is returned then
+                    // there shouldn't be any more events for the current
+                    // directory.
+                    if (res == FileVisitResult.SKIP_SUBTREE ||
+                        res == FileVisitResult.SKIP_SIBLINGS)
+                        walker.pop();
+                    yield res;
+                }
+                case END_DIRECTORY -> {
+                    var res = visitor.postVisitDirectory(ev.file(), ev.ioeException());
+
+                    // SKIP_SIBLINGS is a no-op for postVisitDirectory
+                    if (res == FileVisitResult.SKIP_SIBLINGS)
+                        res = FileVisitResult.CONTINUE;
+                    yield res;
+                }
+                default -> throw new AssertionError("Should not get here");
+            };
+
+            if (Objects.requireNonNull(result) != FileVisitResult.CONTINUE) {
+                if (result == FileVisitResult.TERMINATE) {
+                    break;
+                } else if (result == FileVisitResult.SKIP_SIBLINGS) {
+                    walker.skipRemainingSiblings();
+                }
+            }
+            ev = walker.next();
+        } while (ev != null);
+    }
+
+    return start;
+}
+```
+
+遍历文件树`walkFileTree()`需要传入一个文件访问接口`FileVisitor`，可以自己实现，也可以继承`SimpleFileVisitor`类。
+
+```java
+public interface FileVisitor<T> {
+    /**
+     * 进入目录前调用
+     * 如果返回FileVisitResult.CONTINUE，则进入目录访问
+     * 如果返回FileVisitResult.SKIP_SUBTREE或SKIP_SIBLINGS，则进入目录
+     */
+    FileVisitResult preVisitDirectory(T dir, BasicFileAttributes attrs) throws IOException;
+
+	// 访问文件时调用
+    FileVisitResult visitFile(T file, BasicFileAttributes attrs) throws IOException;
+
+    // 当文件不能访问时调用，即目录不能打开时调用；文件不可读时调用
+    FileVisitResult visitFileFailed(T file, IOException exc) throws IOException;
+
+    /**
+     * 访问完目录及其所有子条目时调用 
+     * @param exc 遍历目录内的子内容时出现的错误
+     */
+    FileVisitResult postVisitDirectory(T dir, IOException exc) throws IOException;
+}
+
+public enum FileVisitResult {
+    // 继续访问
+    CONTINUE,
+    // 终止访问
+    TERMINATE,
+    /**
+     * 跳过子树结构，即不访问目录内的子条目。
+     * 只有在FileVisitor.preVisitDirectory()方法返回才有意义，其它方法返回效果同 CONTINUE
+     */
+    SKIP_SUBTREE,
+    /**
+     * 跳过该文件或目录的兄弟节点
+     * 如果是FileVisitor.preVisitDirectory()方法调用，则会跳过其目录内容访问，
+     * 且该目录的FileVisitor.postVisitDirectory()不会调用
+     */
+    SKIP_SIBLINGS;
+}
+```
+
+简单使用：
+
+```java
+/**
+ * @author fzk
+ * @date 2022-05-24 10:22
+ */
+public class FilesTest {
+    public static void main(String[] args) throws IOException {
+        Files.walkFileTree(Path.of("D:/testDir"), Set.of(FileVisitOption.FOLLOW_LINKS), 10, new MyFileVisitor());
+    }
+
+    private static class MyFileVisitor implements FileVisitor<Path> {
+        @Override
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+            System.out.printf("进入目录%s \n", dir.getFileName());
+            if (dir.startsWith("D:/testDir/skipDir")) {
+                System.out.printf("跳过目录%s \n", dir.getFileName());
+                return FileVisitResult.SKIP_SUBTREE;
+            }
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+            System.out.printf("访问到文件%s\n", file.getFileName());
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+            System.out.printf("访问文件%s失败:%s \n", file.getFileName(), exc.toString());
+            return FileVisitResult.TERMINATE;
+        }
+
+        @Override
+        public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+            if (exc != null) {
+                System.out.printf("访问目录%s中的内容出现错误:%s \n", dir.getFileName(), exc.toString());
+                return FileVisitResult.TERMINATE;
+            }
+            System.out.printf("退出目录%s", dir.getFileName());
+            return FileVisitResult.CONTINUE;
+        }
+    }
+}
+```
+
+## NIO 网络编程
+
+### 服务端
+
+大致步骤如下：
+
+1、服务端启动一个`ServerSocketChannel`通道并注册到选择器`Selector`上；
+
+2、选择器监听服务器通道的可接受连接状态`SelectionKey.OP_ACCEPT`，每次发生都意味着新到来一个连接；
+
+3、将新到来的连接注册到选择器`Selector`上并监听其可读状态`SelectionKey.OP_READ`；
+
+4、当客户端发来消息，选择器监听到状态变化，就读取消息内容，将其发送给其它注册到此服务器的客户端。
+
+代码实现：
+
+```java
+/**
+ * 服务端
+ * @author fzk
+ * @date 2022-05-25 12:23
+ */
+public class ChatServer {
+    public static void main(String[] args) {
+        try {
+            new ChatServer().startServer();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void startServer() throws IOException {
+        try (
+                // 1.新建selector选择器
+                Selector selector = Selector.open();
+                // 2.新建服务端通道并绑定到8080端口
+                ServerSocketChannel ssc = ServerSocketChannel.open();
+        ) {
+            ssc.bind(new InetSocketAddress("localhost", 8080));
+            ssc.configureBlocking(false);// 设置为非阻塞模式
+
+            // 3.注册channel通道到选择器上
+            ssc.register(selector, SelectionKey.OP_ACCEPT);
+            System.out.println("服务端启动成功...");
+
+            // 4.监听通道
+            while (selector.select() > 0) {
+                // 5.获取到已经就绪的通道
+                Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                Iterator<SelectionKey> iterator = selectionKeys.iterator();
+                while (iterator.hasNext()) {
+                    SelectionKey next = iterator.next();
+                    iterator.remove();// 必须从选择器选中selected-key集合中移除已经处理的key
+
+                    // 6.监听到有新客户端连接
+                    if (next.isAcceptable()) {
+                        SocketChannel socketChannel = ssc.accept();
+                        socketChannel.configureBlocking(false);// 设置为非阻塞模式
+                        // 注册到选择器
+                        socketChannel.register(selector, SelectionKey.OP_READ);
+                        // 回复客户端
+                        socketChannel.write(StandardCharsets.UTF_8.encode("欢迎加入聊天室..."));
+                    }
+                    // 7.监听到客户端发新消息
+                    else if (next.isReadable()) {
+                        // 7.1.取出发送者通道
+                        SocketChannel sendChan = (SocketChannel) next.channel();
+
+                        // 7.2.读取消息
+                    /* 这里可以改为读一批字节就发一批字节，
+                    下面这种把字节数组解码变字符串又编码回字节数组发送给客户端的做法只是为了展示消息 */
+                        StringBuilder sb = new StringBuilder(128);
+                        ByteBuffer buf = ByteBuffer.allocate(128);
+                        while (sendChan.read(buf) > 0) {
+                            buf.flip();
+                            sb.append(StandardCharsets.UTF_8.decode(buf));
+                            buf.clear();
+                        }
+                        String message = sb.toString();
+                        System.out.printf("服务端收到来自%s的消息：%s\n", sendChan.getRemoteAddress(), message);
+
+                        // 7.3.广播消息到其它客户端
+                        Set<SelectionKey> keys = selector.keys();
+                        ByteBuffer msgBuf = ByteBuffer.wrap(message.getBytes(StandardCharsets.UTF_8));
+                        for (SelectionKey key : keys) {
+                            SelectableChannel tarChan = key.channel();
+                            // 跳过服务器
+                            if (tarChan instanceof ServerSocketChannel) continue;
+                            // 跳过发送者
+                            if (tarChan == sendChan) continue;
+
+                            msgBuf.rewind();// 回退缓冲区
+                            ((SocketChannel) tarChan).write(msgBuf);// 发送消息
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+因为I/O是比较费时的，所以可以新建Sender线程来专门发消息
+
+```java
+/**
+ * 服务端
+ *
+ * @author fzk
+ * @date 2022-05-25 12:23
+ */
+public class ChatServer {
+    public static void main(String[] args) {
+        try {
+            new ChatServer().startServer();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 阻塞队列：放入有消息到来的套接字通道
+    private final BlockingQueue<SocketChannel> blockingQueue = new ArrayBlockingQueue<>(10);
+
+    public void startServer() throws IOException {
+        try (
+                // 1.新建selector选择器
+                Selector selector = Selector.open();
+                // 2.新建服务端通道并绑定到8080端口
+                ServerSocketChannel ssc = ServerSocketChannel.open();
+        ) {
+            ssc.bind(new InetSocketAddress("localhost", 8080));
+            ssc.configureBlocking(false);// 设置为非阻塞模式
+
+            // 3.注册channel通道到选择器上
+            ssc.register(selector, SelectionKey.OP_ACCEPT);
+            System.out.println("服务端启动成功...");
+
+            // 4.启动发送者线程
+            Thread sender = new Thread(new Sender(selector, blockingQueue));
+            sender.start();
+
+            // 5.主线程监听通道
+            while (selector.select() > 0) {
+                // 6.获取到已经就绪的通道
+                Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                Iterator<SelectionKey> iterator = selectionKeys.iterator();
+                while (iterator.hasNext()) {
+                    SelectionKey next = iterator.next();
+                    iterator.remove();// 必须从选择器选中selected-key集合中移除已经处理的key
+
+                    // 7.监听到有新客户端连接
+                    if (next.isAcceptable()) {
+                        SocketChannel socketChannel = ssc.accept();
+                        socketChannel.configureBlocking(false);// 设置为非阻塞模式
+                        // 注册到选择器
+                        socketChannel.register(selector, SelectionKey.OP_READ);
+                        // 回复客户端
+                        socketChannel.write(StandardCharsets.UTF_8.encode("欢迎加入聊天室..."));
+                    }
+                    // 8.监听到客户端发新消息
+                    else if (next.isReadable()) {
+                        // 取出发送者通道并交给发送者线程去处理
+                        SocketChannel sendChan = (SocketChannel) next.channel();
+                        blockingQueue.put(sendChan);
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+            System.exit(1);
+        }
+    }
+
+    static class Sender implements Runnable {
+        private Selector selector;
+        private BlockingQueue<SocketChannel> queue;
+
+        public Sender(Selector selector, BlockingQueue<SocketChannel> queue) {
+            this.selector = selector;
+            this.queue = queue;
+        }
+
+        @Override
+        public void run() {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    // 1.取出发送者通道
+                    SocketChannel sendChan = queue.take();
+                    // 2.读取消息
+                /* 这里可以改为读一批字节就发一批字节，
+                    下面这种把字节数组解码变字符串又编码回字节数组发送给客户端的做法只是为了展示消息 */
+                    StringBuilder sb = new StringBuilder(128);
+                    ByteBuffer buf = ByteBuffer.allocate(128);
+                    while (sendChan.read(buf) > 0) {
+                        buf.flip();
+                        sb.append(StandardCharsets.UTF_8.decode(buf));
+                        buf.clear();
+                    }
+                    String message = sb.toString();
+                    System.out.printf("服务端收到来自%s的消息：%s\n", sendChan.getRemoteAddress(), message);
+
+                    // 3.广播消息到其它客户端
+                    Set<SelectionKey> keys = selector.keys();
+                    ByteBuffer msgBuf = ByteBuffer.wrap(message.getBytes(StandardCharsets.UTF_8));
+                    for (SelectionKey key : keys) {
+                        SelectableChannel tarChan = key.channel();
+                        // 跳过服务器
+                        if (tarChan instanceof ServerSocketChannel) continue;
+                        // 跳过发送者
+                        if (tarChan == sendChan) continue;
+
+                        msgBuf.rewind();// 回退缓冲区
+                        ((SocketChannel) tarChan).write(msgBuf);// 发送消息
+                    }
+                }
+            } catch (InterruptedException | IOException e) {
+                e.printStackTrace();
+                System.exit(1);
+            }
+        }
+    }
+}
+```
+
+
+
+### 客户端
+
+客户端相对于服务端就比较简单，只需要
+
+1、新建客户端`SocketChannel`套接字通道并注册到选择器`Selector`；
+
+2、由于客户端一直处于可写状态`SelectionKey.OP_WRITE`，所以只需要监听其可读状态`SelectionKey.OP_READ`，新建读线程监听可读状态并读取消息；
+
+3、发消息的内容可以选择以控制台发送，这就要求必须以主线程运行Scanner扫描控制台。
+
+代码实现：
+
+```java
+/**
+ * 客户端
+ * @author fzk
+ * @date 2022-05-25 12:23
+ */
+public class ChatClient {
+    public void startClient(String clientName) {
+        try (
+                // 1.新建客户端通道
+                SocketChannel sc = SocketChannel.open(new InetSocketAddress("localhost", 8080));
+                // 2.新建选择器
+                Selector selector = Selector.open();
+        ) {
+            sc.configureBlocking(false);// 设为非阻塞模式
+            // 3.客户端通道注册到选择器
+            sc.register(selector, SelectionKey.OP_READ);
+
+            // 4.接受者线程
+            Thread sender = new Thread(new Receiver(selector, clientName));
+            sender.start();
+
+            // 5.主线程做发送者
+            System.out.printf("%s 启动成功...\n", clientName);
+            Scanner scanner = new Scanner(System.in);
+            while (scanner.hasNextLine()) {
+                String nextLine = scanner.nextLine();
+                try {
+                    sc.write(ByteBuffer.wrap(nextLine.getBytes(StandardCharsets.UTF_8)));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    System.exit(1);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    static class Receiver implements Runnable {
+        private Selector selector;
+        private String clientName;
+
+        public Receiver(Selector selector, String clientName) {
+            this.selector = selector;
+            this.clientName = clientName;
+        }
+
+        @Override
+        public void run() {
+            try {
+                // 1.监听通道
+                while (selector.select() > 0) {
+                    // 2.取出可操作的通道
+                    Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                    Iterator<SelectionKey> iterator = selectionKeys.iterator();
+                    while (iterator.hasNext()) {
+                        SelectionKey next = iterator.next();
+                        iterator.remove();
+                        // 2.读取消息
+                        if (next.isReadable()) {
+                            SocketChannel socketChannel = (SocketChannel) next.channel();
+                            ByteBuffer buf = ByteBuffer.allocate(128);
+                            StringBuilder sb = new StringBuilder();
+                            while (socketChannel.read(buf) > 0) {
+                                buf.flip();
+                                sb.append(StandardCharsets.UTF_8.decode(buf));
+                            }
+                            String message = sb.toString();
+                            System.out.printf("客户端%s收到消息: %s\n", clientName, message);
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.exit(1);
+            }
+        }
+    }
+}
 ```
 
