@@ -2488,7 +2488,11 @@ public abstract class ByteBuffer extends Buffer
 
 因此，建议将直接缓冲区主要分配给受底层系统的本机 I/O 操作影响的大型、长期存在的缓冲区。通常，最好**仅在直接缓冲区对程序性能产生可衡量的增益时才分配它们**。
 
-也可以通过将文件的区域直接mapping到内存来创建直接字节缓冲区。 Java 平台的实现可以选择支持通过 JNI 从本机代码创建直接字节缓冲区。如果其中一种缓冲区的实例引用了不可访问的内存区域，则访问该区域的尝试不会更改缓冲区的内容，并且会在访问时或稍后引发未指定的异常时间。
+也可以通过将文件的区域直接mapping到内存来创建直接字节缓冲区。
+
+![DirectByteBuffer](JavaSE.assets/DirectByteBuffer.png)
+
+`DirectByteBuffer`的父类是`MappedByteBuffer`，说明将`FileChannel.map()`映射到内存中的映射缓冲区也是直接缓冲区，位于JVM的堆外。它是通过 `Unsafe` 的本地方法 `allocateMemory()` 进行内存分配，底层调用的是操作系统的 malloc() 函数。
 
 ## Channel
 
@@ -2496,7 +2500,7 @@ public abstract class ByteBuffer extends Buffer
 
 用于读取，写入，映射和操作文件的通道。文件通道**可以安全使用多个并发线程**。
 
-在FileChannelImpl中，默认的锁实现是synchronized (positionLock) 
+在`FileChannelImpl`中，默认的锁实现是synchronized (positionLock) 
 
 ```java
 // Lock for operations involving position and size
@@ -2504,6 +2508,29 @@ private final Object positionLock = new Object();
 ```
 
 `FileInputStream`, `FileOutputStream`,`RandomAccessFile`对象的`getChannel()`方法返回被连接到相同的基本文件的文件信道。还可以直接调FileChannel.open静态方法开文件通道。
+
+```java
+/**
+ * 用于read, write, 映射map和操作文件的管道
+ * 除了常规读写操作外，还定义了一些特殊操作：
+ *  1.文件绝对定位的读写write(ByteBuffer,long), read(ByteBuffer,long)
+ *  2.对文件的更新可以用force()强制落盘，确保了系统崩溃时数据不丢失
+ *  3.文件区域直接映射到内存，大文件很有效map(MapMode, long, long)---零拷贝
+ *  4.字节数据可以直接从文件transferTo(long,long,WritableByteChannel)到其它通道，如SocketChannel,可以由许多操作系统优化到非常快速的文件系统高速缓存传输---零拷贝
+ *  5.文件区域锁定，防止其它进程访问lock(long,long,boolean)
+ */
+public abstract class FileChannel
+    extends AbstractInterruptibleChannel
+    implements SeekableByteChannel, GatheringByteChannel, ScatteringByteChannel {
+    // 绝对定位的读
+    public abstract int read(ByteBuffer dst, long position) throws IOException;
+    
+     // 绝对定位的写
+    public abstract int write(ByteBuffer src, long position) throws IOException;
+}
+```
+
+剩下的几个重要方法在下面讲解。
 
 #### 常用API
 
@@ -2547,27 +2574,7 @@ public static void main(String[] args) throws IOException {
 }
 ```
 
-2、文件管道互相读写：可用于文件复制
-
-```java
-public static void main(String[] args) {
-    try (
-        FileChannel fromChannel = FileChannel.open(Path.of("D:/test1.txt"), StandardOpenOption.READ);
-        FileChannel toChannel = FileChannel.open(Path.of("D:/test2.txt"), StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE)
-    ) {
-        long position = toChannel.size();
-        long count = fromChannel.size();
-        // position参数表示从何处开始写数据,count 表示最多写多少字节
-        toChannel.transferFrom(fromChannel, position, count);
-        // 这里的第一个参数position指从何处开始读数据，并读count字节，然后写入到目标管道
-        fromChannel.transferTo(0L, count, toChannel);
-    } catch (IOException e) {
-        e.printStackTrace();
-    }
-}
-```
-
-3、**Scatter/Gather** 
+2、**Scatter/Gather** 
 
 scatter/gather 用于描述从 Channel 中读取或 者写入到 Channel 的操作。
 
@@ -2577,7 +2584,7 @@ scatter/gather 用于描述从 Channel 中读取或 者写入到 Channel 的操�
 
 scatter / gather 经常用于需要将传输的数据分开处理的场合，例如传输一个由消息头和消息体组成的消息，你可能会将消息体和消息头分散到不同的 buffer 中，这样你可以方便的处理消息头和消息体
 
-3.1 分散读
+2.1 分散读
 
 缺点：不适应动态消息，这要求消息头长度固定。
 
@@ -2607,7 +2614,7 @@ public static void main(String[] args) {
 }
 ```
 
-3.2 聚集写
+2.2 聚集写
 
 ```java
 static void testGather() {
@@ -2627,19 +2634,118 @@ static void testGather() {
 
 #### force()落盘
 
-FileChannel.force()方法将通道里尚未写入磁盘的数据强制写到磁盘上。出于性能方面的考虑，操作系统会将数据缓存在内存中，所以无法保证写入到 FileChannel 里的数据一定会即时写到磁盘上。要保证这一点，需要调用 force()方法。 
+```java
+    /**
+     * 强制将此通道文件的更新写入存储设备，这对于确保系统崩溃时不会丢失关键信息非常有用。
+     * 此方法只能强制更新此类中定义方法对文件的改变，对于map()映射的字节缓冲区的可能无法落盘，毕竟这个映射字节缓冲区的落盘有它自己的force()方法
+     * @param   metaData 
+     *			是否更新此文件的元数据，如果只修改了内容就最好传false，
+     *			通过true表示必须写入文件的内容和元数据的更新，这通常需要至少一个I/O操作
+     */
+    public abstract void force(boolean metaData) throws IOException;
+```
 
-force()方法有一个 boolean 类型的参数，指明是否同时将文件元数据（权限信息等） 写到磁盘上。
+FileChannel.force()方法将通道里尚未写入磁盘的数据强制写到磁盘上。出于性能方面的考虑，操作系统会将数据缓存在内存中，所以无法保证写入到 FileChannel 里的数据一定会即时写到磁盘上。
 
 > 如RocketMQ中，消息接受是将生产者发的消息读入ByteBuffer，消息提交commit只是将消息写入FileChannel，而落盘flush操作则是调用FileChannel.force(false)方法进行强制写盘。
 
-#### 内存映射文件I/O
+#### map()内存映射
 
 使用案例：RocketMQ保存消息的日志文件就是用的此内存映射文件I/O。
 
-内存映射文件 I/O 是一种读和写文件数据的方法，它可以比常规的基于流或者基于通道的 I/O 快的多。内存映射文件 I/O 是通过使文件中的数据出现为 内存数组的内容来完成的，这其初听起来似乎不过就是将整个文件读到内存中，但是事实上并不是这样。 
+内存映射也算是一种零拷贝，因为它**直接将内核态的缓冲区映射到用户态来**，直接对其进行操作，就减少了将数据先拷贝到用户态再更新会内核态的过程了。
 
-一般来说，只有文件中**实际读取或者写入的部分才会映射到内存中**。
+```java
+    /**
+     * 映射文件通道某区域到内存中
+     * 对于大多数操作系统，将文件映射到内存中比通过read和write方法读取或写入几十k字节的数据更昂贵。
+     * 从性能的角度来看，通常只能将较大的文件映射到内存中！
+     */
+    public abstract MappedByteBuffer map(MapMode mode, long position, long size) throws IOException;
+```
+
+映射模式：
+
+```java
+// 文件通道映射模式
+public static class MapMode {
+    // 只读映射模式
+    public static final MapMode READ_ONLY = new MapMode("READ_ONLY");
+
+    // 读写映射模式
+    // 对映射缓冲区所做的更改将最终传播到文件中; 它们可能、也可能不会被映射同一文件的其他程序可见
+    public static final MapMode READ_WRITE = new MapMode("READ_WRITE");
+
+    // 私有（写时复制）映射模式
+    // 映射缓存区的修改不会传播到该文件，且对于同样映射了该文件的其它程序不可见，因为修改会创建缓冲区的私有副本
+    public static final MapMode PRIVATE = new MapMode("PRIVATE");
+
+    private final String name;
+    private MapMode(String name) {this.name = name;}
+}
+```
+
+返回的是：`java.nio.MappedByteBuffer`
+
+```java
+/**
+ * 直接字节缓冲区，内容是文件的存储映射区域
+ * 继承了基本的ByteBuffer，扩展了一些内存映射文件区域的特殊操作
+ * 映射字节缓冲区的内容可能会随时更改，可能是本程序，有可能来自其它程序，这依赖于操作系统
+ * 映射字节缓冲区的部分或所有内容可能在任何时候会变得无法访问，比如the mapped file is truncated。
+ * 因此强烈建议采取适当的预防措施避免不同程序对映射文件的同时进行除读或写之外的操作，比如truncate截断甚至直接删除啥的
+ */
+public abstract class MappedByteBuffer extends ByteBuffer {
+        
+    /**
+     * 该映射缓冲区的内容是否驻留在物理内存中
+     * 返回值只是个提示，不是保证，因为在此方法返回时底层操作系统可能已经paged out some of the buffer's data
+     * @return 	true 意味着该缓冲区中的所有数据很可能驻留在物理内存中，因此可被访问，而不会导致任何虚拟内存页面错误或I/O操作
+     *			false 并不一定意味着缓冲区的内容不会驻留在物理内存中
+     */
+    public final boolean isLoaded() {
+        if (fd == null) { return true; }
+        return SCOPED_MEMORY_ACCESS.isLoaded(scope(), address, isSync, capacity());
+    }
+    /**
+     * 将此缓冲区的内容加载到物理内存中
+     * 这种方法尽最大努力确保当它返回时，该缓冲区的内容驻留在物理内存中。
+     * 调用此方法可能会导致一些页面错误和I/O操作发生
+     */
+    public final MappedByteBuffer load() {
+        if (fd == null) {
+            return this;
+        }
+        try {
+            SCOPED_MEMORY_ACCESS.load(scope(), address, isSync, capacity());
+        } finally {
+            Reference.reachabilityFence(this);
+        }
+        return this;
+    }
+    /**
+     * 强制将此缓冲区某个区域内容的任何更改写入包含映射文件的存储设备
+     * 只有映射模式为 MapMode.READ_WRITE 读写模式才有效
+     * @since 13
+     */
+    public final MappedByteBuffer force(int index, int length) {
+        if (fd == null) {
+            return this;
+        }
+        int capacity = capacity();
+        if ((address != 0) && (capacity != 0)) {
+            // check inputs
+            Objects.checkFromIndexSize(index, length, capacity);
+            SCOPED_MEMORY_ACCESS.force(scope(), fd, address, isSync, index, length);
+        }
+        return this;
+    }
+}
+```
+
+注意：将文件通道映射到映射内存缓冲区后，直接调用`FileChannel.force()`时不保证能刷盘成功，**最好调用映射内存缓冲区的`force()`进行刷盘**。
+
+简单使用：
 
 ```java
 /**
@@ -2654,12 +2760,119 @@ public class FileChannelTest {
             int start = 0, size = 1024;
             MappedByteBuffer mbb = fileChannel.map(FileChannel.MapMode.READ_WRITE, start, size);
             mbb.put(2, (byte) 'a');
+            mbb.force();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
 }
 ```
+
+**MappedByteBuffer的特点与不足**：
+
+- 使用是**堆外的虚拟内存**，因此分配（map）的内存大小不受 JVM 的 -Xmx 参数限制，但是也是有大小限制的。
+- 处理大文件时性能的确很高，但也存内存占用、文件关闭不确定等问题，被其打开的文件只有在垃圾回收的才会被关闭，而且这个时间点是不确定的。
+
+#### 零拷贝
+
+FileChannel的`transferTo()/transferFrom()`底层调用的是`sendfile()`系统调用函数，可以在**内核态实现数据的直接传输**，而不经过用户态，相比于传统I/O，减少了1次从内核态缓冲区拷贝到用户态缓冲区，也减少了1次从用户态拷贝到内核态的过程。
+
+这对于网络文件I/O非常高效，可以直接将文件内容从内核态发送到内核态的Socket缓冲区。比如RocketMQ 和 Kafka这些消息中间件就有用这个发送消息。
+
+应用场景：
+
+> 对于MQ而言，无非就是生产者发送数据到MQ然后持久化到磁盘，之后消费者从MQ读取数据。
+>
+> 对于RocketMQ来说这两个步骤使用的是`mmap+write`，而Kafka则是使用`mmap+write`持久化数据，发送数据使用`sendfile`。
+
+关于零拷贝的两篇文章：[看一遍就理解：零拷贝详解](https://mp.weixin.qq.com/s/SzK_AiVQo09R65GXBLrchg)，[深入剖析Linux IO原理和几种零拷贝机制的实现](https://juejin.cn/post/6844903949359644680)。
+
+注意：以下内容从该文章copy并辅以修饰。
+
+传统I/O流程：4次拷贝：2次CPU拷贝、2次DMA拷贝
+
+![传统IO](JavaSE.assets/传统IO.png)
+
+**零拷贝并不是没有拷贝数据，而是减少用户态/内核态切换次数以及CPU拷贝次数**。零拷贝实现有多种方式，分别是
+
+- mmap+write
+- sendfile
+- 带有DMA收集拷贝功能的sendfile
+
+##### mmap
+
+把内核空间和用户空间的虚拟地址映射到同一个物理地址，从而减少数据拷贝次数！mmap就是用了虚拟内存这个特点，它将内核中的读缓冲区与用户空间的缓冲区进行映射，所有的IO都在内核中完成。
+
+![mmap映射虚拟内存](JavaSE.assets/mmap映射虚拟内存.png)
+
+mmap的实现的零拷贝流程：
+
+![mmap零拷贝执行流程](JavaSE.assets/mmap零拷贝执行流程.png)
+
+mmap实现的零拷贝，I/O发生4次用户态和内核态切换，2次DMA拷贝，1次CPU拷贝。
+
+`mmap`是将读缓冲区的地址和用户缓冲区的地址进行映射，内核缓冲区和应用缓冲区共享，所以节省了一次CPU拷贝，并且用户进程内存是**虚拟的**，只是**映射**到内核的读缓冲区，可以节省一半的内存空间。
+
+Java NIO 对mmap的支持是FileChannel.map()，示例可以直接看上一节。
+
+##### sendfile
+
+`sendfile`是Linux2.1内核版本后引入的一个系统调用函数，sendfile表示在两个文件描述符之间传输数据，它是在**操作系统内核**中操作的，**避免了数据从内核缓冲区和用户缓冲区之间的拷贝操作**。
+
+![sendfile零拷贝执行流程](JavaSE.assets/sendfile零拷贝执行流程.png)
+
+sendfile实现的零拷贝，I/O过程发生2次用户态和内核态切换，2次DMA拷贝和1次CPU拷贝。
+
+##### sendfile+DMA scatter/gather
+
+linux 2.4版本之后，对`sendfile`做了优化升级，引入SG-DMA技术，其实就是对DMA拷贝加入了`scatter/gather`操作，它可以直接从内核空间缓冲区中将数据读取到网卡。使用这个特点搞零拷贝，即还可以多省去**一次CPU拷贝**。
+
+![sendfile+DMA零拷贝执行流程](JavaSE.assets/sendfile+DMA零拷贝执行流程.png)
+
+此方式实现的零拷贝，I/O过程发生2次用户态和内核态切换，2次DMA拷贝，这是真正的零拷贝`Zero-copy`，全程无CPU参与数据传输。
+
+Java中对于`sendfile()`的支持是`FileChannel.transferTo()`和`FileChannel.transferFrom()`，比如下面这个案例，就可以实现文件的高效复制：
+
+```java
+public static void main(String[] args) {
+    try (
+        FileChannel fromChannel = FileChannel.open(Path.of("D:/test1.txt"), StandardOpenOption.READ);
+        FileChannel toChannel = FileChannel.open(Path.of("D:/test2.txt"), StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE)
+    ) {
+        long position = toChannel.size();
+        long count = fromChannel.size();
+        // position参数表示从何处开始写数据,count 表示最多写多少字节
+        toChannel.transferFrom(fromChannel, position, count);
+        // 这里的第一个参数position指从何处开始读数据，并读count字节，然后写入到目标管道
+        fromChannel.transferTo(0L, count, toChannel);
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+```
+
+`sendfile`方法IO数据对用户空间完全不可见，所以适用于完全不需要用户空间处理的情况，比如静态文件服务器。
+
+在网上查资料发现Windows系统不支持sendfile调用，而Linux、Solaris、macOS都支持。
+
+##### 总结
+
+由于CPU和IO速度的差异问题，产生了DMA技术，通过DMA搬运来减少CPU的等待时间。
+
+| 拷贝方式                   | CPU拷贝 | DMA拷贝 | 系统调用     | 上下文切换 | 适用场景                                           |
+| -------------------------- | ------- | ------- | ------------ | ---------- | -------------------------------------------------- |
+| 传统方式（read + write）   | 2       | 2       | read / write | 4          | 小文件                                             |
+| 内存映射（mmap + write）   | 1       | 2       | mmap / write | 4          | 大文件传输                                         |
+| sendfile                   | 1       | 2       | sendfile     | 2          | 用户空间对IO数据不可见，适用于静态文件服务器。     |
+| sendfile + DMA gather copy | 0       | 2       | sendfile     | 2          | 极大地提升了性能，但是需要依赖新的硬件设备支持     |
+| splice                     | 0       | 2       | splice       | 2          | Linux 的管道缓冲机制，可用于两个文件描述符传输数据 |
+
+RocketMQ和Kafka采取的方式对比：Kafka 的索引文件使用的是 mmap + write 方式，数据文件使用的是 sendfile 方式。
+
+| 消息队列 | 零拷贝方式 | 优点                                                         | 缺点                                                         | 应用                               |
+| -------- | ---------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ---------------------------------- |
+| RocketMQ | mmap+write | 适用于小块文件传输，频繁调用时，效率很高                     | 不能很好的利用 DMA 方式，会比 sendfile 多消耗 CPU，内存安全性控制复杂，需要避免 JVM Crash 问题 | 业务级消息这种小块文件             |
+| Kafka    | sendfile   | 可以利用 DMA 方式，消耗 CPU 较少，大块文件传输效率高，无内存安全性问题 | 小块文件效率低于 mmap 方式，只能是 BIO 方式传输，不能使用 NIO 方式 | 系统日志消息这种高吞吐量的大块文件 |
 
 #### FileLock文件锁
 
@@ -2671,8 +2884,7 @@ public class FileChannelTest {
 
 ```java
 public abstract class FileChannel extends AbstractInterruptibleChannel
-    implements SeekableByteChannel, GatheringByteChannel, ScatteringByteChannel
-{
+    implements SeekableByteChannel, GatheringByteChannel, ScatteringByteChannel {
 	/**
      * 获取对该通道文件的 给定区域 的锁定。
      * 此方法的调用将阻塞，直到可以锁定区域，或关闭此通道或中断调用线程
