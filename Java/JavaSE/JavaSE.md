@@ -2282,6 +2282,8 @@ Externalizable接口和Serializable接口功能类似，不过此接口强制用
 
 Java17源码nio包
 
+掘金社区和微信公众号
+
 ## 概述
 
 ### IO概述
@@ -2367,7 +2369,7 @@ public abstract class Buffer {
         return this;
     }
     
-  	/** 重置position为之前标记的mark */
+  	// 重置position为之前标记的mark
     public Buffer reset() {
         int m = mark;
         if (m < 0) throw new InvalidMarkException();
@@ -2428,16 +2430,23 @@ public abstract class Buffer {
 
 ```
 
+3个常用的缓冲区管理方法比较：
+
+| 方法     | 操作                                   | 用途                                       |
+| -------- | -------------------------------------- | ------------------------------------------ |
+| flip()   | `limit=position; position=0; mark=-1;` | 翻转缓冲区，写入缓冲区后，读取缓冲区前调用 |
+| rewind() | `position=0; mark=-1;`                 | 回退缓冲区，多次从缓冲区读数据调用用       |
+| clear()  | `position=0; limit=capacity; mark=-1;` | 清空缓冲区，写入缓冲区前调用               |
+
 > 注意：有两种方式能清空缓冲区：clear()或 compact()方法。clear()方法会清空整个缓冲区。compact()方法只会清除已经读过的数据。任何未读的数据都被移到缓冲区的起始处，新写入的数据将放到缓冲区未读数据的后面。
 >
 > 在上面给出的几个控制position等的方法一般是常用情况，也可以直接用 position(int) 和 limit(int) 方法控制这两个变量以实现业务逻辑。
 
-关于Buffer的使用案例这里不给出，因为下面的通道使用案例会用到ByteBuffer。
-
 ### ByteBuffer
 
-```java
+ByteBuffer是最常用的缓冲区。
 
+```java
 public abstract class ByteBuffer extends Buffer 
     implements Comparable<ByteBuffer> {
     // Cached array base offset
@@ -2493,6 +2502,8 @@ public abstract class ByteBuffer extends Buffer
 ![DirectByteBuffer](JavaSE.assets/DirectByteBuffer.png)
 
 `DirectByteBuffer`的父类是`MappedByteBuffer`，说明将`FileChannel.map()`映射到内存中的映射缓冲区也是直接缓冲区，位于JVM的堆外。它是通过 `Unsafe` 的本地方法 `allocateMemory()` 进行内存分配，底层调用的是操作系统的 malloc() 函数。
+
+这里的直接缓冲区或许看不出来作用，但是它是文件通道FileChannel的内存映射缓冲区，可以看看后面的零拷贝部分。
 
 ## Channel
 
