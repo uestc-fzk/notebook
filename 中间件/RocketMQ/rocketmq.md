@@ -581,21 +581,107 @@ public class MyConsumer {
 }
 ```
 
-# RocketMQ消息存储分析
-
-
-
-# RocketMQ消息发送分析
-
-
-
-# RocketMQ消息消费分析
-
 ## 顺序消息
 
 顺序消息是严格按照发送顺序进行消费的消息(FIFO)。
 
 默认情况下生产者会把消息以Round Robin轮询方式发送到不同的Queue队列；而消费消息时会从多个Queue上拉取消息，这种情况下的发送和消费是不能保证顺序的。如果将消息仅发送到同一个 Queue中，消费时也只从这个Queue上拉取消息，就严格保证了消息的顺序性。
+
+# 消息发送分析
+
+## 发送流程
+
+发送流程如下图：由于图片较大，建议看[processon原图](https://www.processon.com/view/link/6294c102e401fd2eed167ac6)
+
+![消息发送流程](rocketmq.assets/消息发送流程.png)
+
+# 消息存储分析
+
+从存储方式和效率来看，`文件系统>KV存储>关系型数据库`，直接操作文件系统是最快的，但是可靠性是最低的。
+
+- CommitLog
+
+RocketMQ将所有主题topic的消息都存在同一个CommitLog文件中，确保顺序写消息，尽最大化保证消息发送的高性能和高吞吐量，但是消费消息时的拉取性能相对kafka较弱。
+
+- ConsumeQueue
+
+每个消息topic包含多个消息队列，每个消息队列有一个ConsumeQueue文件。queue上每个消息记录的是在CommitLog的物理偏移量。可以看作是基于topic的CommitLog索引文件
+
+ConsumeQueue文件能提供消费者消费消息。该文件**给消费端提供了消息按topic分类的假象**，但**也实现了消息按Queue分区负载均衡**。
+
+- Index
+
+Index索引文件加速消息按key检索的性能，便于消息查询。存储key和消息在CommitLog的物理偏移量phyoffset对应关系。
+
+存储store目录如下：
+
+```shell
+[root@k8s-master store]# ll
+total 24
+-rw-r--r-- 1 root root    0 May 15 21:34 abort
+-rw-r--r-- 1 root root 4096 May 30 22:46 checkpoint
+drwxr-xr-x 2 root root 4096 May 15 22:32 commitlog
+drwxr-xr-x 2 root root 4096 May 30 22:46 config
+drwxr-xr-x 3 root root 4096 May 15 22:32 consumequeue
+drwxr-xr-x 2 root root 4096 May 15 22:32 index
+-rw-r--r-- 1 root root    4 May 15 21:34 lock
+```
+
+> abort：该文件在Broker启动后会自动创建，正常关闭Broker，该文件会自动消失。若在没有启动Broker的情况下，发现这个文件是存在的，则说明之前Broker的关闭是非正常关闭。
+>
+> checkpoint：其中存储着commitlog、consumequeue、index文件的最后刷盘时间戳。
+>
+> commitlog：其中存放着commitlog文件，而消息是写在commitlog文件中的。
+>
+> config：存放着Broker运行期间的一些配置数据。
+>
+> consumequeue：其中存放着consumequeue文件，队列就存放在这个目录中。
+>
+> index：其中存放着消息索引文件indexFile。
+>
+> lock：运行期间使用到的全局资源锁
+
+## CommitLog
+
+ 消息主题及元数据的存储主题，消息内容不定长。
+
+存储目录为`$ROCKET_HOME/store/commitlog`，文件默认大小1GB，文件名长度20为，即起始偏移量，左边补0。第一个文件名为00000000000000000000，第二个为00000000001073741824。
+
+
+
+## ConsumeQueue
+
+消息消费队列的引入目的是提高消息消费性能，并对消息进行topic模拟分类，消费者通过订阅消息队列来消费消息。ConsumeQueue可以看作是基于topic的CommitLog索引文件。
+
+具体存储路劲为`$ROCKET_HOME/store/consumequeue/{topic}/{queueId}/{fileName}`。
+
+消息采用定长20字节设计，30万条目组成，可以像数组一样随机访问，每个文件大约5.72MB。
+
+## Index
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 消息消费分析
+
+
 
 # RocketMQ与Kafka比较
 
