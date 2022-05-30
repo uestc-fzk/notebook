@@ -384,7 +384,7 @@ docker run -d --name rocketmq-dashboard -e "JAVA_OPTS=-Drocketmq.namesrv.addr=�
 
 在官方文档中，还有一个库值得关注rocketmq-spring。
 
-1、引入依赖
+引入依赖
 
 ```xml
 <!--rocketmq 依赖-->
@@ -395,30 +395,43 @@ docker run -d --name rocketmq-dashboard -e "JAVA_OPTS=-Drocketmq.namesrv.addr=�
 </dependency>
 ```
 
-2、生产者
+## 生产者
+
+### 3种发送方式
+
+RocketMQ发送消息有3中方式，分别为：
+
+- 同步发送，即Producer发送消息后会阻塞等待broker返回ACK，消息可靠性最高，效率低
+- 异步发送，Producer发送消息不等待ACK，而是注册一个回调方法处理ACK，有一定可靠性，发送效率高
+- 单向发送，Producer只负责发消息，不等待、不处理MQ的ACK，且此方式broker不会返回ACK，效率最高，可靠性最差
 
 ```java
 /**
  * @author fzk
- * @date 2022-05-15 22:04
+ * @date 2022-05-30 15:02
  */
-public class RocketMQProducer {
+public class MyProducer {
     private static final String TestTopic = "test_topic";
     private static final String TestTag = "test_tag";
+    private static final String TestKey = "test_key";
+    // 需要注意的是NameServer集群需要以分好;分隔
     private static final String NameServer = "124.223.192.8:9876;101.34.5.36:9876";
     private static final String ProducerGroupName = "producerGroup1";
     private static DefaultMQProducer producerGroup = null;
 
     public static void main(String[] args) throws MQClientException, MQBrokerException, RemotingException, UnsupportedEncodingException, InterruptedException {
         try {
-            // 1.初始化生产者
+            // 1.初始化生产者并构造消息
             initProducer();
-            // 2.同步发消息
-            syncSendMsg();
-            // 3.异步发消息
-            asyncSendMsg();
-            // 4.单向发消息
-            oneWaySendMsg();
+            Message msg = new Message(TestTopic, TestTag, TestKey, "hello world".getBytes(StandardCharsets.UTF_8));
+            // 发送方式1：同步发消息
+            syncSendMsg(msg);
+            // 发送方式2：异步发消息
+            asyncSendMsg(msg);
+            /* 发送方式3：单向发消息
+            单向发送消息是指，Producer仅负责发送消息，不等待、不处理MQ的ACK；该发送方式时MQ也不返回ACK。
+            该方式的消息发送效率最高，但消息可靠性较差*/
+            oneWaySendMsg(msg);
             Thread.sleep(1 << 11);// 等待2s等单向发消息执行完成
         } finally {
             // 关闭生产者
@@ -433,7 +446,8 @@ public class RocketMQProducer {
         producerGroup.setNamesrvAddr(NameServer);
         // 3.启动生产者
         producerGroup.start();
-        producerGroup.setRetryTimesWhenSendAsyncFailed(0); // 设置异步发送的失败重试次数
+        // 设置异步发送的失败重试次数，默认2次
+        producerGroup.setRetryTimesWhenSendAsyncFailed(0);
     }
 
     static void closeProducer() {
@@ -442,14 +456,8 @@ public class RocketMQProducer {
     }
 
     // 同步发送消息
-    public static void syncSendMsg() throws UnsupportedEncodingException, MQBrokerException, RemotingException, InterruptedException, MQClientException {
+    public static void syncSendMsg(Message msg) throws UnsupportedEncodingException, MQBrokerException, RemotingException, InterruptedException, MQClientException {
         for (int i = 0; i < 3; i++) {
-            // 创建消息
-            Message msg = new Message(TestTopic /* Topic */,
-                    TestTag /* Tag */,
-                    ("Hello RocketMQ " +
-                            i).getBytes(RemotingHelper.DEFAULT_CHARSET) /* Message body */
-            );
             // 发送消息到某个broker
             SendResult sendResult = producerGroup.send(msg);
             System.out.printf("%s\n", sendResult);
@@ -457,16 +465,12 @@ public class RocketMQProducer {
     }
 
     // 异步发送消息
-    public static void asyncSendMsg() throws InterruptedException {
+    public static void asyncSendMsg(Message msg) throws InterruptedException {
         int messageCount = 3;
         final CountDownLatch countDownLatch = new CountDownLatch(messageCount);
         for (int i = 0; i < messageCount; i++) {
             try {
                 final int index = i;
-                Message msg = new Message(TestTopic,
-                        TestTag,
-                        "k" + i,
-                        "Hello world".getBytes(RemotingHelper.DEFAULT_CHARSET));
                 producerGroup.send(msg, new SendCallback() {
                     @Override
                     public void onSuccess(SendResult sendResult) {
@@ -489,27 +493,46 @@ public class RocketMQProducer {
     }
 
     // 单向发送，即调用此API将直接返回，不等消息结果也不注册回调函数，只管发！
-    public static void oneWaySendMsg() throws UnsupportedEncodingException, RemotingException, InterruptedException, MQClientException {
+    public static void oneWaySendMsg(Message msg) throws UnsupportedEncodingException, RemotingException, InterruptedException, MQClientException {
         for (int i = 0; i < 3; i++) {
-            Message msg = new Message(TestTopic /* Topic */,
-                    TestTag /* Tag */,
-                    ("Hello RocketMQ " +
-                            i).getBytes(RemotingHelper.DEFAULT_CHARSET) /* Message body */
-            );
             producerGroup.sendOneway(msg);
         }
     }
 }
 ```
 
-3、消费者
+### 发送结果
+
+同步发送会阻塞到broker返回ACK，这个被包装到`SendResult`类中
+
+```java
+public class SendResult {
+    private SendStatus sendStatus;// 发送状态
+    private String msgId;// 由broker端生产的消息id，不能确保唯一性
+    private MessageQueue messageQueue;// 这个就包含了3个属性topic、brokerName、queueId
+    private long queueOffset;// 此消息的队内偏移量
+    private String transactionId;
+    private String offsetMsgId;
+    private String regionId;
+    private boolean traceOn = true;
+}
+
+public enum SendStatus {
+    SEND_OK, // 发送成功
+    FLUSH_DISK_TIMEOUT, // 刷盘超时，只有在broke设置刷盘策略为同步刷盘时才可能出现，默认的异步刷盘不会出现
+    FLUSH_SLAVE_TIMEOUT,// slave同步超时，当Broker集群设置的Master-Slave的复制方式为同步复制时才可能出现这种异常状态。异步复制不会出现
+    SLAVE_NOT_AVAILABLE, // 没有可用的Slave。当Broker集群设置为Master-Slave的复制方式为同步复制时才可能出现这种异常状态。异步复制不会出现
+}
+```
+
+## 消费者
 
 ```java
 /**
  * @author fzk
  * @date 2022-05-15 22:24
  */
-public class RocketMQConsumer {
+public class MyConsumer {
     private static final String TestTopic = "test_topic";
     private static final String TestTag = "test_tag";
     private static final String NameServer = "124.223.192.8:9876;101.34.5.36:9876";
@@ -521,9 +544,17 @@ public class RocketMQConsumer {
         consumerGroup = new DefaultMQPushConsumer(ConsumerGroupName);
         // 2.指定NameServer集群
         consumerGroup.setNamesrvAddr(NameServer);
+        // 设置初始偏移量
+        consumerGroup.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
+        /*
+         设置消费模型：
+         1.广播消费：消费者组内每个消费者都能消费每条消息，消费偏移offset保存在消费者端
+         2.集群消费(默认)：消费者组内每条消息只能被一个消费者消费，消费偏移offset保存在broker端
+         */
+        consumerGroup.setMessageModel(MessageModel.CLUSTERING);
         // 3.订阅topic的所有tag消息
         // 标签过滤表达式格式："*tag1 || tag2 || tag3* || *"
-        consumerGroup.subscribe(TestTopic, "*");
+        consumerGroup.subscribe(TestTopic, TestTag);
         // 4.注册消息监听器
         consumerGroup.registerMessageListener(new MessageListenerConcurrently() {
             @Override
@@ -542,7 +573,7 @@ public class RocketMQConsumer {
         try {
             // 1.初始化消费者
             initConsumer();
-            Thread.sleep(1000 * 20);// 休眠20s
+            Thread.sleep(1000 * 60);// 休眠60s
         } finally {
             consumerGroup.shutdown();
         }
@@ -550,3 +581,22 @@ public class RocketMQConsumer {
 }
 ```
 
+## 顺序消息
+
+顺序消息是严格按照发送顺序进行消费的消息(FIFO)。
+
+默认情况下生产者会把消息以Round Robin轮询方式发送到不同的Queue队列；而消费消息时会从多个Queue上拉取消息，这种情况下的发送和消费是不能保证顺序的。如果将消息仅发送到同一个 Queue中，消费时也只从这个Queue上拉取消息，就严格保证了消息的顺序性。
+
+# RocketMQ与Kafka比较
+
+Kafka性能强于RocketMQ
+
+RocketMQ功能性更好：
+
+> 1.消息名称空间
+>
+> 2.三种发送方式--单向发送
+>
+> 3.消息标签tag，消息key+消息时间戳过滤查询
+>
+> 4.顺序消息
