@@ -639,7 +639,92 @@ drwxr-xr-x 2 root root 4096 May 15 22:32 index
 >
 > index：其中存放着消息索引文件indexFile。
 >
-> lock：运行期间使用到的全局资源锁
+> lock：运行期间使用到的全局资源锁，文件锁
+
+## DefaultMessageStore
+
+消息存储服务是`DefaultMessageStore`这个类提供的，其中`CommitLog`的落盘实现在CommitLog类中，`ConsumeQueue`和`Index`文件同理。
+
+此类提供对`Message`消息的接受、写入CommitLog并转发到ConsumeQueue和Index中的功能。当然了这些的具体实现肯定都是在各自的实现类里。
+
+### 启动流程
+
+首先先看`DefaultMessageStore`这个类，下面只给出一些重要的属性：
+
+```java
+/**
+ * 默认消息存储实现类
+ *
+ * @see DefaultMessageStore#start() 启动方法
+ * @see DefaultMessageStore#addScheduleTask() 添加定时任务方法，如定时清理过期文件
+ */
+public class DefaultMessageStore implements MessageStore {
+    // 消息存储配置
+    private final MessageStoreConfig messageStoreConfig;
+    // broker配置
+    private final BrokerConfig brokerConfig;
+    // CommitLog服务
+    private final CommitLog commitLog;
+    // Topic的ConsumeQueue队列
+    private final ConcurrentMap<String/* topic */, ConcurrentMap<Integer/* queueId */, ConsumeQueue>> consumeQueueTable;
+    // ConsumeQueue文件的刷盘服务线程
+    private final FlushConsumeQueueService flushConsumeQueueService;
+    // CommitLog文件过期清理服务
+    private final CleanCommitLogService cleanCommitLogService;
+    // ConsumeQueue文件过期清理服务
+    private final CleanConsumeQueueService cleanConsumeQueueService;
+    // 提供索引服务
+    private final IndexService indexService;
+    // MappedFile分配服务线程
+    private final AllocateMappedFileService allocateMappedFileService;
+    /*
+     转发消息服务线程
+     作用是转发CommitLog文件的更新事件到ConsumeQueue和Index以使其更新
+     */
+    private final ReputMessageService reputMessageService;
+
+    // 瞬态内存池，里面有1个ByteBuffer的队列可用于分配使用
+    private final TransientStorePool transientStorePool;
+
+    // 定时任务调度器，上面两个清理文件服务线程都是以这个进行的定时调度
+    private final ScheduledExecutorService scheduledExecutorService =
+            Executors.newSingleThreadScheduledExecutor(new ThreadFactoryImpl("StoreScheduledThread"));
+}
+```
+
+在这些属性中，需要更加重点关注的是CommitLog服务、刷盘服务线程、转发消息服务线程、瞬态缓冲池。
+
+在上面的属性中，一部分是其内部类：
+
+![DefaultMessageStore内部类](rocketmq.assets/DefaultMessageStore内部类.png)
+
+其它的类大部分在CommitLog中。服务类按功能分散于不同的基类中。
+
+在这个存储类中，重要的方法有它的构造方法`DefaultMessageStore()`和启动方法`start()`
+
+这个建议直接看源码，这里给出我绘制的[DefaultMessageStore启动流程图](https://www.processon.com/view/link/62962c1c5653bb788c85bdaa)
+
+### 发送存储流程
+
+消息在broker收到后的存储流程入口是`org.apache.rocketmq.store.DefaultMessageStore#putMessage(MessageExtBrokerInner)`。
+
+```java
+    /**
+     * TODO 消息存储入口函数
+     *
+     * @param msg Message instance to store
+     */
+    @Override
+    public PutMessageResult putMessage(MessageExtBrokerInner msg) {
+        return waitForPutResult(asyncPutMessage(msg));
+    }
+```
+
+
+
+
+
+
 
 ## CommitLog
 
@@ -658,6 +743,8 @@ drwxr-xr-x 2 root root 4096 May 15 22:32 index
 消息采用定长20字节设计，30万条目组成，可以像数组一样随机访问，每个文件大约5.72MB。
 
 ## Index
+
+
 
 
 
