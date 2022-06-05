@@ -1000,33 +1000,543 @@ public class DefaultMessageStore implements MessageStore {
 
 ### 发送存储流程
 
+#### putMessage
+
 消息在broker收到后的存储流程入口是`org.apache.rocketmq.store.DefaultMessageStore#putMessage(MessageExtBrokerInner)`。
 
 ```java
-    /**
-     * TODO 消息存储入口函数
-     *
-     * @param msg Message instance to store
-     */
-    @Override
-    public PutMessageResult putMessage(MessageExtBrokerInner msg) {
-        return waitForPutResult(asyncPutMessage(msg));
-    }
+/**
+ * TODO 消息存储入口函数
+ */
+@Override
+public PutMessageResult putMessage(MessageExtBrokerInner msg) {
+    return waitForPutResult(asyncPutMessage(msg));
+}
+
+@Override
+public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner msg) {
+    // 1.存储状态检查，不通过将拒绝写入
+    PutMessageStatus checkStoreStatus = this.checkStoreStatus();
+    // 省略部分代码
+    
+    // 1.2 检查消息topic长度和属性长度
+    PutMessageStatus msgCheckStatus = this.checkMessage(msg);
+	// 省略部分代码
+    
+    // 2.向CommitLog服务提交消息
+    long beginTime = this.getSystemClock().now();
+    CompletableFuture<PutMessageResult> putResultFuture = this.commitLog.asyncPutMessage(msg);
+    putResultFuture.thenAccept((result) -> {
+        // 省略消息写入完成后的一些日志打印和计数
+    });
+
+    return putResultFuture;
+}
 ```
 
+#### asyncPutMessage
+
+接下来进入`CommitLog.asyncPutMessage()`
+
+```java
+public CompletableFuture<PutMessageResult> asyncPutMessage(final MessageExtBrokerInner msg) {
+    // 1.消息前置处理: 保存时间、CRC码、topic等
+	// 省略部分代码
+    
+    // 不是事务消息且为延时消息
+    if (tranType == MessageSysFlag.TRANSACTION_NOT_TYPE
+        || tranType == MessageSysFlag.TRANSACTION_COMMIT_TYPE) {
+        // 1.3 延时消息处理：隐藏真正的topic和queueId到属性中，并设置延时topic和queueId
+        if (msg.getDelayTimeLevel() > 0) {
+            if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
+                msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
+            }
+            topic = TopicValidator.RMQ_SYS_SCHEDULE_TOPIC;
+            int queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
+
+            /*  将真正的topic和queueId保存到消息属性中，
+                    并把延迟消息topic和延迟级别的queueId设置到消息的topic和queueId中
+                    从而把消息发到延迟topic的ConsumeQueue里去，进而实现消息的延迟交付*/
+            MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
+            MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
+            msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
+            msg.setTopic(topic);// topic=SCHEDULE_TOPIC_XXXX
+            msg.setQueueId(queueId);// queueId=延迟级别-1
+        }
+    }
+	// 省略部分代码
+    
+    long elapsedTimeInLock = 0;
+    MappedFile unlockMappedFile = null;
+    // 2.加锁：自旋或可重入锁，默认配置是可重入锁
+    putMessageLock.lock();
+    try {
+        // 3.获取当前最后一个CommitLog文件的内存映射文件MappedFile
+        MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
+        long beginLockTimestamp = this.defaultMessageStore.getSystemClock().now();
+        this.beginTimeInLock = beginLockTimestamp;
+
+        // Here settings are stored timestamp, in order to ensure an orderly
+        // global
+        msg.setStoreTimestamp(beginLockTimestamp);
+        // 空或者满，则创建新的CommitLog文件
+        if (null == mappedFile || mappedFile.isFull()) {
+            mappedFile = this.mappedFileQueue.getLastMappedFile(0); // Mark: NewFile may be cause noise
+        }
+       	// 省略创建失败的部分代码
+
+        /* 4.将消息追加到MappedFile中
+           传入的Callback就是真正的写入缓冲区方法实现
+           因为MappedFile是公共服务类，服务CommitLog、ConsumeQueue、index，所以具体写入逻辑由各个实现并作为回调方法传入*/
+        result = mappedFile.appendMessage(msg, this.appendMessageCallback, putMessageContext);
+        // 5.处理追加结果
+        switch (result.getStatus()) {
+            case PUT_OK:
+                break;
+            // 5.2 如果返回结果提示文件已满，则新建CommitLog文件并再次写入消息
+            case END_OF_FILE:
+                unlockMappedFile = mappedFile;
+                 mappedFile = this.mappedFileQueue.getLastMappedFile(0);
+                 return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.CREATE_MAPEDFILE_FAILED, result));
+                }
+                result = mappedFile.appendMessage(msg, this.appendMessageCallback, putMessageContext);
+                break;
+            // 省略其它结果处理
+        }
+
+        elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginLockTimestamp;
+    } finally {
+        beginTimeInLock = 0;
+        // 6.释放锁
+        putMessageLock.unlock();
+    }
+
+    if (elapsedTimeInLock > 500) {
+        log.warn("[NOTIFYME]putMessage in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}", elapsedTimeInLock, msg.getBody().length, result);
+    }
+
+    if (null != unlockMappedFile && this.defaultMessageStore.getMessageStoreConfig().isWarmMapedFileEnable()) {
+        this.defaultMessageStore.unlockMappedFile(unlockMappedFile);
+    }
+
+    PutMessageResult putMessageResult = new PutMessageResult(PutMessageStatus.PUT_OK, result);
+
+    // Statistics
+    storeStatsService.getSinglePutMessageTopicTimesTotal(msg.getTopic()).add(1);
+    storeStatsService.getSinglePutMessageTopicSizeTotal(topic).add(result.getWroteBytes());
+
+    // 7.提交刷盘请求
+    CompletableFuture<PutMessageStatus> flushResultFuture = submitFlushRequest(result, msg);
+    // 8.提交HA主从同步复制请求
+    CompletableFuture<PutMessageStatus> replicaResultFuture = submitReplicaRequest(result, msg);
+	// 返回刷盘请求集合
+    return flushResultFuture.thenCombine(replicaResultFuture, (flushStatus, replicaStatus) -> {
+        if (flushStatus != PutMessageStatus.PUT_OK) {
+            putMessageResult.setPutMessageStatus(flushStatus);
+        }
+        if (replicaStatus != PutMessageStatus.PUT_OK) {
+            putMessageResult.setPutMessageStatus(replicaStatus);
+        }
+        return putMessageResult;
+    });
+}
+```
+
+在第2步首先上锁，默认是可重入锁，也可配置为自旋锁，在能确保消息写入不太频繁的时候，可以改为自旋锁从而避免加锁的资源消耗。
+
+第4步调用MappedFile.appenMessage()方法追加消息到内存映射文件中，并传入了追加回调方法，里面有真正的写入逻辑。
+
+第7步和第8步都只是提交了刷盘或复制请求，将返回的Future对象组合在一起就直接返回了，整个消息发送存储流程就基本结束了。
+
+需要注意的是到这里只是将消息写入了内存映射缓冲区，还没有flush刷盘哦。甚至如果开启了瞬态缓冲区的话，这里仅仅是写入了堆外直接内存，还没有commit到内存映射缓冲区。
+
+#### doAppend
+
+在上面的第4步将消息追加到MappedFile。
+
+```java
+// TODO 将消息追加到MappedFile
+public AppendMessageResult appendMessagesInner(final MessageExt messageExt, final AppendMessageCallback cb,PutMessageContext putMessageContext) {
+    // 1.获取写指针writePosition
+    int currentPos = this.wrotePosition.get();
+	// 2.获取缓冲区切片
+    if (currentPos < this.fileSize) {
+        // 这里其实相当于判断是否开启瞬态缓冲区：
+        // yes-->堆外直接内存缓冲区；no-->CommitLog文件内存映射缓冲区
+        ByteBuffer byteBuffer = writeBuffer != null ? writeBuffer.slice() : this.mappedByteBuffer.slice();
+        byteBuffer.position(currentPos);
+        AppendMessageResult result;
+        if (messageExt instanceof MessageExtBrokerInner) {
+            // 3.写消息
+            result = cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos,
+                    (MessageExtBrokerInner) messageExt, putMessageContext);
+        } else if (messageExt instanceof MessageExtBatch) {
+            result = cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos,
+                    (MessageExtBatch) messageExt, putMessageContext);
+        } else {
+            return new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR);
+        }
+        // 4.写完消息更新writePosition
+        this.wrotePosition.addAndGet(result.getWroteBytes());
+        this.storeTimestamp = result.getStoreTimestamp();
+        return result;
+    }
+	// 省略
+}
+```
+
+MappedFile.appendMessage()方法实际上并没有写入缓冲区的具体实现，因为MappedFile是对文件内存映射缓冲区的包装，具有通用性，同时对CommitLog文件、ConsumeQueue文件、Index文件提供服务，所以只提供了对缓冲区操作的共同方法和属性，如写指针、Commit指针、flush指针等。
+
+它调用的是CommitLog传入的回调方法`CommitLog.DefaultAppendMessageCallback.doAppend()`方法
+
+```java
+/**
+ * 真正写入CommitLog文件
+ */
+public AppendMessageResult doAppend(final long fileFromOffset, final ByteBuffer byteBuffer, final int maxBlank, final MessageExtBrokerInner msgInner, PutMessageContext putMessageContext) {
+    // STORETIMESTAMP + STOREHOSTADDRESS + OFFSET <br>
+    // 1.消息的物理偏移量
+    long wroteOffset = fileFromOffset + byteBuffer.position();
+    // 2.创建全局唯一消息Id，16B
+    // |brokerIP 4B | 端口 4B | 消息偏移量 8B |
+    Supplier<String> msgIdSupplier = () -> {
+        int sysflag = msgInner.getSysFlag();
+        int msgIdLen = (sysflag & MessageSysFlag.STOREHOSTADDRESS_V6_FLAG) == 0 ? 4 + 4 + 8 : 16 + 4 + 8;
+        ByteBuffer msgIdBuffer = ByteBuffer.allocate(msgIdLen);
+        MessageExt.socketAddress2ByteBuffer(msgInner.getStoreHost(), msgIdBuffer);
+        msgIdBuffer.clear();//because socketAddress2ByteBuffer flip the buffer
+        msgIdBuffer.putLong(msgIdLen - 8, wroteOffset);
+        return UtilAll.bytes2string(msgIdBuffer.array());
+    };
+	// 省略部分代码
+    
+    ByteBuffer preEncodeBuffer = msgInner.getEncodedBuff();
+    final int msgLen = preEncodeBuffer.getInt(0);
+
+    // 3.判断是否有足够的空间存消息
+    // 3.1 消息长度+8>剩余空间，则返回文件已满结果，这最终会再次调用appendMessage()方法
+    if ((msgLen + END_FILE_MIN_BLANK_LENGTH) > maxBlank) {
+       	// 省略部分代码，并返回END_OF_FILE
+    }
+
+    // 3.2 写入缓冲区中，可能在CommitLog的内存映射缓冲区；也可能在堆外内存
+    int pos = 4 + 4 + 4 + 4 + 4;
+    // 6 QUEUEOFFSET
+    preEncodeBuffer.putLong(pos, queueOffset);
+    pos += 8;
+    // 7 PHYSICALOFFSET
+    preEncodeBuffer.putLong(pos, fileFromOffset + byteBuffer.position());
+    int ipLen = (msgInner.getSysFlag() & MessageSysFlag.BORNHOST_V6_FLAG) == 0 ? 4 + 4 : 16 + 4;
+    // 8 SYSFLAG, 9 BORNTIMESTAMP, 10 BORNHOST, 11 STORETIMESTAMP
+    pos += 8 + 4 + 8 + ipLen;
+    // refresh store time stamp in lock
+    preEncodeBuffer.putLong(pos, msgInner.getStoreTimestamp());
 
 
+    final long beginTimeMills = CommitLog.this.defaultMessageStore.now();
+    // 4.将消息写入缓冲区
+    byteBuffer.put(preEncodeBuffer);
+    msgInner.setEncodedBuff(null);
+    // 返回 PUT_OK
+    AppendMessageResult result = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, msgLen, msgIdSupplier,
+                                                         msgInner.getStoreTimestamp(), queueOffset, CommitLog.this.defaultMessageStore.now() - beginTimeMills);
 
+    // 省略事务处理
+    return result;
+}
+```
 
+第2步构建全局唯一消息Id，长度是16B：
 
+| 4B       | 4b   | 8B        |
+| -------- | ---- | --------- |
+| brokerIP | port | phyOffset |
+
+第3步，在文件不能写入消息的时候，返回`END_OF_FILE`提示上层方法创建新CommitLog并再次写入消息，然而此文件是没有填充满的哦。默认情况下消息最大4MB，CommitLog文件1GB，利用率并不会因这一点点空间的浪费而降低多少哦。
+
+每个CommitLog文件最少空闲8字节，高4字节存储当前文件剩余空间，低4字节存储魔数`CommitLog.BLANK_MAGIC_CODE`.
+
+`doAppend()`方法是将消息真正写入缓冲区的，写完后将回到`asyncPutMessage()`方法进行刷盘处理。
+
+## MappedFile内存映射文件
+
+在这里开始之前，一定要先看`java.nio`包源码和`零拷贝`知识。
+
+无论是CommitLog、ConsumeQueue还是Index文件，单个文件都设计为固定长度，写满就创建新文件。
+
+RocketMQ用MappedFile来封装存储单个文件的内存映射缓冲区，但单个文件设计为固定大小，所以用MappedFileQueue组织一类相关联的文件。比如所有CommitLog文件对应1个MappedFileQueue，某个Topic下某个队列ConsumeQueue对应1个MappedFileQueue，这些队列可能有1个MappedFile，也可能多个，这取决于文件是否写满。
+
+```java
+public class MappedFileQueue {
+    private final String storePath;// 存储路径
+
+    protected final int mappedFileSize;// 单个MappedFile的大小限制
+
+    protected final CopyOnWriteArrayList<MappedFile> mappedFiles = new CopyOnWriteArrayList<MappedFile>();// MappedFile队列，指向一批文件缓冲区
+
+    private final AllocateMappedFileService allocateMappedFileService;// 文件分配服务
+
+    protected long flushedWhere = 0;// 刷盘指针
+    private long committedWhere = 0;// 提交指针
+    
+    /**
+     * 通过offset定位mappedFile
+     */
+    public MappedFile findMappedFileByOffset(final long offset, final boolean returnFirstOnNotFound) {
+        // 省略外层try/catch
+        MappedFile firstMappedFile = this.getFirstMappedFile();
+        MappedFile lastMappedFile = this.getLastMappedFile();
+        if (firstMappedFile != null && lastMappedFile != null) {
+            if (offset < firstMappedFile.getFileFromOffset() || offset >= lastMappedFile.getFileFromOffset() + this.mappedFileSize) {
+                // 省略日志打印
+            } else {
+                // 减去第一个文件的偏移量
+                int index = (int) ((offset / this.mappedFileSize) - (firstMappedFile.getFileFromOffset() / this.mappedFileSize));
+                MappedFile targetFile = null;
+                try {
+                    targetFile = this.mappedFiles.get(index);
+                } catch (Exception ignored) {
+                }
+				// 省略部分代码
+            }
+        }
+        return null;
+    }
+}
+```
+
+在上面的根据offset定位文件时为什么要先减去第一个MappedFile的偏移量呢，不能用offset/mappedFileSize吗？
+
+> 因为只要是存储在目录下的文件都要创建内存映射文件，会造成极大内存压力和资源浪费，所以RocketMQ会定时删除文件。即第一个文件起始偏移量可能不是`00000000000000000000`.
+
+MappedFileQueue代表的是一类文件，接下来看看MappedFile，这才是真正操作单个文件的：下面列出重要属性
+
+```java
+public class MappedFile extends ReferenceResource {
+    public static final int OS_PAGE_SIZE = 1024 * 4;// 页大小，4KB
+    private static final AtomicLong TOTAL_MAPPED_VIRTUAL_MEMORY = new AtomicLong(0);// 总的映射的虚拟内存大小
+    private static final AtomicInteger TOTAL_MAPPED_FILES = new AtomicInteger(0);// 总的映射文件数
+    protected final AtomicInteger wrotePosition = new AtomicInteger(0);// 当前缓冲区写指针
+    protected final AtomicInteger committedPosition = new AtomicInteger(0);// 当前缓冲区提交指针(只有开启瞬态缓冲区才有效)
+    private final AtomicInteger flushedPosition = new AtomicInteger(0);// 当前缓冲区刷盘指针
+    
+    protected FileChannel fileChannel;// 文件通道，指向文件
+    
+    /**
+     * 如果开启了transientStorePool，则消息会先存储在这个堆外内存缓冲区DirectByteBuffer，再定时commit到fileChannel，再定时落盘
+     * 目的：内存级别的读写分离，写入堆外缓冲区，但消费者从fileChannel中即页缓存中读
+     */
+    protected ByteBuffer writeBuffer = null;// 堆外直接内存缓冲区
+    protected TransientStorePool transientStorePool = null;// 瞬态缓冲池
+    private long fileFromOffset;// 文件开始的偏移量，不一定是0
+    private MappedByteBuffer mappedByteBuffer;// 内存映射缓冲区(写入这里的消息即可读)
+}
+```
+
+这其实就是对`java.nio`下的缓冲区、文件通道的一个简单封装嘛。
+
+注意这个`fileFromOffset`文件开始偏移量，它一般是0或者`fileSize*n`，消息的物理偏移量`phyOffset=fileFromOffset + 文件内offset`
+
+注意内存映射缓冲区和堆外直接内存区域，后者只有在开启瞬态缓冲区后才会使用并且多了一个commit操作。
+
+### 初始化
+
+MappedFile有两个初始化方法：
+
+```java
+// 开启了瞬态缓冲区则走这个
+public void init(final String fileName, final int fileSize,
+                 final TransientStorePool transientStorePool) throws IOException {
+    init(fileName, fileSize);
+    // 向缓冲池申请堆外直接缓冲区
+    this.writeBuffer = transientStorePool.borrowBuffer();
+    this.transientStorePool = transientStorePool;
+}
+// 默认走这个
+private void init(final String fileName, final int fileSize) throws IOException {
+    this.fileName = fileName;
+    this.fileSize = fileSize;
+    this.file = new File(fileName);
+    // 文件名就是文件其实偏移量！
+    this.fileFromOffset = Long.parseLong(this.file.getName());
+    boolean ok = false;
+
+    ensureDirOK(this.file.getParent());
+
+    // 省略try/catch
+    // 打开文件通道
+    this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
+    // 将整个文件都映射到虚拟内存中!(CommitLog文件足足有1GB)
+    this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
+    TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
+    TOTAL_MAPPED_FILES.incrementAndGet();
+    ok = true;
+    // 省略try/catch
+}
+```
+
+可以看到在初始化的时候会将整个文件都映射到虚拟内存中，这对于ConsumeQueue和Index文件还好，对于足足1GB的CommitLog文件是一个很大的开销。
+
+### 提交
+
+Commit操作仅仅在开启瞬态缓冲区后会被调用，因为瞬态缓冲开启后，消息存储流程为：`write到堆外直接内存-->commit到文件通道-->flush落盘`
+
+```java
+/**
+ * 从堆外内存提交到内存映射缓冲区，只有开启瞬态缓冲区有效
+ * @param commitLeastPages 最少commit脏页数
+ */
+public int commit(final int commitLeastPages) {
+	// 省略部分代码
+    if (this.isAbleToCommit(commitLeastPages)) {
+        if (this.hold()) {// 同步方法，互斥
+            commit0();// 将脏页写入文件通道
+            this.release();
+        } else {
+            log.warn("in commit, hold failed, commit offset = " + this.committedPosition.get());
+        }
+    }
+
+    // 如果该文件所有脏页都写入文件通道，则返还堆外缓冲区
+    if (writeBuffer != null && this.transientStorePool != null && this.fileSize == this.committedPosition.get()) {
+        this.transientStorePool.returnBuffer(writeBuffer);
+        this.writeBuffer = null;
+    }
+	// 返回commit指针
+    return this.committedPosition.get();
+}
+// 此方法将堆外直接内存writeBuffer中从上次提交指针-->写指针之间的数据都提交到文件通道中
+protected void commit0() {
+    int writePos = this.wrotePosition.get();
+    int lastCommittedPosition = this.committedPosition.get();
+
+    if (writePos - lastCommittedPosition > 0) {
+        try {
+            ByteBuffer byteBuffer = writeBuffer.slice();
+            byteBuffer.position(lastCommittedPosition);
+            byteBuffer.limit(writePos);
+            this.fileChannel.position(lastCommittedPosition);
+            this.fileChannel.write(byteBuffer);
+            this.committedPosition.set(writePos);
+        } catch (Throwable e) {
+            log.error("Error occurred when commit data to FileChannel.", e);
+        }
+    }
+}
+```
+
+### 刷盘
+
+刷盘即将内存中的数据写入磁盘，永久存储。
+
+```java
+/**
+ * @return 返回当前刷盘指针
+ */
+public int flush(final int flushLeastPages) {
+    // 1.先判断是否满足最少要刷的脏页数
+    if (this.isAbleToFlush(flushLeastPages)) {
+        if (this.hold()) {// 同步方法，互斥
+            int value = getReadPosition();// 如果开启了瞬态缓冲区则commit指针，否则write指针
+            try {
+                //We only append data to fileChannel or mappedByteBuffer, never both.
+                if (writeBuffer != null || this.fileChannel.position() != 0) {
+                    this.fileChannel.force(false);// 开启了瞬态缓冲区，则从文件通道刷
+                } else {
+                    this.mappedByteBuffer.force();// 默认从内存映射缓冲区刷
+                }
+            } catch (Throwable e) {
+                log.error("Error occurred when force data to disk.", e);
+            }
+            // 将读指针(提交指针)设置为刷盘指针
+            this.flushedPosition.set(value);
+            this.release();
+        } else {
+            log.warn("in flush, hold failed, flush offset = " + this.flushedPosition.get());
+            this.flushedPosition.set(getReadPosition());
+        }
+    }
+    return this.getFlushedPosition();
+}
+```
+
+这里需要注意的是读指针的获取，只有提交了的数据(直接写入MappedByteBuffer或提交到FileChannel的数据)才是可读的，才能被消费者看见，因为此时这些数据即使RocketMQ崩了它也是安全的，除非系统崩了。
+
+## TransientStorePool
+
+TransientStorePool从名字看是短暂的存储池。RocketMQ在开启了瞬态缓冲池后，会默认维护5个1GB的DirectByteBuffer内存作为缓冲池，临时存储数据。
+
+开启这个后，消息存储流程为：`write到堆外直接内存-->commit到文件通道-->flush落盘`。
+
+```java
+/**
+ * 瞬态缓冲池
+ */
+public class TransientStorePool {
+    private final int poolSize;// 默认5个
+    private final int fileSize;// 默认1GB
+    private final Deque<ByteBuffer> availableBuffers;// 堆外内存队列
+
+    /**
+     * It's a heavy init method.
+     */
+    public void init() {
+        // 默认申请5个1GB堆外直接内存区域
+        for (int i = 0; i < poolSize; i++) {
+            ByteBuffer byteBuffer = ByteBuffer.allocateDirect(fileSize);
+
+            final long address = ((DirectBuffer) byteBuffer).address();
+            Pointer pointer = new Pointer(address);
+            LibC.INSTANCE.mlock(pointer, new NativeLong(fileSize));
+
+            availableBuffers.offer(byteBuffer);
+        }
+    }
+
+    public void destroy() {
+        for (ByteBuffer byteBuffer : availableBuffers) {
+            final long address = ((DirectBuffer) byteBuffer).address();
+            Pointer pointer = new Pointer(address);
+            LibC.INSTANCE.munlock(pointer, new NativeLong(fileSize));
+        }
+    }
+
+    // 将内存还给缓冲池
+    public void returnBuffer(ByteBuffer byteBuffer) {
+        byteBuffer.position(0);
+        byteBuffer.limit(fileSize);
+        this.availableBuffers.offerFirst(byteBuffer);
+    }
+    // 向缓冲池申请内存
+    public ByteBuffer borrowBuffer() {
+        ByteBuffer buffer = availableBuffers.pollFirst();
+        if (availableBuffers.size() < poolSize * 0.4) {
+            log.warn("TransientStorePool only remain {} sheets.", availableBuffers.size());
+        }
+        return buffer;
+    }
+}
+```
+
+这个初始化方法会申请5个1GB堆外直接内存区放入队列中，销毁方法看不懂。
+
+它会利用com.sun.jna.Library库锁定该批内存，避免被换到交换区，以此提高性能。
 
 ## CommitLog
 
  消息主题及元数据的存储主题，消息内容不定长。
 
-存储目录为`$ROCKET_HOME/store/commitlog`，文件默认大小1GB，文件名长度20为，即起始偏移量，左边补0。第一个文件名为00000000000000000000，第二个为00000000001073741824。
+存储目录为`$ROCKET_HOME/store/commitlog`，文件默认大小1GB，文件名长度20位，即起始偏移量，左边补0。第一个文件名为00000000000000000000，第二个为00000000001073741824。
 
+CommitLog文件中，消息大概这么存的，由于每条条目不像ConsumeQueue或者Index文件那样是定长的，所以不能直接根据第几条消息直接定位，因此ConsumeQueue和Index文件中都保存了消息的物理偏移量而不是逻辑偏移量。
 
+![image-20220603204109968](rocketmq.assets/image-20220603204109968.png)
+
+CommitLog类中有很多重要的内部类：
+
+![CommitLog内部类](rocketmq.assets/CommitLog内部类.png)
+
+CommitLog类中还有很多重要的方法：如写消息、commit消息、刷盘方法等，还有查询消息方法。这些方法会在各个功能点原理中介绍，这里不赘述。 
 
 ## ConsumeQueue
 
@@ -1034,33 +1544,1372 @@ public class DefaultMessageStore implements MessageStore {
 
 具体存储路劲为`$ROCKET_HOME/store/consumequeue/{topic}/{queueId}/{fileName}`。
 
-消息采用定长20字节设计，30万条目组成，可以像数组一样随机访问，每个文件大约5.72MB。
+消息采用定长20字节设计，30万条目组成，可以像数组一样随机访问，**每个文件大约5.72MB**。
+
+| 8B                      | 4B       | 8B        |
+| ----------------------- | -------- | --------- |
+| 消息物理偏移量phyOffset | 文件大小 | tag哈希码 |
+| phyOffset               | 文件大小 | tag哈希码 |
+
+ConsumeQueue文件是提供给消费者根据topic消费消息的，那么重要的方法就是查询消息：
+
+```java
+/**
+ * 根据此消息队列起始消息索引查询之后所有条目
+ * @param startIndex 起始索引
+ */
+public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
+    int mappedFileSize = this.mappedFileSize;
+    long offset = startIndex * CQ_STORE_UNIT_SIZE;
+    if (offset >= this.getMinLogicOffset()) {
+        MappedFile mappedFile = this.mappedFileQueue.findMappedFileByOffset(offset);
+        if (mappedFile != null) {
+            // 这里会返回从给定位置到readPosition指针之间的缓冲区切片
+            return mappedFile.selectMappedBuffer((int) (offset % mappedFileSize));
+        }
+        
+    }
+    return null;
+}
+```
+
+此方法可实现顺序读消息，根据返回的所有消息索引条目，遍历并取出物理偏移量再去CommitLog文件查询消息内容。
+
+ConsumeQueue也提供根据时间戳查消息在此消息队列中的偏移量，从上面的存储条目来看，并没有保存时间戳，那这个是如何实现的呢？
+
+大致步骤就是：
+
+1、先根据时间搓定位到ConsumeQueue的MappedFileQueue队列中的哪个MappedFile
+
+2、在这个队列中进行二分查找，将mid索引的条目指向的物理消息的存储时间戳从CommitLog文件中查出来，进行比较，进行下一循环判断。
+
+ConsumeQueue可以看做是索引文件，而CommitLog则是物理文件，每次去CommitLog中查就类似于MySQL回表查询。
+
+具体方法实现可以看方法`ConsumeQueue.getOffsetInQueueByTime(final long timestamp) `
 
 ## Index
 
+Index文件是以消息的key为索引，消息物理偏移量为value的索引文件。这一个Index文件能存储消息索引条目为2000万。
 
+index文件大小=`40B+500万*4B+2000万*20B`
 
+index文件布局，[原图](https://www.processon.com/view/link/629a14cde0b34d0728fdf19b)
 
+![index文件布局](http://assets.processon.com/chart_image/629a011d079129763c17d4d6.png)
 
+```java
+/**
+ * 索引文件
+ */
+public class IndexFile {
+    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
+    private static int hashSlotSize = 4;// 哈希槽大小
+    private static int indexSize = 20;// index条目大小
+    private static int invalidIndex = 0;// 非法index，必须将0设为非法index，因为哈希槽数组默认初始值都是0
+    private final int hashSlotNum;// 默认500w
+    private final int indexNum;// 默认2000w
+    private final MappedFile mappedFile;// 代表index文件
+    private final MappedByteBuffer mappedByteBuffer;// index文件的内存映射缓冲区
+    private final IndexHeader indexHeader;// 文件头
+}
+```
 
+这些属性还是比较常规的，接下来分析index文件如果存入key索引并查询的。
 
+### putKey
 
+```java
+/**
+ * 存入key到index文件缓冲区
+ * @param key 消息key
+ * @param phyOffset 消息物理偏移量
+ * @param storeTimestamp 消息存储时间搓
+ */
+public boolean putKey(final String key, final long phyOffset, final long storeTimestamp) {
+    if (this.indexHeader.getIndexCount() < this.indexNum) {
+        // 1.计算key的哈希码从而计算待存入的哈希槽
+        int keyHash = indexKeyHashMethod(key);
+        int slotPos = keyHash % this.hashSlotNum;
+        // 待存入哈希槽的index文件绝对定位
+        int absSlotPos = IndexHeader.INDEX_HEADER_SIZE + slotPos * hashSlotSize;
 
+        try {
+            // 2.取出哈希槽原来的值
+            int slotValue = this.mappedByteBuffer.getInt(absSlotPos);
+            // 如果小于等于0或大于最大索引数，则说明此哈希槽没有被使用
+            if (slotValue <= invalidIndex || slotValue > this.indexHeader.getIndexCount()) {
+                slotValue = invalidIndex;
+            }
+            // 3.计算待存入索引条目的时间戳差值
+            long timeDiff = storeTimestamp - this.indexHeader.getBeginTimestamp();
 
+            timeDiff = timeDiff / 1000;
 
+            if (this.indexHeader.getBeginTimestamp() <= 0) {
+                timeDiff = 0;
+            } else if (timeDiff > Integer.MAX_VALUE) {
+                timeDiff = Integer.MAX_VALUE;
+            } else if (timeDiff < 0) {
+                timeDiff = 0;
+            }
 
+            // 4.计算即将存入的index条目在index文件的绝对位置
+            int absIndexPos =
+                IndexHeader.INDEX_HEADER_SIZE + this.hashSlotNum * hashSlotSize
+                + this.indexHeader.getIndexCount() * indexSize;
 
+            // 5.写入index索引条目
+            this.mappedByteBuffer.putInt(absIndexPos, keyHash);
+            this.mappedByteBuffer.putLong(absIndexPos + 4, phyOffset);
+            this.mappedByteBuffer.putInt(absIndexPos + 4 + 8, (int) timeDiff);
+            // 将哈希槽旧值写入索引条目的pre index no，以形成链表解决哈希冲突
+            this.mappedByteBuffer.putInt(absIndexPos + 4 + 8 + 4, slotValue);
 
+            // 6.更新哈希槽指向该索引条目
+            this.mappedByteBuffer.putInt(absSlotPos, this.indexHeader.getIndexCount());
 
+            // 设置最小存储时间戳和最小物理偏移量
+            if (this.indexHeader.getIndexCount() <= 1) {
+                this.indexHeader.setBeginPhyOffset(phyOffset);
+                this.indexHeader.setBeginTimestamp(storeTimestamp);
+            }
+            // 如果是新哈希槽被使用了，则增加使用哈希槽数量
+            if (invalidIndex == slotValue) {
+                this.indexHeader.incHashSlotCount();
+            }
+            // 增加index使用个数
+            this.indexHeader.incIndexCount();
+            // 更新最大物理偏移量和最大存储时间戳
+            this.indexHeader.setEndPhyOffset(phyOffset);
+            this.indexHeader.setEndTimestamp(storeTimestamp);
 
+            return true;
+        } catch (Exception e) {
+            log.error("putKey exception, Key: " + key + " KeyHashCode: " + key.hashCode(), e);
+        }
+    } else {
+        log.warn("Over index file capacity: index count = " + this.indexHeader.getIndexCount()
+                 + "; index max num = " + this.indexNum);
+    }
 
+    return false;
+}
+```
 
+从第1步和第5步可以推断出，保存的是key的哈希码，也就是根据key来查消息的话，实际是根据哈希码查的，不一定完全匹配key，在查找到消息后还得验证key值。之所以存储哈希码而不是key，是为了索引条目定长20B。
 
+从第2步和第5步可以推动出，该index文件解决哈希冲突用的链表法，在2000w索引条目500w哈希槽情况下，平均链表长度为4。这样要求我们要处理好消息的key，不然可能会导致查询消息时遍历超长链表。
 
+### seletePhyOffset
 
+```java
+/**
+ * 根据key查找消息偏移量
+ * @param phyOffsets 用于返回的查找到的消息物理偏移量
+ * @param key 消息key
+ * @param maxNum 最多查几条
+ * @param begin 开始时间戳
+ * @param end 结束时间戳
+ */
+public void selectPhyOffset(final List<Long> phyOffsets, final String key, final int maxNum,
+                            final long begin, final long end) {
+    if (this.mappedFile.hold()) {// 同步方法，互斥
+        // 1.计算key的哈希码，进而计算哈希槽及其绝对位置
+        int keyHash = indexKeyHashMethod(key);
+        int slotPos = keyHash % this.hashSlotNum;
+        int absSlotPos = IndexHeader.INDEX_HEADER_SIZE + slotPos * hashSlotSize;
 
+        try {
+            // 2.获取哈希槽的值，如果非法则直接返回
+            int slotValue = this.mappedByteBuffer.getInt(absSlotPos);
+            if (slotValue <= invalidIndex || slotValue > this.indexHeader.getIndexCount()
+                || this.indexHeader.getIndexCount() <= 1) {
+            } else {
+                // 3.沿链表遍历
+                for (int nextIndexToRead = slotValue; ; ) {
+                    if (phyOffsets.size() >= maxNum) {
+                        break;
+                    }
+                    // 4.获取索引条目内容
+                    int absIndexPos =
+                        IndexHeader.INDEX_HEADER_SIZE + this.hashSlotNum * hashSlotSize
+                        + nextIndexToRead * indexSize;
+
+                    int keyHashRead = this.mappedByteBuffer.getInt(absIndexPos);
+                    long phyOffsetRead = this.mappedByteBuffer.getLong(absIndexPos + 4);
+
+                    long timeDiff = this.mappedByteBuffer.getInt(absIndexPos + 4 + 8);
+                    int prevIndexRead = this.mappedByteBuffer.getInt(absIndexPos + 4 + 8 + 4);
+
+                    if (timeDiff < 0) {
+                        break;
+                    }
+
+                    timeDiff *= 1000L;
+                    // 5.开始和结束时间戳是否匹配
+                    long timeRead = this.indexHeader.getBeginTimestamp() + timeDiff;
+                    boolean timeMatched = (timeRead >= begin) && (timeRead <= end);
+                    // 匹配则加入结果集
+                    if (keyHash == keyHashRead && timeMatched) {
+                        phyOffsets.add(phyOffsetRead);
+                    }
+                    // 6.如果链表到尾或此消息时间戳已经小于开始时间戳了则退出循环
+                    if (prevIndexRead <= invalidIndex
+                        || prevIndexRead > this.indexHeader.getIndexCount()
+                        || prevIndexRead == nextIndexToRead || timeRead < begin) {
+                        break;
+                    }
+
+                    nextIndexToRead = prevIndexRead;
+                }
+            }
+        } catch (Exception e) {
+            log.error("selectPhyOffset exception ", e);
+        } finally {
+            this.mappedFile.release();
+        }
+    }
+}
+```
+
+大致步骤：`key-->定位哈希槽-->Index条目-->沿链表向上找`
+
+此方法仅仅只是将key的哈希码与开始时间戳和结束时间戳一起过滤后得到的消息物理偏移量集合。上层方法如果需要根据key查消息还得去CommitLog查询消息key进一步验证。
+
+## 消息转发reput
+
+消息转发由`DefaultMessageStore`类的内部类`ReputMessageService`转发服务线程类实现。
+
+ConsumeQueue和Index文件都是基于CommitLog文件构建，消息写入CommitLog文件后，需要即使更新ConsumeQueue和Index文件。RocketMQ通过开启一个ReputMessageService的线程来定时转发CommitLog文件的更新内容。
+
+### 转发线程服务
+
+![DefaultMessageStore内部类](rocketmq.assets/DefaultMessageStore内部类.png)
+
+```java
+/**
+ * TODO 消息转发服务线程
+ */
+class ReputMessageService extends ServiceThread {
+
+    private volatile long reputFromOffset = 0;// 消息转发偏移量
+	/** 此方法判断是否需要进行消息转发 */
+    private boolean isCommitLogAvailable() {
+        return this.reputFromOffset < DefaultMessageStore.this.commitLog.getMaxOffset();
+    }
+	
+    @Override
+    public void run() {
+        DefaultMessageStore.log.info(this.getServiceName() + " service started");
+
+        while (!this.isStopped()) {
+            try {
+                Thread.sleep(1);// 每毫秒启动1次
+                this.doReput();// 此方法的详细内容在下面给出
+            } catch (Exception e) {
+                DefaultMessageStore.log.warn(this.getServiceName() + " service has exception. ", e);
+            }
+        }
+
+        DefaultMessageStore.log.info(this.getServiceName() + " service end");
+    }
+}
+```
+
+存储服务`DefaultMessageStore.start()`会初始化转发偏移量reputFromOffset，并启动此转发线程：
+
+```java
+// 2.1 计算转发偏移量
+long maxPhysicalPosInLogicQueue = commitLog.getMinOffset();
+for (ConcurrentMap<Integer, ConsumeQueue> maps : this.consumeQueueTable.values()) {
+    for (ConsumeQueue logic : maps.values()) {
+        if (logic.getMaxPhysicOffset() > maxPhysicalPosInLogicQueue) {
+            maxPhysicalPosInLogicQueue = logic.getMaxPhysicOffset();
+        }
+    }
+}
+// 省略部分代码，一些检查和日志打印
+
+this.reputMessageService.setReputFromOffset(maxPhysicalPosInLogicQueue);
+```
+
+从这里大致能判断`reputFromOffset=所有消费队列最大物理偏移量`。
+
+此检查服务的`run()`会每隔1ms进行1次转发调度`doReput()`：
+
+```java
+private void doReput() {
+    // 省略部分代码
+    
+    // 1.有可以转发的消息便一直循环
+    for (boolean doNext = true; this.isCommitLogAvailable() && doNext; ) {
+		// 省略部分代码
+        // 2.从CommitLog获取从reputFromOffset到readPosition之间的数据切片
+        SelectMappedBufferResult result = DefaultMessageStore.this.commitLog.getData(reputFromOffset);
+
+        // 省略外层if/else try/catch
+        this.reputFromOffset = result.getStartOffset();
+        // 3.从切片中循环读取消息，并创建DispatchRequest对象
+        for (int readSize = 0; readSize < result.getSize() && doNext; ) {
+            DispatchRequest dispatchRequest=DefaultMessageStore.this.commitLog.
+                checkMessageAndReturnSize(result.getByteBuffer(), false, false);
+            int size = dispatchRequest.getBufferSize() == -1 ? dispatchRequest.getMsgSize() : dispatchRequest.getBufferSize();
+
+            if (dispatchRequest.isSuccess()) {
+                if (size > 0) {
+                    // 4.为每个DispatchRequest调用转发接口CommitLogDispatcher列表
+                    // 目前有CommitLogDispatcherBuildIndex和CommitLogDispatcherBuildConsumeQueue
+                    DefaultMessageStore.this.doDispatch(dispatchRequest);
+
+                   // 省略部分代码
+                    // 5.更新reputFromOffset
+                    this.reputFromOffset += size;
+                    readSize += size;
+                  	// 省略部分代码
+                } 
+          	// 省略外层if/else try/catch
+            }
+        }
+    } 
+	// 省略外层if/else try/catch
+}
+// 调用转发接口的dispatch()方法进行消息转发
+public void doDispatch(DispatchRequest req) {
+    for (CommitLogDispatcher dispatcher : this.dispatcherList) {
+        dispatcher.dispatch(req);
+    }
+}
+```
+
+转发线程服务每1ms调用1次转发方法，从CommitLog中查询未转发的消息，并依次调用`CommitLogDispatcherBuildConsumeQueue.dispatch()`和`CommitLogDispatcherBuildIndex.dispatch()`
+
+### 更新ConsumeQueue
+
+先看`CommitLogDispatcherBuildConsumeQueue.dispatch()`，如和将消息更新的：
+
+```java
+/**
+ * 更新ConsumeQueue
+ */
+class CommitLogDispatcherBuildConsumeQueue implements CommitLogDispatcher {
+
+    @Override
+    public void dispatch(DispatchRequest request) {
+        final int tranType = MessageSysFlag.getTransactionValue(request.getSysFlag());
+        switch (tranType) {
+                // 不是事务消息或事务的提交消息则进行构建
+            case MessageSysFlag.TRANSACTION_NOT_TYPE:
+            case MessageSysFlag.TRANSACTION_COMMIT_TYPE:
+                DefaultMessageStore.this.putMessagePositionInfo(request);
+                break;
+                // 否则忽略
+            case MessageSysFlag.TRANSACTION_PREPARED_TYPE:
+            case MessageSysFlag.TRANSACTION_ROLLBACK_TYPE:
+                break;
+        }
+    }
+}
+// 然后调用DefaultMessageStore的这个方法进行写入
+public void putMessagePositionInfo(DispatchRequest dispatchRequest) {
+    // 1.找到ConsumeQueue
+    ConsumeQueue cq = this.findConsumeQueue(dispatchRequest.getTopic(), dispatchRequest.getQueueId());
+    // 2.写入ConsumeQueue文件，会调用ConsumeQueue的方法来写入
+    cq.putMessagePositionInfoWrapper(dispatchRequest, checkMultiDispatchQueue(dispatchRequest));
+}
+```
+
+怎么感觉跳来跳去的？接下来又跳到ConsumeQueue类中：
+
+```java
+/**
+ * 真正写入ConsumeQueue文件
+ *
+ * @param offset   消息物理偏移量
+ * @param size     消息大小
+ * @param tagsCode 消息tag哈希码
+ * @param cqOffset 消息在此ConsumeQueue的偏移量，即第几条消息
+ */
+private boolean putMessagePositionInfo(final long offset, final int size, final long tagsCode, final long cqOffset) {
+	// 省略部分检查代码
+    // 1.准备数据缓存
+    this.byteBufferIndex.flip();
+    this.byteBufferIndex.limit(CQ_STORE_UNIT_SIZE);
+    this.byteBufferIndex.putLong(offset);// 消息物理偏移量
+    this.byteBufferIndex.putInt(size);// 消息大小
+    this.byteBufferIndex.putLong(tagsCode);// 消息tag哈希码
+
+    final long expectLogicOffset = cqOffset * CQ_STORE_UNIT_SIZE;// 计算在ConsumeQueue文件中的偏移量
+    // 2.获取最后一个MappedFile文件
+    MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile(expectLogicOffset);
+    if (mappedFile != null) {
+		// 省略很多检查代码
+        
+        this.maxPhysicOffset = offset + size;
+        // 3.调用MappedFile的appendMessage方法将数组数据直接追加到文件末尾
+        return mappedFile.appendMessage(this.byteBufferIndex.array());
+    }
+    return false;
+}
+```
+
+可以看到消费队列的写入的条目就是20字节，并且直接写入文件末尾。
+
+| 8B                      | 4B       | 8B        |
+| ----------------------- | -------- | --------- |
+| 消息物理偏移量phyOffset | 文件大小 | tag哈希码 |
+| phyOffset               | 文件大小 | tag哈希码 |
+
+### 更新Index
+
+分析完ConsumeQueue的更新，接下来分析Index的更新，它的更新类为：`DefaultMessageStore.CommitLogDispatcherBuildIndex`
+
+```java
+/**
+ * TODO 更新Index转发类
+ */
+class CommitLogDispatcherBuildIndex implements CommitLogDispatcher {
+
+    @Override
+    public void dispatch(DispatchRequest request) {
+        if (DefaultMessageStore.this.messageStoreConfig.isMessageIndexEnable()) {
+            DefaultMessageStore.this.indexService.buildIndex(request);
+        }
+    }
+}
+```
+
+接下来进入`IndexService.buildIndex()`方法：
+
+```java
+/**
+ * @param req
+ * @see IndexService#putKey(IndexFile, DispatchRequest , String )
+ */
+public void buildIndex(DispatchRequest req) {
+    // 1.获取index文件
+    IndexFile indexFile = retryGetAndCreateIndexFile();
+    if (indexFile != null) {
+        // 2.一堆检查
+        // 省略
+        
+        // 3.唯一key的索引添加
+        if (req.getUniqKey() != null) {
+            // 以topic+"#"+uniqKey作为key构建索引
+            indexFile = putKey(indexFile, msg, buildKey(topic, req.getUniqKey()));
+            if (indexFile == null) {
+                log.error("putKey error commitlog {} uniqkey {}", req.getCommitLogOffset(), req.getUniqKey());
+                return;
+            }
+        }
+        // 4.对keys以空格分割，对每个key都添加索引
+        if (keys != null && keys.length() > 0) {
+            String[] keyset = keys.split(MessageConst.KEY_SEPARATOR);
+            for (int i = 0; i < keyset.length; i++) {
+                String key = keyset[i];
+                if (key.length() > 0) {
+                    indexFile = putKey(indexFile, msg, buildKey(topic, key));
+                    if (indexFile == null) {
+                        log.error("putKey error commitlog {} uniqkey {}", req.getCommitLogOffset(), req.getUniqKey());
+                        return;
+                    }
+                }
+            }
+        }
+    } else {
+        log.error("build index error, stop building index");
+    }
+}
+```
+
+这里构建索引的时候，如果有唯一key，则以`topic+#+uniqkey`作为key插入索引。
+
+第4步看出，消息是可以以空格方式传入多个key的，并且会对每个key都构建索引，这对于用key查询消息是很有用处的。
+
+putKey()方法呢可以看上面Index部分，具体描述了Index索引的插入和查询过程。
+
+## 刷盘
+
+RocketMQ的读写基于java NIO 内存映射机制。
+
+这里只分析CommitLog文件的刷盘，ConsumeQueue和Index文件刷盘机制类似。
+
+![CommitLog内部类](rocketmq.assets/CommitLog内部类.png)
+
+在上面的DefaultMessageStore的发送存储流程分析的部分，消息在写入内存后，会提交刷盘请求，将根据刷盘策略(同步刷盘或异步刷盘)在不同时间刷盘。
+
+```java
+/**
+ * 提交刷盘请求
+ * 此方法在消息写入内存后被调用
+ *
+ * @param result     追加消息结果
+ * @param messageExt 消息
+ */
+public CompletableFuture<PutMessageStatus> submitFlushRequest(AppendMessageResult result, MessageExt messageExt) {
+    // Synchronization flush
+    // TODO 1.同步刷盘
+    if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
+        final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
+        // 1.1 默认发消息要等待ACK确认，即等待消息存储成功
+        if (messageExt.isWaitStoreMsgOK()) {
+            // 构造刷盘请求GroupCommitRequest
+            GroupCommitRequest request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes(),
+                                                                this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
+            // 注册一个刷盘超时检查
+            flushDiskWatcher.add(request);
+            // 提交刷盘请求
+            service.putRequest(request);
+            return request.future();// 返回future对象，调用者会主动去等待这个future对象
+        } else {
+            // 1.2 单向发送方式，不需要等待消息是否存储成功，无须ACK
+            service.wakeup();// 唤醒刷盘服务即可
+            return CompletableFuture.completedFuture(PutMessageStatus.PUT_OK);// 这里直接返回了ok
+        }
+    }
+    // Asynchronous flush
+    // TODO 2.异步刷盘，默认
+    else {
+        // 2.1 如果没开瞬态缓冲区，则缓存异步刷盘线程
+        if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
+            flushCommitLogService.wakeup();// 缓存异步刷盘线程
+        } else {
+            // 2.2 开启了瞬态缓冲区，则缓存提交线程
+            commitLogService.wakeup();// 唤醒提交线程
+        }
+        return CompletableFuture.completedFuture(PutMessageStatus.PUT_OK);
+    }
+}
+```
+
+在同步刷盘且需要返回ACK情况下，则发送者线程会等待消息落盘才能返回。其他情况都是可以直接返回PUT_OK了。
+
+其实在异步刷盘情况下，
+
+### 同步刷盘
+
+同步刷盘用的是`CommitLog.GroupCommitService`服务类：默认情况下，CommitLog服务启动不会启动这个线程，而是启动异步刷盘服务线程，如果刷盘策略配置为同步刷盘，才会启动这个线程服务。
+
+```java
+/**
+ * GroupCommit Service
+ * TODO: 同步刷盘服务线程
+ * 从名字就能看出，这个是组提交方式进行的刷盘，在读队列和写队列的交换下，每次刷盘都会刷一批请求
+ *
+ * @see GroupCommitService#run()
+ * @see GroupCommitService#doCommit() 刷盘请求处理
+ */
+class GroupCommitService extends FlushCommitLogService {
+    // 写队列
+    private volatile LinkedList<GroupCommitRequest> requestsWrite = new LinkedList<GroupCommitRequest>();
+    // 读队列
+    private volatile LinkedList<GroupCommitRequest> requestsRead = new LinkedList<GroupCommitRequest>();
+    private final PutMessageSpinLock lock = new PutMessageSpinLock();// 自旋锁，内部用CAS+自旋实现
+        
+    // 提交刷盘请求并唤醒刷盘线程
+    // 这里为什么在已经有自旋锁的情况下还要用同步方法呢？
+    public synchronized void putRequest(final GroupCommitRequest request) {
+        lock.lock();
+        try {
+            // 刷盘请求直接放入写队列即可
+            this.requestsWrite.add(request);
+        } finally {
+            lock.unlock();
+        }
+        // 唤醒刷盘线程
+        this.wakeup();
+    }
+    
+    public void run() {
+        CommitLog.log.info(this.getServiceName() + " service started");
+
+        while (!this.isStopped()) {
+            try {
+                /*
+                    刷盘线程检查唤醒状态：
+                    唤醒：则马上进行读写队列交换，处理下一批
+                    否则：
+                        等待唤醒 或 10ms 超时
+                        等待完成会调用onWaitEnd()方法，交换读写队列
+                     */
+                this.waitForRunning(10);
+
+                this.doCommit();// 将读队列里的刷盘请求都处理完成
+            } catch (Exception e) { /*省略部分代码*/ }
+        }
+		// 省略部分代码
+    }
+    
+    // 等待结束，交换读写队列
+    @Override
+    protected void onWaitEnd() {
+        this.swapRequests();
+    }
+    /* 这个设计有点巧妙哈
+         提供两个队列: 读队列和写队列
+         提交刷盘请求都锁定放入写队列
+         而执行刷盘操作的时候则从读队列中读取请求
+         读队列刷完后，将写队列和读队列进行交换
+         避免了任务提交和任务执行的锁冲突*/
+    private void swapRequests() {
+        lock.lock();// 这里想拿到锁，得和提交刷盘请求的线程竞争，高并发的时候可以让写队列多屯几个请求
+        try {
+            // 交换读写队列
+            LinkedList<GroupCommitRequest> tmp = this.requestsWrite;
+            this.requestsWrite = this.requestsRead;
+            this.requestsRead = tmp;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // 真正处理刷盘请求的方法
+    private void doCommit() {
+        // 1.处理读队列刷盘请求，并设置其刷盘结果：ok或超时
+        if (!this.requestsRead.isEmpty()) {
+            for (GroupCommitRequest req : this.requestsRead) {
+                // There may be a message in the next file, so a maximum of
+                // two times the flush
+                // 1.1 先检查刷盘指针，因为之前的刷盘请求可能早就把这个请求的偏移量刷了
+                boolean flushOK = CommitLog.this.mappedFileQueue.getFlushedWhere() >= req.getNextOffset();
+                // 1.2 刷盘，最终会调用MapperByteBuffer.force()或fileChannel.force()方法落盘，这个一刷就是内存映射缓冲区的全部更新内容哦!
+                for (int i = 0; i < 2 && !flushOK; i++) {
+                    CommitLog.this.mappedFileQueue.flush(0);
+                    flushOK = CommitLog.this.mappedFileQueue.getFlushedWhere() >= req.getNextOffset();
+                }
+                // 1.3 通知刷盘结果：调用wakeupCustomer()方法将结果放入future中，这会使得消费者线程唤醒
+                req.wakeupCustomer(flushOK ? PutMessageStatus.PUT_OK : PutMessageStatus.FLUSH_DISK_TIMEOUT);
+            }
+
+            // 2.更新checkPoint的刷盘时间戳
+            long storeTimestamp = CommitLog.this.mappedFileQueue.getStoreTimestamp();
+            if (storeTimestamp > 0) {
+                CommitLog.this.defaultMessageStore.getStoreCheckpoint().setPhysicMsgTimestamp(storeTimestamp);
+            }
+
+            this.requestsRead = new LinkedList<>();
+        } else {
+            // Because of individual messages is set to not sync flush, it
+            // will come to this process
+            CommitLog.this.mappedFileQueue.flush(0);
+        }
+    }
+}
+```
+
+从上面的代码可以看出大致同步刷盘步骤：
+
+1、`GroupCommitService`线程等待唤醒或10ms超时；
+
+2、生产者发送的消息被写入内存后，会提交刷盘请求，将请求放入写队列，并唤醒同步刷盘线程；
+
+3、同步刷盘线程被唤醒，将读写队列交换，然后处理交换后的读队列中的请求；
+
+4、刷盘处理，调用MappedFile.flush()方法，根据上面对MappedFile的分析可知，此方法最终会根据是否开启瞬态缓冲区分别调用`FileChannel.force()`或`MapperByteBuffer.force()`；
+
+5、更新checkpoint文件的刷盘时间戳；
+
+6、返回刷盘结果PUT_OK。
+
+### 异步刷盘
+
+默认配置是异步刷盘，同步刷盘的话每次消息都要进行刷盘，开销较大，对于生产者而言，ACK延迟也较高。
+
+异步刷盘服务由`FlushRealTimeService`提供，默认情况下，它会在CommitLog服务启动的时候被CommitLog服务选择启动。
+
+注意：由于开启了
+
+```java
+/**
+ * TODO 异步刷盘服务线程
+ * 每500ms循环1次刷盘
+ * 两种刷盘策略：
+ *   1.达到4页脏数据
+ *   2.刷盘间隔10s
+ */
+class FlushRealTimeService extends FlushCommitLogService {
+    private long lastFlushTimestamp = 0;
+    private long printTimes = 0;
+
+    public void run() {
+        CommitLog.log.info(this.getServiceName() + " service started");
+        while (!this.isStopped()) {
+            // 1.取出4个参数
+            // 默认false，表await()等待，true表Thread.sleep()等待
+            boolean flushCommitLogTimed = CommitLog.this.defaultMessageStore.getMessageStoreConfig().isFlushCommitLogTimed();
+            // 等待间隔，默认500ms
+            int interval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushIntervalCommitLog();
+
+            /* 两种刷盘策略：
+                    1.达到4页脏数据
+                    2.刷盘间隔10s
+                 */
+            // 最少刷盘脏页数
+            int flushPhysicQueueLeastPages = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushCommitLogLeastPages();// 默认4
+            // 刷盘间隔
+            int flushPhysicQueueThoroughInterval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getFlushCommitLogThoroughInterval();// 默认1000*10
+
+            boolean printFlushProgress = false;
+
+            // Print flush progress
+            // 2.判断是否达到最大刷盘间隔10s，达到的话将忽略脏页数量而强制刷盘
+            long currentTimeMillis = System.currentTimeMillis();
+            if (currentTimeMillis >= (this.lastFlushTimestamp + flushPhysicQueueThoroughInterval)) {
+                this.lastFlushTimestamp = currentTimeMillis;
+                flushPhysicQueueLeastPages = 0;
+                printFlushProgress = (printTimes++ % 10) == 0;
+            }
+
+            try {
+                // 3.刷盘前先等一波，两种等待策略：默认true，即直接睡500ms；若配置为false，则可以中途唤醒
+                // 消息异步刷盘每次写入缓冲区都会进行一次刷盘线程的唤醒，显然只有此处配置为false才会每次都检查是否满足刷盘条件
+                if (flushCommitLogTimed) {
+                    Thread.sleep(interval);
+                } else {
+                    this.waitForRunning(interval);
+                }
+
+                if (printFlushProgress) {
+                    this.printFlushProgress();
+                }
+
+                long begin = System.currentTimeMillis();
+                // 4.刷盘 并传入 最少刷盘页数
+                CommitLog.this.mappedFileQueue.flush(flushPhysicQueueLeastPages);
+                long storeTimestamp = CommitLog.this.mappedFileQueue.getStoreTimestamp();
+                // 5.更新checkpoint
+                if (storeTimestamp > 0) {
+                    CommitLog.this.defaultMessageStore.getStoreCheckpoint().
+                        setPhysicMsgTimestamp(storeTimestamp);
+                }
+                // 省略部分代码
+            } catch (Throwable e) {
+                CommitLog.log.warn(this.getServiceName() + " service has exception. ", e);
+                this.printFlushProgress();
+            }
+        }
+		// 省略部分代码
+    }
+}
+```
+
+异步刷盘服务显得没有同步刷盘复杂。
+
+刷盘策略有两种：1、达到4页脏数据；2、间隔10s
+
+从这个刷盘策略来看，异步刷盘性能明显好于同步刷盘，同步刷盘默认策略为有消息就刷且每10ms也刷！
+
+在`java.nio`接口下，写入内存映射缓冲区或写入文件通道后，数据可靠性由操作系统保证，只要操作系统不崩，数据就一定会定时被操作系统落盘，所以其实**异步刷盘可靠性是很高的**。
+
+> 注意：这个等待方式`Thread.sleep()`和`await()`，默认是直接睡死500ms，再检查是否满足刷盘条件。从前面的消息发送存储流程看，消息每次写入都会去唤醒刷盘线程，显然默认情况下，这个唤醒不起作用。
+
+### commit
+
+注意：commit操作只有在开启了瞬态缓冲区才有这个过程，此时消息存储流程为：`write到堆外直接内存-->commit到文件通道-->flush落盘`。
+
+按理说，commit操作不应该放到这个刷盘部分来分析。但是消息发送存储流程中并没有单独的commit环节，因为在提交刷盘请求时，如果开启了瞬态缓冲区，则会去唤醒提交服务线程`CommitRealTimeService`。
+
+```java
+/**
+ * TODO 提交服务线程
+ * <p>
+ *  两种提交策略：
+ *      1.有4页脏数据
+ *      2.等待200ms
+ *  这个等待200ms有点sb啊，这是因为消费者只能看见写入了内存映射缓冲区或文件通道的消息，所以这里的延迟不能太久，无法像刷盘那样等10s
+ *
+ * @see CommitRealTimeService#run()
+ */
+class CommitRealTimeService extends FlushCommitLogService {
+    private long lastCommitTimestamp = 0;
+    @Override
+    public void run() {
+        CommitLog.log.info(this.getServiceName() + " service started");
+        while (!this.isStopped()) {
+            // 1.获取参数
+            // 循环等待时间200ms
+            int interval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getCommitIntervalCommitLog();
+            // 最少提交脏页数，默认4页
+            int commitDataLeastPages = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getCommitCommitLogLeastPages();
+            // 最大提交时间间隔，默认200ms
+            int commitDataThoroughInterval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getCommitCommitLogThoroughInterval();
+
+            long begin = System.currentTimeMillis();
+            if (begin >= (this.lastCommitTimestamp + commitDataThoroughInterval)) {
+                this.lastCommitTimestamp = begin;
+                commitDataLeastPages = 0;
+            }
+
+            try {
+                // 2.提交到fileChannel
+                boolean result = CommitLog.this.mappedFileQueue.commit(commitDataLeastPages);
+                long end = System.currentTimeMillis();
+                if (!result) {
+                    this.lastCommitTimestamp = end; // result = false means some data committed.
+                    //now wake up flush thread.
+                    flushCommitLogService.wakeup();
+                }
+
+                if (end - begin > 500) {
+                    log.info("Commit data to file costs {} ms", end - begin);
+                }
+                // 下一循环等待
+                this.waitForRunning(interval);
+            } catch (Throwable e) {
+                CommitLog.log.error(this.getServiceName() + " service has exception. ", e);
+            }
+        }
+		// 省略部分代码
+    }
+}
+```
+
+在开启了瞬态缓冲区后，提交服务线程也会启动。
+
+在消息发送存储流程中，提交刷盘请求则只会唤醒commit线程，它会检查commit条件：4页脏数据或超过200ms，满足则commit消息到FileChannel文件通道中。在上面得知异步刷盘服务线程会每500ms检查1次是否满足刷盘条件，所以没必要去可以唤醒它。
+
+> 注意：这里和异步刷盘服务线程不同的是，这里的休眠只能是`await()`方式，即每次消息写入，此commit线程必被唤醒，目的在于，**降低消费者看见消息的延迟**。
+>
+> 同时仅仅等待200ms也是这个目的。
+
+## 删除过期文件
+
+因为RocketMQ会为CommitLog文件、ConsumeQueue文件和Index文件都创建对应的内存映射缓冲区，这很占用内存，所以需要及时删除无用的文件。默认文件删除时间为72h。
+
+![DefaultMessageStore内部类](rocketmq.assets/DefaultMessageStore内部类.png)
+
+在存储服务`DefaultMessageStore`启动的最后，会将`CleanCommitLogService`和`CleanConsumeQueueService`两个服务以任务形式注册到定时任务调度池`ScheduledExecutorService`中，并且每10s调度1次。
+
+```java
+private void addScheduleTask() {
+    // TODO 1.定时清理过期文件
+    // 默认每10s调度1次
+    this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
+        @Override
+        public void run() {
+            DefaultMessageStore.this.cleanFilesPeriodically();
+        }
+    }, 1000 * 60, this.messageStoreConfig.getCleanResourceInterval(), TimeUnit.MILLISECONDS);
+    // 省略其它任务注册
+}
+
+private void cleanFilesPeriodically() {
+    // 清理CommitLog和ConsumeQueue文件
+    // 虽然这两个清理服务类都继承了Thread，但是这里并没有以start()方法启动新线程去执行哦，而是直接以定时任务形式执行它们的run()
+    this.cleanCommitLogService.run();
+    this.cleanConsumeQueueService.run();
+}
+```
+
+那么接下来就先看看`CleanCommitLogService`的run()方法：它会调用`CleanCommitLogService.deleteExpiredFiles()`：
+
+```java
+private void deleteExpiredFiles() {
+    // 1.取配置参数
+    int deleteCount = 0;
+    // 文件保留时间，默认72h
+    long fileReservedTime = DefaultMessageStore.this.getMessageStoreConfig().getFileReservedTime();
+    // 删除文件的时间间隔，默认100ms，在1次清除中可能会有多个文件需要删除
+    int deletePhysicFilesInterval = DefaultMessageStore.this.getMessageStoreConfig().getDeleteCommitLogFilesInterval();
+    // 第一次拒绝删除后，文件强制删除间隔，默认120s。因为文件可能被其他线程占用(如读消息)，在此时间间隔内可以拒绝删除，但是会记录当前时间戳
+    int destroyMapedFileIntervalForcibly = DefaultMessageStore.this.getMessageStoreConfig().getDestroyMapedFileIntervalForcibly();
+
+    /*
+      2.两种删除策略：
+          2.1.删除时间到了，默认凌晨4点
+          2.2.磁盘空间不足
+      */
+    boolean timeup = this.isTimeToDelete();
+    boolean spacefull = this.isSpaceToDelete();
+    boolean manualDelete = this.manualDeleteFileSeveralTimes > 0;
+    if (timeup || spacefull || manualDelete) {
+        if (manualDelete)
+            this.manualDeleteFileSeveralTimes--;
+        
+        boolean cleanAtOnce = DefaultMessageStore.this.getMessageStoreConfig().
+            isCleanFileForciblyEnable() && this.cleanImmediately;
+        // 省略日志打印
+        fileReservedTime *= 60 * 60 * 1000;
+        // 3.调用CommitLog自身的方法去删除文件
+        deleteCount = DefaultMessageStore.this.commitLog.deleteExpiredFile(fileReservedTime, deletePhysicFilesInterval, destroyMapedFileIntervalForcibly, cleanAtOnce);
+        if (deleteCount > 0) {
+        } else if (spacefull) {
+            log.warn("disk space will be full soon, but delete file failed.");
+        }
+    }
+}
+```
+
+CommitLog文件删除条件：`文件超过72h && (到凌晨4点了 || 磁盘空间不足了)`
+
+> 对于ConsumeQueue文件的定期删除这里就不分析了，有一点需要注意，Index定期删除在哪呢？
+>
+> 要删除Index文件，需要保证此消息索引不会被消费者使用，即它已经在ConsumeQueue上删除了，所以ConsumeQueue定时删除方法在最后会调用`indexService.deleteExpiredFile(minOffset);`去删除ConsumeQueue上消费者已经看不见的消息的索引文件。
+
+有一个问题，CommitLog文件删除的时候会不会判断该文件是否写满？从这里看没写满也会删，再创新文件嘛，但是CommitLog文件名是`0000000000000000000000000`这种消息偏移量，没写满怎么搞？
+
+```shell
+[root@k8s-master store]# cd commitlog/
+[root@k8s-master commitlog]# ls
+00000000000000000000  00000000001073741824
+```
+
+去检查了一下，发现000的文件确实还没有删除，说明文件不写满是不会删除的。
 
 # 消息消费分析
+
+消费者组集群有两种消费模式：
+
+![消费者模型](rocketmq.assets/消费者模型.png)
+
+广播模式则每个消费者都能消费每条消息，集群模式则是topic下某条消息只能被一个消费者消费。默认是集群模型。
+
+消费进度保存
+
+广播模式：消费进度保存在consumer端。因为广播模式下consumer group中每个consumer都会消费所有消息，但它们的消费进度是不同。所以consumer各自保存各自的消费进度
+
+集群模式：消费进度保存在broker中。consumer group中的所有consumer共同消费同一个Topic中的消息，同一条消息只会被消费一次。消费进度会参与到了消费的负载均衡中，故消费进度是需要共享的。下图是broker中存放的各个Topic的各个Queue的消费进度。
+
+消费进度在broker端保存在`~/store/config/consumerOffset.json`
+
+```shell
+[root@k8s-master config]# cd /opt/rocketmqDemo/rocketmq-4.9.3/store/config/
+[root@k8s-master config]# ls
+consumerFilter.json  consumerFilter.json.bak  consumerOffset.json  consumerOffset.json.bak  delayOffset.json  delayOffset.json.bak  subscriptionGroup.json  topics.json  topics.json.bak
+[root@k8s-master config]# cat consumerOffset.json
+{
+	"offsetTable":{
+		"test_topic@consumerGroup1":{0:22,1:26,2:27,3:25
+		},
+		"%RETRY%consumerGroup1@consumerGroup1":{0:0
+		}
+	}
+}
+```
+
+## 负载均衡和再平衡
+
+在集群消费模式下，某个消费队列只能被一个集群中的消费者消费，所以需要将topic的多个queue分配到集群内的消费者。常用的分配算法有AVG和AVG_BY_CIRCLE两种平均算法。
+
+注意当某个消费者组下的消费者实例数量大于队列的数量时，多余的消费者实例将分配不到任何队列。
+
+Rebalance即再均衡，指的是，将⼀个Topic下的多个Queue在同⼀个Consumer Group中的多个Consumer间进行重新分配的过程。
+
+
+
+
+
+
+
+
+
+
+
+## DefaultMQPushConsumer
+
+![DefaultMQPushConsumer](rocketmq.assets/DefaultMQPushConsumer.png)
+
+下面列出`DefaultMQPushConsumer`的一些重要属性：
+
+```java
+/**
+ * 在大多数情况下，这是最推荐使用消息的类
+ * 从技术上讲，这个推送客户端实际上是底层拉取服务的包装器。具体来说，当从代理中提取的消息到达时，它粗略地调用注册的回调处理程序来提供消息。
+ * 线程安全
+ */
+public class DefaultMQPushConsumer extends ClientConfig implements MQPushConsumer {
+    // 内部实现类，大部分功能都在这实现
+    protected final transient DefaultMQPushConsumerImpl defaultMQPushConsumerImpl;
+    // 要求相同角色的消费者拥有完全相同的订阅和消费者组才能正确实现负载均衡。它是必需的，并且必须是唯一的。
+    private String consumerGroup;
+
+    /**
+     * 消息模型定义了消息如何传递给每个消费者客户端的方式。
+     * RocketMQ 支持两种消息模型：集群和广播。
+     * 集群：同一个consumerGroup的consumer客户端只会消费订阅消息的分片，实现负载均衡，消费偏移量保存在服务端
+     * 广播：每个消费者客户端将分别消费所有订阅的消息，消费偏移量保存在客户端
+     */
+    private MessageModel messageModel = MessageModel.CLUSTERING;
+
+    /**
+     * 消费者启动的消费点
+     * 1.CONSUME_FROM_LAST_OFFSET: 消费者客户从之前停止的地方开始。
+     * 如果是新启动的consumer客户端，根据consumer group的老化情况，有两种情况：
+     * 1.1 订阅的topic最老的消息都没过期，则直接从头消费到尾；
+     * 1.2 最早订阅的消息已经过期，则从最新消息开始消费
+     * <p>
+     * 2.CONSUME_FROM_FIRST_OFFSET: 从最早消息开始消费
+     * <p>
+     * 3.CONSUME_FROM_TIMESTAMP: 从指定的时间戳开始消费
+     */
+    private ConsumeFromWhere consumeFromWhere = ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET;
+
+    // 队列分配算法，指定如何将消息队列分配给每个消费者客户端。
+    private AllocateMessageQueueStrategy allocateMessageQueueStrategy;
+    // topic的订阅关系
+    private Map<String /* topic */, String /* sub expression */> subscription = new HashMap<String, String>();
+    // 消息业务监听器，将由我们手动传入
+    private MessageListener messageListener;
+
+    /**
+     * 消费位移保存
+     * 有本地保存或远程broker保存，这取决于消费模型
+     */
+    private OffsetStore offsetStore;
+
+    // 最小消费者线程数
+    private int consumeThreadMin = 20;
+    // 最大消费者线程数
+    private int consumeThreadMax = 20;
+    // 动态调整线程池数量的阈值
+    private long adjustThreadPoolNumsThreshold = 100000;
+    // 并发最大跨度偏移量。它对顺序消费没有影响
+    private int consumeConcurrentlyMaxSpan = 2000;
+
+    // 队列级别的流控阈值，每个消息队列默认最多缓存1000条消息，考虑pullBatchSize ，瞬时值可能超过限制
+    private int pullThresholdForQueue = 1000;
+    // 在队列级别限制缓存消息大小，每个消息队列默认最多缓存 100 MiB 消息，考虑pullBatchSize ，瞬时值可能超过限制
+    // 消息的大小（MB）仅由消息体衡量，因此不准确
+    private int pullThresholdSizeForQueue = 100;
+    // topic级别的流量控制阈值，默认值为-1(无限制)
+    // 若设为其他值，则pullThresholdForQueue将被覆盖为(此值/队列数量)
+    private int pullThresholdForTopic = -1;
+    /**
+     * 限制主题级别的缓存消息大小，默认值为-1 MiB（无限制）
+     * 若不为-1，则pullThresholdSizeForQueue将被覆盖为(此值/队列数量)
+     */
+    private int pullThresholdSizeForTopic = -1;
+
+    // 拉取消息间隔，默认为0，说明消费者拉取线程在毫无停息的轮询
+    private long pullInterval = 0;
+    // 消费拉取条数
+    private int pullBatchSize = 32;
+    // 每次拉取时是否更新订阅关系
+    private boolean postSubscriptionWhenPull = false;
+
+    /**
+     * 最大重复消费次数，如果消息消费次数超过此值还未成功，则移入失败队列等待删除
+     * 并发模式, -1 means 16;
+     * 顺序模式， -1 means Integer.MAX_VALUE.
+     */
+    private int maxReconsumeTimes = -1;
+
+    // 对于需要慢慢拉取的情况的暂停拉取时间，如触发流控
+    private long suspendCurrentQueueTimeMillis = 1000;
+
+    // 一条消息可能阻塞消费线程的最长时间(单位分钟)，即消息消费超时时间
+    private long consumeTimeout = 15;
+}
+```
+
+注意：这里的拉取间隔为0，说明是一直轮询，这就是所谓的推模式的实现方式？
+
+### 启动流程
+
+`DefaultMQPushConsumer#start()` 消费者启动过程如下：
+
+```java
+public void start() throws MQClientException {
+    setConsumerGroup(NamespaceUtil.wrapNamespace(this.getNamespace(), this.consumerGroup));
+    this.defaultMQPushConsumerImpl.start();
+    if (null != traceDispatcher) {
+        try {
+            traceDispatcher.start(this.getNamesrvAddr(), this.getAccessChannel());
+        } catch (MQClientException e) {
+            log.warn("trace dispatcher start failed ", e);
+        }
+    }
+}
+```
+
+这个启动方法会直接启动`DefaultMQPushConsumerImpl`
+
+```java
+public synchronized void start() throws MQClientException {
+    // 省略外层switch判断
+    // 省略部分检查代码
+
+    // 1.构建主题订阅信息SubscriptionData并加入RebalanceImpl的订阅消息中
+    // 此处将自动订阅重试主题消息：topic=%RETRY%+消费者组名
+    // 重试是以消费者组为单位进行的，而不是topic哦
+    this.copySubscription();
+    if (this.defaultMQPushConsumer.getMessageModel() == MessageModel.CLUSTERING) {
+        this.defaultMQPushConsumer.changeInstanceNameToPID();
+    }
+
+    // 2.初始化MQClientInstance、RebalanceImpl类等
+    // MQClientInstance创建时会新建拉取消息服务线程PullMessageService和再平衡服务线程RebalanceService
+   	// 并注册一堆定时调度任务
+    this.mQClientFactory = MQClientManager.getInstance().
+        getOrCreateMQClientInstance(this.defaultMQPushConsumer, this.rpcHook);
+
+    this.rebalanceImpl.
+        setConsumerGroup(this.defaultMQPushConsumer.getConsumerGroup());
+    this.rebalanceImpl.
+        setMessageModel(this.defaultMQPushConsumer.getMessageModel());
+    // 设置消息队列分配策略
+    this.rebalanceImpl.setAllocateMessageQueueStrategy(
+        this.defaultMQPushConsumer.getAllocateMessageQueueStrategy());
+    this.rebalanceImpl.setmQClientFactory(this.mQClientFactory);
+
+    this.pullAPIWrapper = new PullAPIWrapper(
+        mQClientFactory,
+        this.defaultMQPushConsumer.getConsumerGroup(), isUnitMode());
+    this.pullAPIWrapper.registerFilterMessageHook(filterMessageHookList);
+
+    // 3.初始化消费位移offset
+    if (this.defaultMQPushConsumer.getOffsetStore() != null) {
+        this.offsetStore = this.defaultMQPushConsumer.getOffsetStore();
+    } else {
+        switch (this.defaultMQPushConsumer.getMessageModel()) {
+                // 3.1 如果是广播模式，消费进度保存在消费端
+                // 默认保存在{user.home}/rocketmq_offsets/目录下
+            case BROADCASTING:
+                this.offsetStore = new LocalFileOffsetStore(this.mQClientFactory, this.defaultMQPushConsumer.getConsumerGroup());
+                break;
+                // 3.2 如果是集群模式，消费进度保存在broker端
+            case CLUSTERING:
+                this.offsetStore = new RemoteBrokerOffsetStore(this.mQClientFactory, this.defaultMQPushConsumer.getConsumerGroup());
+                break;
+            default:
+                break;
+        }
+        this.defaultMQPushConsumer.setOffsetStore(this.offsetStore);
+    }
+    this.offsetStore.load();
+
+    // 4.则创建消费端消息服务线程池并启动
+    // 4.1 如果是顺序消息监听器，则创建顺序消息服务线程池
+    if (this.getMessageListenerInner() instanceof MessageListenerOrderly) {
+        this.consumeOrderly = true;
+        this.consumeMessageService =
+            new ConsumeMessageOrderlyService(this, (MessageListenerOrderly) this.getMessageListenerInner());
+    }
+    // 4.2 如果是并发消息监听器，则创建并发消息服务线程池
+    else if (this.getMessageListenerInner() instanceof MessageListenerConcurrently) {
+        this.consumeOrderly = false;
+        this.consumeMessageService =
+            new ConsumeMessageConcurrentlyService(this, (MessageListenerConcurrently) this.getMessageListenerInner());
+    }
+    // 4.3 启动消费端消息服务
+    this.consumeMessageService.start();
+
+    // 5.向MQClientInstance注册消费者组并启动MQClientInstance。
+    // JVM中所有消费者、生产者持有同一个MQClientInstance，MQClientInstance只会启动1次
+    boolean registerOK = mQClientFactory.registerConsumer(this.defaultMQPushConsumer.getConsumerGroup(), this);
+    // 省略部分代码
+    mQClientFactory.start();// 启动MQClientInstance
+
+    // 省略switch的其它case判断
+
+    this.updateTopicSubscribeInfoWhenSubscriptionChanged();
+    this.mQClientFactory.checkClientInBroker();
+    // 6.发送心跳到所有broker
+    this.mQClientFactory.sendHeartbeatToAllBrokerWithLock();
+    // 7.立刻进行消息队列的再平衡以分配消息队列
+    this.mQClientFactory.rebalanceImmediately();
+}
+```
+
+**DefaultMQPushConsumer代表一个消费者组，而MQClientInstance代表一个客户端，客户端内可以包含多个消费者组**。
+
+在这个很长的启动过程中，有以下需要注意：
+
+1、消费者组会自动订阅属于自己的重试主题`%RETRY%消费者组名`；
+
+2、拉取消息服务线程和再平衡服务线程的创建是在MQClientInstance中创建并启动的，因为这两个是服务所有消费者组的；这个客户端实例启动时会启动上诉两个服务线程并注册一堆定时任务。
+
+3、消费端消息服务线程池是每个消费者组私有的，即1个消费者组有1个消费端消息服务线程池。
+
+## 拉取消息服务
+
+### PullMessageService
+
+拉取消息服务由`PullMessageService`类提供。
+
+```java
+/**
+ * 拉取消息服务线程
+ */
+public class PullMessageService extends ServiceThread {
+    // 拉取任务阻塞队列
+    private final LinkedBlockingQueue<PullRequest> pullRequestQueue = new LinkedBlockingQueue<PullRequest>();
+    private final MQClientInstance mQClientFactory;
+    private final ScheduledExecutorService scheduledExecutorService = Executors
+            .newSingleThreadScheduledExecutor(new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    return new Thread(r, "PullMessageServiceScheduledThread");
+                }
+            });
+
+    // 延迟执行拉取请求，即延迟将请求放入阻塞队列
+    public void executePullRequestLater(final PullRequest pullRequest, final long timeDelay) {
+        if (!isStopped()) {
+            this.scheduledExecutorService.schedule(new Runnable() {
+                @Override
+                public void run() {
+                    PullMessageService.this.executePullRequestImmediately(pullRequest);
+                }
+            }, timeDelay, TimeUnit.MILLISECONDS);
+        } else {
+            log.warn("PullMessageServiceScheduledThread has shutdown");
+        }
+    }
+
+    // 立刻执行拉取请求，即立刻将请求放入阻塞队列
+    public void executePullRequestImmediately(final PullRequest pullRequest) {
+        try {
+            this.pullRequestQueue.put(pullRequest);
+        } catch (InterruptedException e) {
+            log.error("executePullRequestImmediately pullRequestQueue.put", e);
+        }
+    }
+    /** 根据拉取请求，执行拉取消息 */
+    private void pullMessage(final PullRequest pullRequest) {
+        // 获取消费者组
+        final MQConsumerInner consumer = this.mQClientFactory.selectConsumer(pullRequest.getConsumerGroup());
+        if (consumer != null) {
+            DefaultMQPushConsumerImpl impl = (DefaultMQPushConsumerImpl) consumer;
+            // 让消费者组自己去拉取消息
+            impl.pullMessage(pullRequest);
+        } else {
+            log.warn("No matched consumer for the PullRequest {}, drop it", pullRequest);
+        }
+    }
+
+    @Override
+    public void run() {
+        // 省略了那些日志和try/catch块之后的代码如下：
+        while (!this.isStopped()) {
+            // 从任务队列中获取任务就进行1次消息拉取
+            PullRequest pullRequest = this.pullRequestQueue.take();
+            this.pullMessage(pullRequest);
+        }
+    }
+}
+```
+
+从这个所谓的拉取消息服务线程代码来看，有点多此一举的感觉。
+
+但是这个拉取请求`PullRequest`还是很重要的：
+
+```java
+/**
+ * 拉取请求
+ * 1个请求只能拉取1个topic下1个队列的消息
+ */
+public class PullRequest {
+    private String consumerGroup;
+    // 指定待拉取的消息队列：包装有topic、brokerName、queueId
+    private MessageQueue messageQueue;
+    // 消息处理队列，拉取的消息先存入这里，再提交给消费者组的消费线程池进行消费
+    private ProcessQueue processQueue;
+    // 待拉取的MessageQueue偏移量
+    private long nextOffset;
+    private boolean previouslyLocked = false;
+}
+```
+
+这个拉取请求就决定了拉取消息会从哪个broker的哪个消息队列从哪里开始进行拉取消息。
+
+### ProcessQueue
+
+这里面最重要的是`ProcessQueue`，它是消息队列消费快照。PullMessageService每次默认从broker拉32条消息，存入此快照中，消息提交到消费者线程池并被消费后，再从此队列中移除。
+
+```java
+/**
+ * 队列消费快照
+ *
+ * @see ProcessQueue#takeMessages(int) 取出消息
+ * @see ProcessQueue#commit() 提交此批次消息消费，表示消费成功
+ * @see ProcessQueue#rollback() 回滚消息消费
+ */
+public class ProcessQueue {
+    private final ReadWriteLock treeMapLock = new ReentrantReadWriteLock();
+    // 消息存储容器：key为消息在ConsumeQueue中的偏移量
+    private final TreeMap<Long, MessageExt> msgTreeMap = new TreeMap<Long, MessageExt>();
+    // 消息的数量
+    private final AtomicLong msgCount = new AtomicLong();
+    // 消息的总长度
+    private final AtomicLong msgSize = new AtomicLong();
+    private final Lock consumeLock = new ReentrantLock();
+    // 该结构仅在处理顺序消息时使用，消息从msgTreeMap取出先临时存在这
+    private final TreeMap<Long, MessageExt> consumingMsgOrderlyTreeMap = new TreeMap<Long, MessageExt>();
+    // 上次拉取消息的时间戳
+    private volatile long lastPullTimestamp = System.currentTimeMillis();
+    // 上次消费消息的时间戳
+    private volatile long lastConsumeTimestamp = System.currentTimeMillis();
+    
+    /**
+     * 从msgTreeMap取出batchSize条消息放入consumingMsgOrderlyTreeMap并返回给调用者
+     *
+     * @param batchSize 取出消息数量
+     */
+    public List<MessageExt> takeMessages(final int batchSize) {
+        // 省略实现
+    }
+    /**
+     * 清空consumingMsgOrderlyTreeMap中的消息，表示成功处理该批消息
+     */
+    public long commit() {
+        try {
+            this.treeMapLock.writeLock().lockInterruptibly();
+            try {
+                Long offset = this.consumingMsgOrderlyTreeMap.lastKey();
+                msgCount.addAndGet(0 - this.consumingMsgOrderlyTreeMap.size());
+                for (MessageExt msg : this.consumingMsgOrderlyTreeMap.values()) {
+                    msgSize.addAndGet(0 - msg.getBody().length);
+                }
+                this.consumingMsgOrderlyTreeMap.clear();
+                if (offset != null) {
+                    return offset + 1;
+                }
+            } finally {
+                this.treeMapLock.writeLock().unlock();
+            }
+        } catch (InterruptedException e) {
+            log.error("commit exception", e);
+        }
+        return -1;
+    }
+    /**
+     * 将consumingMsgOrderlyTreeMap中所有消息重新放入msgTreeMap，
+     * 然后清除consumingMsgOrderlyTreeMap
+     */
+    public void rollback() {
+        try {
+            this.treeMapLock.writeLock().lockInterruptibly();
+            try {
+                this.msgTreeMap.putAll(this.consumingMsgOrderlyTreeMap);
+                this.consumingMsgOrderlyTreeMap.clear();
+            } finally {
+                this.treeMapLock.writeLock().unlock();
+            }
+        } catch (InterruptedException e) {
+            log.error("rollback exception", e);
+        }
+    }
+}
+```
+
+### 消息拉取基本流程
+
+这里以并发消息进行分析，顺序消息的拉取流程之后再分析。
+
+基本上消息拉取分为3步：
+
+1、消费者封装并发送拉取请求；
+
+2、broker服务器查找并返回；
+
+3、消费者处理返回消息。
+
+#### 消费者封装拉取请求
+
+在上面的PullMessageService分析中知道，该服务线程只是暂存拉取请求并准发拉取请求到各自的消费者组进行拉取，因此拉取入口为：`DefaultMQPushConsumerImpl.pullMessage(PullRequest)`
+
+```java
+```
 
 
 
