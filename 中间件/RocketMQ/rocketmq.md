@@ -2814,7 +2814,7 @@ public class PullRequest {
 
 ### ProcessQueue
 
-这里面最重要的是`ProcessQueue`，它是消息队列消费快照。PullMessageService每次默认从broker拉32条消息，存入此快照中，消息提交到消费者线程池并被消费后，再从此队列中移除。
+**每个拉取请求都维护有`ProcessQueue`**，它是消息队列消费快照。PullMessageService每次默认从broker拉32条消息，存入此快照中，消息提交到消费者线程池并被消费后，再从此队列中移除。
 
 ```java
 /**
@@ -2904,12 +2904,296 @@ public class ProcessQueue {
 
 3、消费者处理返回消息。
 
-#### 消费者封装拉取请求
+#### 消费者拉取消息请求
 
 在上面的PullMessageService分析中知道，该服务线程只是暂存拉取请求并准发拉取请求到各自的消费者组进行拉取，因此拉取入口为：`DefaultMQPushConsumerImpl.pullMessage(PullRequest)`
 
 ```java
+/**
+ * TODO 客户端拉取消息请求
+ */
+public void pullMessage(final PullRequest pullRequest) {
+    // 1.省略前置检查
+    // 2.消息拉取流控，达到流控限制将放弃此次拉取任务
+    long cachedMessageCount = processQueue.getMsgCount().get();//ProcessQueue中消息数量
+    long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);//ProcessQueue中消息大小
+	// 2.1 消息处理总数流控：ProcessQueue中消息处理条数默认不能超过1000
+    if (cachedMessageCount > this.defaultMQPushConsumer.getPullThresholdForQueue()) {
+        this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);// 默认推迟调度50ms
+        // 省略日志打印
+        return;
+    }
+    // 2.2 消息处理总大小流控：ProcessQueue中消息大小默认不能超过100MB
+    if (cachedMessageSizeInMiB > this.defaultMQPushConsumer.getPullThresholdSizeForQueue()) {
+        this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);// 默认推迟调度50ms
+		// 省略日志打印
+        return;
+    }
+    // 2.3 如果是并发消息消费，则消息跨度流控：ProcessQueue中消息偏移量最小和最大之间的跨度默认不能超过2000
+    // 考量：若因为1条消息阻塞，消息进度无法向前推进，可能造成大量消息重复消费
+    if (!this.consumeOrderly) {
+        if (processQueue.getMaxSpan() > this.defaultMQPushConsumer.getConsumeConcurrentlyMaxSpan()) {
+            this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);// 默认推迟调度50ms
+            // 省略日志打印
+            return;
+        }
+    } else {
+        // 2.4 如果是顺序消息消费，看不懂？
+       	// 省略顺序消息处理
+    }
+    // 3.获取该topic的订阅信息
+    final SubscriptionData subscriptionData = this.rebalanceImpl.getSubscriptionInner().get(pullRequest.getMessageQueue().getTopic());
+   	// 省略检查代码
+    final long beginTimestamp = System.currentTimeMillis();
+    // 4.构造拉取回调
+    PullCallback pullCallback = new PullCallback() {
+      /*省略拉取成功或失败回调*/
+    };
+    // 5.从内存中获取当前队列消费进度位移(即commit了的消息偏移量)
+    boolean commitOffsetEnable = false;
+    long commitOffsetValue = 0L;
+    // 只有集群模式消费者才需要提交消费位移
+    if (MessageModel.CLUSTERING == this.defaultMQPushConsumer.getMessageModel()) {
+        commitOffsetValue = this.offsetStore.readOffset(pullRequest.getMessageQueue(), ReadOffsetType.READ_FROM_MEMORY);
+        if (commitOffsetValue > 0) {
+            commitOffsetEnable = true;
+        }
+    }
+
+    // 5.1 构建消息拉取系统标记
+ 	// 省略
+    // 6.调用pullKernelImpl后与服务端交互异步拉取消息
+    // 注意：此处会将内存中的已经消费了的消息偏移量(即消费位移)进行提交
+    try {
+        this.pullAPIWrapper.pullKernelImpl(
+            pullRequest.getMessageQueue(),// 待拉取的消息队列
+            subExpression,// 消息过滤表达式
+            subscriptionData.getExpressionType(),// 消息表达式类型：TAG(默认)或SQL92
+            subscriptionData.getSubVersion(),//
+            pullRequest.getNextOffset(),// 消息拉取偏移量
+            this.defaultMQPushConsumer.getPullBatchSize(),// 拉取最大条数，默认32
+            sysFlag,// 拉取系统标记
+            commitOffsetValue,// 当前消息队列的消费进度位移
+            BROKER_SUSPEND_MAX_TIME_MILLIS,
+            CONSUMER_TIMEOUT_MILLIS_WHEN_SUSPEND,// 拉取超时时间，默认30s
+            CommunicationMode.ASYNC,// 拉取模式，默认异步拉取
+            pullCallback// 拉取回调
+        );
+    } catch (Exception e) {
+        log.error("pullKernelImpl exception", e);
+        this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
+    }
+}
 ```
+
+在上面的第2步流控中，有以下几种流控规则：①ProcessQueue中消息总数流控；②ProcessQueue中消息总大小流控；③ProcessQueue中并发消息跨度流控；④ProcessQueue中顺序消息流控；
+
+第4步的回调将在下面分析；
+
+第5步中，消息消费位移的获取与提交，需要注意的是，如果第6步消息拉取选中的broker是slave，则不会提交消费位移。
+
+第6步代码不贴出了，大致步骤如下：
+
+> 1.根据brokerName、brokerId从MQClientInstance中获取broker地址
+> 2.如果选中的broker是slave，则不提交CommitOffset
+> 3.构造请求头
+> 4.根据传入的拉取方式拉取消息-->异步拉取就直接返回null，同步则等待消息返回。
+
+#### broker查消息
+
+broker处理消息拉取请求的入口方法是`org.apache.rocketmq.broker.processor#processRequest(Channel, RemotingCommand, boolean)`，这个方法处理过程很长，足足400行代码。
+
+```java
+/**
+ * TODO 处理消息拉取请求
+ * 足足400行代码！
+ */
+private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend)
+    throws RemotingCommandException {
+    // 省略超长的前置检查
+    // 1.根据订阅信息构建消息过滤器：就是将tag解析
+    SubscriptionData subscriptionData = null;// tag过滤
+    ConsumerFilterData consumerFilterData = null;// 类过滤
+    // 1.1 解析tag
+    if (hasSubscriptionFlag) {
+        subscriptionData = FilterAPI.build(
+            requestHeader.getTopic(), requestHeader.getSubscription(), requestHeader.getExpressionType()
+        );
+       // 省略类过滤构建和其它检查
+    }
+    // 1.2 构建消息过滤器(省略了大部分无用代码，只保留有用信息)
+    MessageFilter messageFilter=new ExpressionMessageFilter(subscriptionData, consumerFilterData,
+                                                    this.brokerController.getConsumerFilterManager());
+    
+    // 2.调用DefaultMessageStore.getMessage()查消息
+    // 这里查询消息会调用存储服务类DefaultMessageStore
+    final GetMessageResult getMessageResult =
+        this.brokerController.getMessageStore().getMessage(requestHeader.getConsumerGroup(), requestHeader.getTopic(),
+                                                           requestHeader.getQueueId(), requestHeader.getQueueOffset(), requestHeader.getMaxMsgNums(), messageFilter);
+    // 3.根据查询结果，封装响应头
+    if (getMessageResult != null) {
+        response.setRemark(getMessageResult.getStatus().name());
+        responseHeader.setNextBeginOffset(getMessageResult.getNextBeginOffset());
+        responseHeader.setMinOffset(getMessageResult.getMinOffset());
+        responseHeader.setMaxOffset(getMessageResult.getMaxOffset());
+        // 4.建议下次消息拉取从哪个broker拉，默认是master，如果剩余待拉取消息大于物理内存40%，则建议从broker拉
+        if (getMessageResult.isSuggestPullingFromSlave()) {
+            responseHeader.setSuggestWhichBrokerId(subscriptionGroupConfig.getWhichBrokerWhenConsumeSlowly());
+        } else {
+            responseHeader.setSuggestWhichBrokerId(MixAll.MASTER_ID);
+        }
+        // 省略很多代码
+    }
+    // 省略响应体封装
+    
+    // 5.如果有提交消费位移，且当前broker为master，则更新消费进度
+    boolean storeOffsetEnable = brokerAllowSuspend;
+    storeOffsetEnable = storeOffsetEnable && hasCommitOffsetFlag;
+    storeOffsetEnable = storeOffsetEnable
+        && this.brokerController.getMessageStoreConfig().getBrokerRole() != BrokerRole.SLAVE;
+    if (storeOffsetEnable) {
+        this.brokerController.getConsumerOffsetManager().commitOffset(RemotingHelper.parseChannelRemoteAddr(channel),
+                                                                      requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
+    }
+    return response;
+}
+```
+
+第2步将消息过滤器也传入了查询消息的方法中，说明消息过滤也是在DefaultMessageStore中完成。
+
+第5步消息消费进度更新将在后面进行详细分析。
+
+##### 消息存储查询
+
+在上面broker查消息第2步调用了`DefaultMessageStore.getMessage()`去查询CommitLog文件内存映射中的消息：
+
+```java
+/**
+ * TODO 查询消息入口
+ *
+ * @param group         Consumer group that launches this query.
+ * @param topic         Topic to query.
+ * @param queueId       Queue ID to query.
+ * @param offset        Logical offset to start from.
+ * @param maxMsgNums    Maximum count of messages to query.
+ * @param messageFilter Message filter used to screen desired messages.
+ */
+public GetMessageResult getMessage(final String group, final String topic, final int queueId, final long offset,
+                                   final int maxMsgNums,final MessageFilter messageFilter) {
+	// 省略前置检查
+
+    // lazy init when find msg.
+    GetMessageResult getResult = null;
+    final long maxOffsetPy = this.commitLog.getMaxOffset();
+    // 1.根据topic和queueId获取消息消费队列
+    ConsumeQueue consumeQueue = findConsumeQueue(topic, queueId);
+	// 省略null检查
+    // 当前ConsumeQueue最小和最大偏移量
+    // 不从0开始是因为ConsumeQueue文件可能会过期删除
+    minOffset = consumeQueue.getMinOffsetInQueue();
+    maxOffset = consumeQueue.getMaxOffsetInQueue();
+    // 2.拉取偏移量异常情况下，校对下一次拉取偏移量
+    if (maxOffset == 0) {
+        status = GetMessageStatus.NO_MESSAGE_IN_QUEUE;
+        nextBeginOffset = nextOffsetCorrection(offset, 0);
+    } else if (offset < minOffset) {
+        status = GetMessageStatus.OFFSET_TOO_SMALL;
+        nextBeginOffset = nextOffsetCorrection(offset, minOffset);
+    } else if (offset == maxOffset) {
+        status = GetMessageStatus.OFFSET_OVERFLOW_ONE;
+        nextBeginOffset = nextOffsetCorrection(offset, offset);
+    } else if (offset > maxOffset) {
+        status = GetMessageStatus.OFFSET_OVERFLOW_BADLY;
+        nextBeginOffset = nextOffsetCorrection(offset, maxOffset);
+    } else {
+        // 3.如果拉取偏移量在minOffset和maxOffset之间，则尝试拉取32条消息
+        SelectMappedBufferResult bufferConsumeQueue = consumeQueue.getIndexBuffer(offset);
+        // 省略部分代码
+        // 3.1 遍历每条ConsumeQueue的消息索引条目，获取消息物理偏移量和大小
+        ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
+        for (; i < bufferConsumeQueue.getSize() && i < maxFilterMessageCount; i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {						// 取出消息物理偏移量、大小和tag 哈希码
+            long offsetPy = bufferConsumeQueue.getByteBuffer().getLong();
+            int sizePy = bufferConsumeQueue.getByteBuffer().getInt();
+            long tagsCode = bufferConsumeQueue.getByteBuffer().getLong();
+
+            // 省略一堆代码
+            // 3.2 先根据消费队列条目的tag 哈希码进行一次消息过滤
+            if (messageFilter != null
+                && !messageFilter.isMatchedByConsumeQueue(isTagsCodeLegal ? tagsCode : null, extRet ? cqExtUnit : null)) {
+                if (getResult.getBufferTotalSize() == 0) {
+                    status = GetMessageStatus.NO_MATCHED_MESSAGE;
+                }
+                continue;// 哈希码不匹配
+            }
+            // 3.3 根据消息物理偏移量和大小从CommitLog服务中获取消息
+            SelectMappedBufferResult selectResult = this.commitLog.getMessage(offsetPy, sizePy);
+            // 省略null检查
+            // 3.4 消息过滤器过滤此消息
+            if (messageFilter != null
+                && !messageFilter.isMatchedByCommitLog(selectResult.getByteBuffer().slice(), null)) {
+                if (getResult.getBufferTotalSize() == 0) {
+                    status = GetMessageStatus.NO_MATCHED_MESSAGE;
+                }
+                // release...
+                selectResult.release();
+                continue;
+            }
+
+            this.storeStatsService.getGetMessageTransferedMsgCount().add(1);
+            getResult.addMessage(selectResult);// 过滤成功则加入结果集
+            status = GetMessageStatus.FOUND;
+            nextPhyFileStartOffset = Long.MIN_VALUE;
+
+            // 省略部分代码
+            // 如果下次待拉取消息总量大于内存的40%，则建议下次从slave拉取
+            long diff = maxOffsetPy - maxPhyOffsetPulling;
+            long memory = (long) (StoreUtil.TOTAL_PHYSICAL_MEMORY_SIZE
+                                  * (this.messageStoreConfig.getAccessMessageInMemoryMaxRatio() / 100.0));
+            getResult.setSuggestPullingFromSlave(diff > memory);
+        } 
+    }
+    // 4.结果封装：查询状态、下次拉取偏移量
+    getResult.setStatus(status);
+    getResult.setNextBeginOffset(nextBeginOffset);
+    getResult.setMaxOffset(maxOffset);
+    getResult.setMinOffset(minOffset);
+    return getResult;
+}
+```
+
+从第3步来看，根据消费队列条目获取的物理偏移量来查询消息后，还要经过可能的tag标签过滤。这**类似于MySQL的回表查询**，需要将数据从CommitLog中查出来后才能过滤，无法完全依靠ConsumeQueue这个消费队列索引完全过滤。
+
+所以为了提高查询效率的话，最好能做到ConsumeQueue这个消费队列索引直接过滤，即不要用类似于`test_tag*`这种后缀或前缀匹配方式，要么`*`全匹配，要么唯一匹配。
+
+
+
+#### 消费者消息拉取回调处理
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
