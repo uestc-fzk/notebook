@@ -551,7 +551,7 @@ public class MyConsumer {
          */
         consumerGroup.setMessageModel(MessageModel.CLUSTERING);
         // 3.订阅topic的所有tag消息
-        // 标签过滤表达式格式："*tag1 || tag2 || tag3* || *"
+        // 标签过滤表达式格式："tag1 || tag2 || tag3 || *"
         consumerGroup.subscribe(TestTopic, TestTag);
         // 4.注册消息监听器
         consumerGroup.registerMessageListener(new MessageListenerConcurrently() {
@@ -2791,7 +2791,11 @@ public class PullMessageService extends ServiceThread {
 
 从这个所谓的拉取消息服务线程代码来看，有点多此一举的感觉。
 
+### PullRequest
+
 但是这个拉取请求`PullRequest`还是很重要的：
+
+**消费者组会为订阅的topic的每个queue都保留一个`PullRequest`**，并注册到调度线程中进行调度，它们分别代表了从该topic的不同队列拉取消息的任务。
 
 ```java
 /**
@@ -2892,7 +2896,7 @@ public class ProcessQueue {
 }
 ```
 
-### 消息拉取基本流程
+### 推模式消息拉取基本流程
 
 这里以并发消息进行分析，顺序消息的拉取流程之后再分析。
 
@@ -2974,7 +2978,7 @@ public void pullMessage(final PullRequest pullRequest) {
             this.defaultMQPushConsumer.getPullBatchSize(),// 拉取最大条数，默认32
             sysFlag,// 拉取系统标记
             commitOffsetValue,// 当前消息队列的消费进度位移
-            BROKER_SUSPEND_MAX_TIME_MILLIS,
+            BROKER_SUSPEND_MAX_TIME_MILLIS,// broker端挂起时间，默认15s，用于长轮询
             CONSUMER_TIMEOUT_MILLIS_WHEN_SUSPEND,// 拉取超时时间，默认30s
             CommunicationMode.ASYNC,// 拉取模式，默认异步拉取
             pullCallback// 拉取回调
@@ -2999,9 +3003,9 @@ public void pullMessage(final PullRequest pullRequest) {
 > 3.构造请求头
 > 4.根据传入的拉取方式拉取消息-->异步拉取就直接返回null，同步则等待消息返回。
 
-#### broker查消息
+#### broker处理消息拉取请求
 
-broker处理消息拉取请求的入口方法是`org.apache.rocketmq.broker.processor#processRequest(Channel, RemotingCommand, boolean)`，这个方法处理过程很长，足足400行代码。
+broker处理消息拉取请求的入口方法是`org.apache.rocketmq.broker.processor.PullMessageProcessor#processRequest(Channel, RemotingCommand, boolean)`，这个方法处理过程很长，足足400行代码。
 
 ```java
 /**
@@ -3045,6 +3049,8 @@ private RemotingCommand processRequest(final Channel channel, RemotingCommand re
         // 省略很多代码
     }
     // 省略响应体封装
+    // 在这里会有长轮询判断，会将拉取请求保存到专门的轮询线程；
+    // 长轮询分析在下面的 推模式长轮询分析
     
     // 5.如果有提交消费位移，且当前broker为master，则更新消费进度
     boolean storeOffsetEnable = brokerAllowSuspend;
@@ -3128,7 +3134,7 @@ public GetMessageResult getMessage(final String group, final String topic, final
             // 3.3 根据消息物理偏移量和大小从CommitLog服务中获取消息
             SelectMappedBufferResult selectResult = this.commitLog.getMessage(offsetPy, sizePy);
             // 省略null检查
-            // 3.4 消息过滤器过滤此消息
+            // 3.4 消息过滤器过滤此消息(tag过滤器此处默认返回true，class过滤器不知道)
             if (messageFilter != null
                 && !messageFilter.isMatchedByCommitLog(selectResult.getByteBuffer().slice(), null)) {
                 if (getResult.getBufferTotalSize() == 0) {
@@ -3161,25 +3167,265 @@ public GetMessageResult getMessage(final String group, final String topic, final
 }
 ```
 
-从第3步来看，根据消费队列条目获取的物理偏移量来查询消息后，还要经过可能的tag标签过滤。这**类似于MySQL的回表查询**，需要将数据从CommitLog中查出来后才能过滤，无法完全依靠ConsumeQueue这个消费队列索引完全过滤。
-
-所以为了提高查询效率的话，最好能做到ConsumeQueue这个消费队列索引直接过滤，即不要用类似于`test_tag*`这种后缀或前缀匹配方式，要么`*`全匹配，要么唯一匹配。
-
-
+从第3步来看，**tag过滤是直接根据tag哈希码进行匹配的**，这样查出来的消息可能不一定完全匹配，需要消费者端再次进行过滤。我认为你这样返回一条可能无用的消息所占用的网络IO并不见得比CPU计算开销低。
 
 #### 消费者消息拉取回调处理
 
+拉取入口方法：`DefaultMQPushConsumerImpl.pullMessage(PullRequest)`中第4步为构造回调`PullCallBack`，它将在NettyRemotingClient收到服务端响应后调用。
+
+接下来就分析这个回调方法干了什么：
+
+```java
+// 4.拉取回调
+@Override
+public void onSuccess(PullResult pullResult) {
+ 	// 0.处理拉取结果
+    // 注意：这里会对消息以tag进行准确过滤。因为服务端只是以tag的哈希码进行的过滤
+    pullResult = DefaultMQPushConsumerImpl.this.pullAPIWrapper.processPullResult(pullRequest.getMessageQueue(), pullResult,subscriptionData);
+    
+    switch (pullResult.getPullStatus()) {
+            // 拉取消息成功
+        case FOUND:
+          // 省略成功处理代码，代码分析放下面的
+            break
+        // 没有拉到消息，下次拉取任务调度安排：默认是立刻进行下次拉取消息(这就是伟大的推模式!)
+        case NO_NEW_MSG:
+        case NO_MATCHED_MSG:
+            pullRequest.setNextOffset(pullResult.getNextBeginOffset());
+            DefaultMQPushConsumerImpl.this.correctTagsOffset(pullRequest);
+            DefaultMQPushConsumerImpl.this.executePullRequestImmediately(pullRequest);
+            break;
+        case OFFSET_ILLEGAL:
+			// 省略
+            break;
+        default:
+            break;
+    }
+}
+@Override
+public void onException(Throwable e) {
+    if (!pullRequest.getMessageQueue().getTopic().
+        startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
+        log.warn("execute the pull request exception", e);
+    }
+    // 拉取失败则默认等待3s后再拉取
+    DefaultMQPushConsumerImpl.this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
+}
+```
+
+拉取到结果首先进行的是tag过滤，因为服务端只是根据tag的哈希码进行的过滤，不一定完全正确。
+
+可以看到当没有消息的时候还是要立刻再次调度拉取，推模式有点离谱了。
+
+如果拉取结果是成功的，则：
+
+```java
+// 1.根据拉取结果刷新拉取请求的拉取位移nextOffset
+long prevRequestOffset = pullRequest.getNextOffset();
+pullRequest.setNextOffset(pullResult.getNextBeginOffset());
+// 省略一些判断检查和分析
+
+// 2.将消息都放入拉取请求的processQueue中
+boolean dispatchToConsume = processQueue.putMessage(pullResult.getMsgFoundList());
+// 3.提交消费请求到线程池
+DefaultMQPushConsumerImpl.this.consumeMessageService.submitConsumeRequest(
+    pullResult.getMsgFoundList(),
+    processQueue,
+    pullRequest.getMessageQueue(),
+    dispatchToConsume);
+// 4.下次拉取任务调度安排：默认是立刻进行下次拉取消息(这就是伟大的推模式!)
+// 省略if/else判断
+DefaultMQPushConsumerImpl.this.executePullRequestImmediately(pullRequest);
+// 省略部分代码
+break;
+```
+
+拉取成功会把消息都放入的拉取请求`PullRequest`的`ProcessQueue`中，并提交一个消费请求到该消费者组的消费线程池中，该消费请求其实是一个`Runnable`对象，一旦提交就会被线程池调度运行。
+
+### 推模式长轮询分析
+
+RocketMQ并没有实现真正的推模式，而是以`拉模式+长轮询+拉请求挂起+消息转发实时通知`实现的。
+
+在上面的推模式消息拉取流程中，broker在处理拉取请求未查询到满足的消息时，并不是立刻返回为找到，而是会进行一个长轮询：
+
+```java
+// 5.处理响应结果
+switch (response.getCode()) {
+        // 5.1 成功则设置响应体，并调用Netty网络接口将响应发送到消费者端
+    case ResponseCode.SUCCESS:
+		// 省略部分代码
+        break;
+        // 5.2 消息没找到
+    case ResponseCode.PULL_NOT_FOUND:
+        if (brokerAllowSuspend && hasSuspendFlag) {
+            // 5.2.1 默认开启长轮询，则会挂起等待新消息直至超时默认15s
+            long pollingTimeMills = suspendTimeoutMillisLong;
+            // 5.2.2 若设为禁用长轮询，则挂起1s，如消息未到则返回未找到
+            if (!this.brokerController.getBrokerConfig().isLongPollingEnable()) {
+                pollingTimeMills = this.brokerController.getBrokerConfig().getShortPollingTimeMills();
+            }
+
+            String topic = requestHeader.getTopic();
+            long offset = requestHeader.getQueueOffset();
+            int queueId = requestHeader.getQueueId();
+            PullRequest pullRequest = new PullRequest(request, channel, pollingTimeMills,
+                                                      this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter);
+            this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
+            response = null;
+            break;
+        }
+	// 省略其他情况
+}
+
+// 6.如果有提交消费位移，且当前broker为master，则更新消费进度
+// 省略部分代码
+```
+
+默认情况下，未找到消息时，创建一个拉取任务PullRequest并提交到`PullRequestHoldService`拉取请求保持服务线程中进行长轮询。
+
+#### 长轮询服务线程
+
+长轮询由`PullRequestHoldService`实现，下面就分析这个类：
+
+```java
+/**
+ * 拉取请求保持服务线程
+ * 长轮询实现机制
+ */
+public class PullRequestHoldService extends ServiceThread {
+    // 挂起的PullRequest集合
+    protected ConcurrentMap<String/* topic@queueId */, ManyPullRequest> pullRequestTable =
+            new ConcurrentHashMap<String, ManyPullRequest>(1024);
+    
+    // 消息拉取为空则调用此方法将拉取请求挂起
+    public void suspendPullRequest(final String topic, final int queueId, final PullRequest pullRequest) {
+        String key = this.buildKey(topic, queueId);// topic@queueId
+        // 将该拉取请求保持到集合中
+        ManyPullRequest mpr = this.pullRequestTable.get(key);
+        if (null == mpr) {
+            mpr = new ManyPullRequest();
+            ManyPullRequest prev = this.pullRequestTable.putIfAbsent(key, mpr);
+            if (prev != null) {
+                mpr = prev;
+            }
+        }
+        mpr.addPullRequest(pullRequest);
+    }
+    
+    public void run() {
+        // 省略一些不重要的代码之后：
+       while (!this.isStopped()) {
+           // 默认开启长轮询则每5s处理1次
+           if (this.brokerController.getBrokerConfig().isLongPollingEnable()) {
+               this.waitForRunning(5 * 1000);
+           } else {// 未开启则每1s处理1次
+               this.waitForRunning(this.brokerController.getBrokerConfig().
+                                   getShortPollingTimeMills());
+           }
+           this.checkHoldRequest();// 处理保持的请求
+        }
+    }
+}
+```
+
+在这个服务线程的run()方法中，根据是否开启长轮询会有不同的等待间隔，默认每5s判断1次挂起的拉取请求的对应的消息队列是否有新消息到来。
+
+不管有没有新消息都会进行1次通知：因为有些拉取任务可能已经超时了
+
+```java
+// 检查挂起的拉取请求对应的消息队列是否有新消息到来，有则通知
+protected void checkHoldRequest() {
+    for (String key : this.pullRequestTable.keySet()) {
+        String[] kArray = key.split(TOPIC_QUEUEID_SEPARATOR);
+        if (2 == kArray.length) {
+            String topic = kArray[0];
+            int queueId = Integer.parseInt(kArray[1]);
+            final long offset = this.brokerController.getMessageStore().
+                getMaxOffsetInQueue(topic, queueId);
+            try {
+                this.notifyMessageArriving(topic, queueId, offset);
+            } catch (Throwable e) {/*省略*/}
+        }
+    }
+}
+```
+
+接下来分析这个通知方法：
+
+```java
+public void notifyMessageArriving(final String topic, final int queueId, final long maxOffset, final Long tagsCode, long msgStoreTime, byte[] filterBitMap, Map<String, String> properties) {
+    // 1.获取该消息队列对应的所有挂起的拉取任务
+    String key = this.buildKey(topic, queueId);
+    ManyPullRequest mpr = this.pullRequestTable.get(key);
+	// 省略null检查
+    List<PullRequest> requestList = mpr.cloneListAndClear();
+    // 省略null检查
+
+    List<PullRequest> replayList = new ArrayList<PullRequest>();
+    for (PullRequest request : requestList) {
+        long newestOffset = maxOffset;
+        if (newestOffset <= request.getPullFromThisOffset()) {
+            newestOffset = this.brokerController.getMessageStore().getMaxOffsetInQueue(topic, queueId);
+        }
+        // 2.对每个拉取请求，如果消息满足拉取偏移量，且匹配tag哈希码，
+        // 则调用消息拉取处理器PullMessageProcessor#executeRequestWhenWakeup()拉取消息
+        // 此方法不会运行拉取请求挂起，所以要么成功，要么失败
+        if (newestOffset > request.getPullFromThisOffset()) {
+            boolean match = request.getMessageFilter().isMatchedByConsumeQueue(tagsCode,
+                                                                               new ConsumeQueueExt.CqExtUnit(tagsCode, msgStoreTime, filterBitMap));
+            // match by bit map, need eval again when properties is not null.
+            if (match && properties != null) {
+                match = request.getMessageFilter().isMatchedByCommitLog(null, properties);
+            }
+            if (match) {
+                this.brokerController.getPullMessageProcessor().
+                    executeRequestWhenWakeup(request.getClientChannel(),
+                                             request.getRequestCommand());
+                continue;
+            }
+        }
+        // 3.如果超时了，也直接调用消息拉取处理器PullMessageProcessor#executeRequestWhenWakeup()拉取消息
+        // 此方法不会运行拉取请求挂起，所以要么成功，要么失败
+        if (System.currentTimeMillis() >= (request.getSuspendTimestamp() + request.getTimeoutMillis())) {
+            this.brokerController.getPullMessageProcessor().
+                executeRequestWhenWakeup(request.getClientChannel(),
+                                         request.getRequestCommand());
+            continue;
+        }
+        replayList.add(request);
+    }
+	// 把没处理的拉取请求再放回去
+    if (!replayList.isEmpty()) { mpr.addPullRequest(replayList); }
+}
+```
+
+该方法检查每个拉取请求，不管是消息到来了，还是超时了，都会调用消息拉取处理器`PullMessageProcessor`的`executeRequestWhenWakeup()`方法去拉取消息，这个和该类的另一个方法`processRequest()`的区别在于(该方法就是上面分析的broker处理消息拉取请求的方法)，后者会挂起拉取任务，而前者不会，无论成功与失败都直接返回。
+
+#### 消息转发服务通知
+
+在上面的长轮询线程中，每5s唤醒1次进行拉取任务的检查新消息或过期处理。5s的实时性较差，与推模式的初衷相违背，所以RocketMQ还有一个机制可以保证消息的实时通知。
+
+其实就是消息写入CommitLog内存映射缓冲区后，不是有转发服务线程嘛，这个线程是1ms启动1次，所以实时性非常高，在它检查到新消息到来转发给ConsumeQueue和Index后，会同时调用长轮询服务线程`PullRequestHoldService#notifyMessageArriving()`方法唤醒挂起拉取请求：
+
+`ReputMessageService#doReput()`消息转发方法部分相关代码：
 
 
+```java
+// 4.为每个DispatchRequest调用转发接口CommitLogDispatcher列表
+// 目前有CommitLogDispatcherBuildIndex和CommitLogDispatcherBuildConsumeQueue
+DefaultMessageStore.this.doDispatch(dispatchRequest);
 
+// 4.1 如果当前broker是master，且开启了长轮询，则通知唤醒在此消息队列挂起的拉取请求
+if (BrokerRole.SLAVE != DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole()
+    && DefaultMessageStore.this.brokerConfig.isLongPollingEnable()
+    && DefaultMessageStore.this.messageArrivingListener != null) {
+    DefaultMessageStore.this.messageArrivingListener.arriving(dispatchRequest.getTopic(),
+dispatchRequest.getQueueId(), dispatchRequest.getConsumeQueueOffset() + 1,dispatchRequest.getTagsCode(), dispatchRequest.getStoreTimestamp(), dispatchRequest.getBitMap(), dispatchRequest.getPropertiesMap());
+    notifyMessageArrive4MultiQueue(dispatchRequest);
+}
+```
 
-
-
-
-
-
-
-
+至此，推模式长轮询拉取消息的实时性就实现了。
 
 
 
