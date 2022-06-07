@@ -635,216 +635,12 @@ private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m
 
 若指定的延时等级为3，则表示延迟时长为10s，即延迟等级是从1开始计数的。
 
-### 实现原理
-
-实现原理如图：[延时消息全流程](https://www.processon.com/view/link/6297271f7d9c085adb7d4597)
-
-#### 生产者端
-
-延时消息的发送只需要在发送消息前给消息标记一下就可以了：
-
 ```java
 Message message = new Message("TestTopic", ("Hello scheduled message " + i).getBytes());
 // 延时级别3，即10s此消息才能被消费
 message.setDelayTimeLevel(3);
 producer.send(message);
 ```
-
-设置延时标记只是向消息属性中加一个`DELAY=延时级别`的键值对：
-
-```java
-public void setDelayTimeLevel(int level) {
-    this.putProperty(MessageConst.PROPERTY_DELAY_TIME_LEVEL, String.valueOf(level));
-}
-```
-
-#### 消息存储
-
-延迟消息其实和正常消息一样都是立刻写入CommitLog的，如果对RocketMQ的消息转发到ConsumeQueue有了解的话，很可能会认为延迟消息是靠延迟转发来实现的。但是其实延迟消息也是立刻转发到ConsumeQueue。
-
-其实，延迟消息和正常消息在存储流程中收到的待遇是一样的，只不过是**转发到了一个特殊的延迟topic和queue从而使得消费者不可见**。
-
-服务端的`CommitLog.asyncPutMessage(MessageExtBrokerInner)`方法会先进行一些前置处理，这里可以看一下消息发送的存储流程。在这些前置处理中，当发现此消息属性中有`DELAY`键值对时则说明是延迟消息，并隐藏真正的topic和queueId，设为延迟topic和延迟级别queueId：
-
-```java
-// 1.3 延迟消息处理
-if (msg.getDelayTimeLevel() > 0) {// 这里直接查消息属性的`DELAY`，如果有则是延迟消息
-    if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
-        msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
-    }
-
-    topic = TopicValidator.RMQ_SYS_SCHEDULE_TOPIC;
-    int queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
-
-    /*  将真正的topic和queueId保存到消息属性中，
-        并把延迟消息topic和延迟级别的queueId设置到消息的topic和queueId中
-        从而把消息发到延迟topic的ConsumeQueue里去，进而实现消息的延迟交付*/
-    MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
-    MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
-    msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
-
-    msg.setTopic(topic);// topic=SCHEDULE_TOPIC_XXXX
-    msg.setQueueId(queueId);// queueId=延迟级别-1
-}
-```
-
-在这里的前置处理后，消息会按照正常消息那样写入CommitLog文件，然后消息转发到topic为`SCHEDULE_TOPIC_XXXX`的ConsumeQueue文件中，queueId就是延迟级别-1，因为延迟级别从1开始嘛。
-
-#### 延迟消息调度服务(轮询)
-
-服务端延时任务调度，检查延时消息队列中是否有消息需要处理：延时消息服务由`ScheduleMessageService`实现：
-
-```java
-/**
- * 延迟消息服务线程
- * @see ScheduleMessageService#start()
- */
-public class ScheduleMessageService extends ConfigManager {
-    private static final long FIRST_DELAY_TIME = 1000L;// 初次调度延时
-    private static final long DELAY_FOR_A_WHILE = 100L;// 每次调度延迟100ms
-    private static final long DELAY_FOR_A_PERIOD = 10000L;
-    private static final long WAIT_FOR_SHUTDOWN = 5000L;
-    private static final long DELAY_FOR_A_SLEEP = 10L;
-
-    // 延迟级别与延迟时间对应关系
-    private final ConcurrentMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable =
-            new ConcurrentHashMap<Integer, Long>(32);
-    // 延迟级别对应的延迟消息队列待处理的最小偏移量
-    private final ConcurrentMap<Integer /* level */, Long/* offset */> offsetTable =
-            new ConcurrentHashMap<Integer, Long>(32);
-    // 调度线程池，所有的延迟消息服务调度任务都是注册在这个线程池
-    private ScheduledExecutorService deliverExecutorService;
-}
-```
-
-它的start()方法在`DefalutMessageStore.start()`中调用，即随着存储服务的启动，延迟消息调度服务也跟着启动了：
-
-```java
-    public void start() {
-        if (started.compareAndSet(false, true)) {
-            // 1.加载延迟等级
-            this.load();
-            // 2.根据延迟等级个数指定core线程数量构建ScheduledThreadPoolExecutor
-            this.deliverExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageTimerThread_"));
-            // 省略部分代码
-            for (Map.Entry<Integer, Long> entry : this.delayLevelTable.entrySet()) {
-                Integer level = entry.getKey();
-                Long timeDelay = entry.getValue();
-                Long offset = this.offsetTable.get(level);
-                if (null == offset) {
-                    offset = 0L;
-                }
-
-                if (timeDelay != null) {
-                    if (this.enableAsyncDeliver) {
-                        this.handleExecutorService.schedule(new HandlePutResultTask(level), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
-                    }
-                    // 3.为每个延迟等级安排1个调度任务
-                    this.deliverExecutorService.schedule(new DeliverDelayedMessageTimerTask(level, offset), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
-                }
-            }
-			// 省略部分代码
-        }
-    }
-```
-
-步骤：1.加载延迟等级；2.创建调度线程池；3.每个调度等级都注册1个调度任务
-
-`start()`方法对每个延迟级别都设置一个调度任务，默认会注册18个延迟任务，这18个延迟任务每次执行完成后都会再把自己注册回去，并设置延迟时间为100ms，**这轮询频率有点高啊**。
-
-接下来看看调度任务每次调度会干什么：run()方法会调用executeOnTimeup()
-
-```java
-class DeliverDelayedMessageTimerTask implements Runnable {
-    private final int delayLevel;// 此调度任务的延迟等级
-    private final long offset;	// 此延迟等级对应的延迟消息队列ConsumeQueue的逻辑偏移量
-
-    /**
-     * run()方法调用这个方法
-     * 此方法在每次执行完成后，都会再次以100ms延迟注册到调度线程池中
-     */
-    public void executeOnTimeup() {
-        // 1.获取该延迟等级对应的Topic=SCHEDULE_TOPIC_XXXX的消息队列
-        // queueId=delayLevel-1，因为延迟等级从1开始算的
-        ConsumeQueue cq =
-            ScheduleMessageService.this.defaultMessageStore.findConsumeQueue(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
-                                                                             delayLevel2QueueId(delayLevel));
-        // 说明此queue文件都没创建，直接安排下次调度
-        if (cq == null) {
-            this.scheduleNextTimerTask(this.offset, DELAY_FOR_A_WHILE);
-            return;
-        }
-        // 2.获取在ConsumeQueue的从当前处理的逻辑偏移量到当前读指针的缓冲区切片
-        SelectMappedBufferResult bufferCQ = cq.getIndexBuffer(this.offset);
-        if (bufferCQ == null) {  /* 省略部分代码*/ }
-
-        long nextOffset = this.offset;
-        try {
-            int i = 0;
-            ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
-            // 3.对缓冲区切片的消息进行顺序处理
-            for (; i < bufferCQ.getSize() && isStarted(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
-                // 3.1 取出此消息的物理偏移量和大小，以及交付时间戳(原本存放hash码的地方)
-                // 普通消息的条目：|   phyOffset 8byte   | size 4byte |   tag hashcode 8byte    |
-                // 延迟消息的条目：|   phyOffset 8byte   | size 4byte |   deliverTimestamp 8byte|
-                long offsetPy = bufferCQ.getByteBuffer().getLong();// 消息物理偏移量
-                int sizePy = bufferCQ.getByteBuffer().getInt();// 消息长度
-                long tagsCode = bufferCQ.getByteBuffer().getLong();// 本来是消息tag哈希码，但这里是交付时间戳
-	
-				// 省略部分代码
-                // 计算交付时间
-                long now = System.currentTimeMillis();
-                long deliverTimestamp = this.correctDeliverTimestamp(now, tagsCode);
-                nextOffset = offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
-
-                long countdown = deliverTimestamp - now;
-                // 3.2 交付时间未到，则安排下一次调度并直接返回此次调度
-                if (countdown > 0) {
-                    this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
-                    return;
-                }
-                // 3.3 交付时间到了，则从CommitLog文件中获取此消息
-                MessageExt msgExt = ScheduleMessageService.this.defaultMessageStore.lookMessageByOffset(offsetPy, sizePy);
-                if (msgExt == null) { continue; }
-
-                // 3.4 将延迟消息恢复为普通消息
-                // 设置真正的topic和queueId，移除属性中的延迟标记键值对`DELAY`
-                MessageExtBrokerInner msgInner = ScheduleMessageService.this.messageTimeup(msgExt);
-                // 省略
-
-                boolean deliverSuc;
-                // 4.交付消息：同步或异步，这里会去调用存储服务的putMessage()方法
-                if (ScheduleMessageService.this.enableAsyncDeliver) {
-                    deliverSuc = this.asyncDeliver(msgInner, msgExt.getMsgId(), nextOffset, offsetPy, sizePy);
-                } else {
-                    // 默认同步交付
-                    deliverSuc = this.syncDeliver(msgInner, msgExt.getMsgId(), nextOffset, offsetPy, sizePy);
-                }
-                // 4.1 交付失败则安排下次调度重试
-                if (!deliverSuc) {
-                    this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
-                    return;
-                }
-            }
-            // 5.本地调度能交付的消息都交付完成后，则计算逻辑偏移量，安排下次调度
-            nextOffset = this.offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
-        } catch (Exception e) {
-            log.error("ScheduleMessageService, messageTimeup execute error, offset = {}", nextOffset, e);
-        } finally {
-            bufferCQ.release();
-        }
-        this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);// 下次调度，100ms延迟任务
-    }
-}
-```
-
-每次调度任务的重要流程就是从指定的延迟topic的某个延迟队列中获取未交付的消息，将其中已经到达交付时间的消息取出来，重新封装之后，**再次发给了存储服务的putMessage()方法**。**消息持久化两次！**
-
-注意：这里很可能有遗漏的地方：
-
-> 我感觉我可能有什么地方没看懂，如果直接发给putMessage()方法，那它会将消息再次存入CommitLog，然后再转发给ConsumeQueue，虽然目的是达到了，但是多存了一条消息啊。而且，消息转发给Index服务后，那Index岂不是要存两条相同消息的索引了？
->
-> 那为什么不直接把消息的物理偏移量转发到相应的ConsumeQueue呢？
 
 ## 事务消息
 
@@ -3000,6 +2796,14 @@ public void pullMessage(final PullRequest pullRequest) {
 
 在上面的第2步流控中，有以下几种流控规则：①ProcessQueue中消息总数流控；②ProcessQueue中消息总大小流控；③ProcessQueue中并发消息跨度流控；④ProcessQueue中顺序消息流控；
 
+> 为什么要进行消息流控呢？
+>
+> 因为消息拉取请求PullRequest在成功拉取消息后，立刻就放入了拉取消息服务线程的阻塞队列中从而进行下次拉取调度，如果拉取速度很快，而消费速度很慢，这会造成大量的消息积压，这个情况也可能由消费端重启引起。
+>
+> 为什么流控规则里会专门针对并发消息消费的跨度流控呢？
+>
+> 因为消费位移的提交是以ProcessQueue中最小偏移量进行提交的，并发消费情况下，最小偏移量消息如果消费时间很长，那么会导致其后的消息都消费了但却无法通知broker提交消费位移，如果此时消费者挂了，那么这些消费过的消息在之后都将被重复消费！跨度流控可以限制重复消费的消息数量。
+
 第4步的回调将在下面分析；
 
 第5步中，消息消费位移的获取与提交，需要注意的是，如果第6步消息拉取选中的broker是slave，则不会提交消费位移。
@@ -3655,6 +3459,248 @@ public long computePullFromWhereWithException(MessageQueue mq) throws MQClientEx
 - CONSUME_FROM_TIMESTAMP：以消费者启动时间戳对应的消息作为消费位移
 
 上面代码其实省略了很多if/else判断，很可能result结果为-1，但是没关系，在上面的拉取消息服务的分析中知道，消息拉取偏移量在拉取过程中会被broker修正！
+
+## 消息消费过程
+
+这部分大致包含消息消费、消息确认ACK、消费进度管理。由于时间有限，这里不再结合源码分析，直接看书吧《RocketMQ技术内幕》p175。
+
+## 延时消息
+
+### 延时等级
+
+延时消息的延迟时长不支持随意时长，是通过特定的延迟等级来指定的。延时等级定义在 RocketMQ服务端的`org.apache.rocketmq.store.config.MessageStoreConfig`类中的如下变量中：
+
+```java
+private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h";
+```
+
+当然如果需要自定义延时等级，肯定是可以在broker的配置文件中进行配置的。
+
+若指定的延时等级为3，则表示延迟时长为10s，即延迟等级是从1开始计数的。
+
+```java
+Message message = new Message("TestTopic", ("Hello scheduled message " + i).getBytes());
+// 延时级别3，即10s此消息才能被消费
+message.setDelayTimeLevel(3);
+producer.send(message);
+```
+
+### 实现原理
+
+实现原理如图：[延时消息全流程](https://www.processon.com/view/link/6297271f7d9c085adb7d4597)
+
+#### 生产者端
+
+延时消息的发送只需要在发送消息前给消息标记一下就可以了：
+
+```java
+Message message = new Message("TestTopic", ("Hello scheduled message " + i).getBytes());
+// 延时级别3，即10s此消息才能被消费
+message.setDelayTimeLevel(3);
+producer.send(message);
+```
+
+设置延时标记只是向消息属性中加一个`DELAY=延时级别`的键值对：
+
+```java
+public void setDelayTimeLevel(int level) {
+    this.putProperty(MessageConst.PROPERTY_DELAY_TIME_LEVEL, String.valueOf(level));
+}
+```
+
+#### 消息存储
+
+延迟消息其实和正常消息一样都是立刻写入CommitLog的，如果对RocketMQ的消息转发到ConsumeQueue有了解的话，很可能会认为延迟消息是靠延迟转发来实现的。但是其实延迟消息也是立刻转发到ConsumeQueue。
+
+其实，延迟消息和正常消息在存储流程中收到的待遇是一样的，只不过是**转发到了一个特殊的延迟topic和queue从而使得消费者不可见**。
+
+服务端的`CommitLog.asyncPutMessage(MessageExtBrokerInner)`方法会先进行一些前置处理，这里可以看一下消息发送的存储流程。在这些前置处理中，当发现此消息属性中有`DELAY`键值对时则说明是延迟消息，并隐藏真正的topic和queueId，设为延迟topic和延迟级别queueId：
+
+```java
+// 1.3 延迟消息处理
+if (msg.getDelayTimeLevel() > 0) {// 这里直接查消息属性的`DELAY`，如果有则是延迟消息
+    if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
+        msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
+    }
+
+    topic = TopicValidator.RMQ_SYS_SCHEDULE_TOPIC;
+    int queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
+
+    /*  将真正的topic和queueId保存到消息属性中，
+        并把延迟消息topic和延迟级别的queueId设置到消息的topic和queueId中
+        从而把消息发到延迟topic的ConsumeQueue里去，进而实现消息的延迟交付*/
+    MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
+    MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
+    msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
+
+    msg.setTopic(topic);// topic=SCHEDULE_TOPIC_XXXX
+    msg.setQueueId(queueId);// queueId=延迟级别-1
+}
+```
+
+在这里的前置处理后，消息会按照正常消息那样写入CommitLog文件，然后消息转发到topic为`SCHEDULE_TOPIC_XXXX`的ConsumeQueue文件中，queueId就是延迟级别-1，因为延迟级别从1开始嘛。
+
+#### 延迟消息调度服务(轮询)
+
+服务端延时任务调度，检查延时消息队列中是否有消息需要处理：延时消息服务由`ScheduleMessageService`实现：
+
+```java
+/**
+ * 延迟消息服务线程
+ * @see ScheduleMessageService#start()
+ */
+public class ScheduleMessageService extends ConfigManager {
+    private static final long FIRST_DELAY_TIME = 1000L;// 初次调度延时
+    private static final long DELAY_FOR_A_WHILE = 100L;// 每次调度延迟100ms
+    private static final long DELAY_FOR_A_PERIOD = 10000L;
+    private static final long WAIT_FOR_SHUTDOWN = 5000L;
+    private static final long DELAY_FOR_A_SLEEP = 10L;
+
+    // 延迟级别与延迟时间对应关系
+    private final ConcurrentMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable =
+            new ConcurrentHashMap<Integer, Long>(32);
+    // 延迟级别对应的延迟消息队列待处理的最小偏移量
+    private final ConcurrentMap<Integer /* level */, Long/* offset */> offsetTable =
+            new ConcurrentHashMap<Integer, Long>(32);
+    // 调度线程池，所有的延迟消息服务调度任务都是注册在这个线程池
+    private ScheduledExecutorService deliverExecutorService;
+}
+```
+
+它的start()方法在`DefalutMessageStore.start()`中调用，即随着存储服务的启动，延迟消息调度服务也跟着启动了：
+
+```java
+    public void start() {
+        if (started.compareAndSet(false, true)) {
+            // 1.加载延迟等级
+            this.load();
+            // 2.根据延迟等级个数指定core线程数量构建ScheduledThreadPoolExecutor
+            this.deliverExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageTimerThread_"));
+            // 省略部分代码
+            for (Map.Entry<Integer, Long> entry : this.delayLevelTable.entrySet()) {
+                Integer level = entry.getKey();
+                Long timeDelay = entry.getValue();
+                Long offset = this.offsetTable.get(level);
+                if (null == offset) {
+                    offset = 0L;
+                }
+
+                if (timeDelay != null) {
+                    if (this.enableAsyncDeliver) {
+                        this.handleExecutorService.schedule(new HandlePutResultTask(level), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
+                    }
+                    // 3.为每个延迟等级安排1个调度任务
+                    this.deliverExecutorService.schedule(new DeliverDelayedMessageTimerTask(level, offset), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
+                }
+            }
+			// 省略部分代码
+        }
+    }
+```
+
+步骤：1.加载延迟等级；2.创建调度线程池；3.每个调度等级都注册1个调度任务
+
+`start()`方法对每个延迟级别都设置一个调度任务，默认会注册18个延迟任务，这18个延迟任务每次执行完成后都会再把自己注册回去，并设置延迟时间为100ms，**这轮询频率有点高啊**。
+
+接下来看看调度任务每次调度会干什么：run()方法会调用executeOnTimeup()
+
+```java
+class DeliverDelayedMessageTimerTask implements Runnable {
+    private final int delayLevel;// 此调度任务的延迟等级
+    private final long offset;	// 此延迟等级对应的延迟消息队列ConsumeQueue的逻辑偏移量
+
+    /**
+     * run()方法调用这个方法
+     * 此方法在每次执行完成后，都会再次以100ms延迟注册到调度线程池中
+     */
+    public void executeOnTimeup() {
+        // 1.获取该延迟等级对应的Topic=SCHEDULE_TOPIC_XXXX的消息队列
+        // queueId=delayLevel-1，因为延迟等级从1开始算的
+        ConsumeQueue cq =
+            ScheduleMessageService.this.defaultMessageStore.findConsumeQueue(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
+                                                                             delayLevel2QueueId(delayLevel));
+        // 说明此queue文件都没创建，直接安排下次调度
+        if (cq == null) {
+            this.scheduleNextTimerTask(this.offset, DELAY_FOR_A_WHILE);
+            return;
+        }
+        // 2.获取在ConsumeQueue的从当前处理的逻辑偏移量到当前读指针的缓冲区切片
+        SelectMappedBufferResult bufferCQ = cq.getIndexBuffer(this.offset);
+        if (bufferCQ == null) {  /* 省略部分代码*/ }
+
+        long nextOffset = this.offset;
+        try {
+            int i = 0;
+            ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
+            // 3.对缓冲区切片的消息进行顺序处理
+            for (; i < bufferCQ.getSize() && isStarted(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                // 3.1 取出此消息的物理偏移量和大小，以及交付时间戳(原本存放hash码的地方)
+                // 普通消息的条目：|   phyOffset 8byte   | size 4byte |   tag hashcode 8byte    |
+                // 延迟消息的条目：|   phyOffset 8byte   | size 4byte |   deliverTimestamp 8byte|
+                long offsetPy = bufferCQ.getByteBuffer().getLong();// 消息物理偏移量
+                int sizePy = bufferCQ.getByteBuffer().getInt();// 消息长度
+                long tagsCode = bufferCQ.getByteBuffer().getLong();// 本来是消息tag哈希码，但这里是交付时间戳
+	
+				// 省略部分代码
+                // 计算交付时间
+                long now = System.currentTimeMillis();
+                long deliverTimestamp = this.correctDeliverTimestamp(now, tagsCode);
+                nextOffset = offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
+
+                long countdown = deliverTimestamp - now;
+                // 3.2 交付时间未到，则安排下一次调度并直接返回此次调度
+                if (countdown > 0) {
+                    this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
+                    return;
+                }
+                // 3.3 交付时间到了，则从CommitLog文件中获取此消息
+                MessageExt msgExt = ScheduleMessageService.this.defaultMessageStore.lookMessageByOffset(offsetPy, sizePy);
+                if (msgExt == null) { continue; }
+
+                // 3.4 将延迟消息恢复为普通消息
+                // 设置真正的topic和queueId，移除属性中的延迟标记键值对`DELAY`
+                MessageExtBrokerInner msgInner = ScheduleMessageService.this.messageTimeup(msgExt);
+                // 省略
+
+                boolean deliverSuc;
+                // 4.交付消息：同步或异步，这里会去调用存储服务的putMessage()方法
+                if (ScheduleMessageService.this.enableAsyncDeliver) {
+                    deliverSuc = this.asyncDeliver(msgInner, msgExt.getMsgId(), nextOffset, offsetPy, sizePy);
+                } else {
+                    // 默认同步交付
+                    deliverSuc = this.syncDeliver(msgInner, msgExt.getMsgId(), nextOffset, offsetPy, sizePy);
+                }
+                // 4.1 交付失败则安排下次调度重试
+                if (!deliverSuc) {
+                    this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
+                    return;
+                }
+            }
+            // 5.本地调度能交付的消息都交付完成后，则计算逻辑偏移量，安排下次调度
+            nextOffset = this.offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
+        } catch (Exception e) {
+            log.error("ScheduleMessageService, messageTimeup execute error, offset = {}", nextOffset, e);
+        } finally {
+            bufferCQ.release();
+        }
+        this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);// 下次调度，100ms延迟任务
+    }
+}
+```
+
+每次调度任务的重要流程就是从指定的延迟topic的某个延迟队列中获取未交付的消息，将其中已经到达交付时间的消息取出来，重新封装之后，**再次发给了存储服务的putMessage()方法**。**消息持久化两次！**
+
+> 1、延时消息把原本的topic和queueId恢复后会直接发给putMessage()方法，那它会将消息再次存入CommitLog，然后再转发给ConsumeQueue，虽然目的是达到了，但是多存了一条消息啊。而且，消息转发给Index服务后，那Index岂不是要存两条相同消息的索引了？
+>
+> 2、为什么不以延时转发来实现呢，这样可以不用转换为中间topic了啊？
+>
+> 延时消息写入CommitLog后，转发服务线程会自动进行转发到相应的ConsumeQueue，因此延时转发不考虑。
+>
+> 3、把延时ConsumeQueue上存储单元条目直接发给原本的ConsumeQueue上不是更简单吗？
+>
+> 因为CommitLog文件一旦写入是不会进行修改的，若不修改，则该消息的原始topic和queueId就无法恢复，所以从顺序写文件考虑，就直接再存一条消息了。
+
+从延时消息被持久化两次来考虑的话，就**最好不要把大体积消息和很多消息设为延时消息**。
 
 # RocketMQ与Kafka比较
 
