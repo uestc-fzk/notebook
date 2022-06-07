@@ -2506,6 +2506,8 @@ Rebalance即再均衡，指的是，将⼀个Topic下的多个Queue在同⼀个C
 
 ## DefaultMQPushConsumer
 
+此类代表了一个消费者组，一个客户端可以多建几个消费者组。
+
 ![DefaultMQPushConsumer](rocketmq.assets/DefaultMQPushConsumer.png)
 
 下面列出`DefaultMQPushConsumer`的一些重要属性：
@@ -2789,13 +2791,15 @@ public class PullMessageService extends ServiceThread {
 }
 ```
 
-从这个所谓的拉取消息服务线程代码来看，有点多此一举的感觉。
+从这个所谓的拉取消息服务线程代码来看，有点多此一举的感觉。其实并不是的，它的作用只是维护这些`PullRequest`拉取任务，通过`pullMessage()`调用对应消费者组去执行拉取请求任务，而这些任务执行出错或结束都会调用`executePullRequestImmediately()`再把任务放回队列进行下次调度。
 
 ### PullRequest
 
-但是这个拉取请求`PullRequest`还是很重要的：
+这个拉取请求`PullRequest`还是很重要的：
 
-**消费者组会为订阅的topic的每个queue都保留一个`PullRequest`**，并注册到调度线程中进行调度，它们分别代表了从该topic的不同队列拉取消息的任务。
+**消费者组会为订阅的topic的每个queue都保留一个`PullRequest`**，并放入拉取服务线程的阻塞队列中进行调度，它们分别代表了从该topic的不同队列拉取消息的任务。
+
+> 拉取请求是在RebalanceImpl中创建的。
 
 ```java
 /**
@@ -2907,6 +2911,10 @@ public class ProcessQueue {
 2、broker服务器查找并返回；
 
 3、消费者处理返回消息。
+
+[消息拉取流程图原图](https://www.processon.com/view/link/629ef4d6e401fd2930a4c8ae)
+
+![消息拉取流程图在线图](http://assets.processon.com/chart_image/629e0712e0b34d46d73cf2d9.png)
 
 #### 消费者拉取消息请求
 
@@ -3427,21 +3435,226 @@ dispatchRequest.getQueueId(), dispatchRequest.getConsumeQueueOffset() + 1,dispat
 
 至此，推模式长轮询拉取消息的实时性就实现了。
 
+## 再平衡
+
+在上面拉取消息服务分析中，拉取消息请求`PullRequest`的来源还没有分析，它的来源正是再平衡过程中创建的，消费者组启动过程完成会主动调用1次再平衡。
+
+消息队列的再平衡由`RebalanceService`线程定时调度，它只是负责每20s调度1次，具体的实现是由每个消费者组`DefaultMQPushConsumerImpl`去实现的.
+
+RebalanceService线程的run()方法每20s调度MQClientInstance#doRebalance()，它会遍历注册的所有消费者组，对每个消费者组去调度它自己的`DefaultMQPushConsumerImpl#doRebalance()`。
+
+### RebalanceImpl
+
+每个`DefaultMQPushConsumerImpl`都持有1个自己的`RebalanceImpl`对象，该方法遍历订阅信息对每个topic的队列进行再平衡。
+
+这些最终会调用`RebalanceImpl#rebalanceByTopic()`方法对单个topic进行负载均衡：
+
+RebalanceImpl#rebalanceByTopic(String, boolean)部分代码：
+
+```java
+// 获取该topic所有消费队列
+Set<MessageQueue> mqSet = this.topicSubscribeInfoTable.get(topic);
+// 1.发请求从broker获取该消费者组内所有的消费端id
+// broker为什么有所有消费者信息呢？因为消费者组在启动时会向所有broker发心跳包
+List<String> cidAll = this.mQClientFactory.findConsumerIdList(topic, consumerGroup);
+// 省略null检查
+
+// 2.对所有消费者id和消费队列进行排序
+List<MessageQueue> mqAll = new ArrayList<MessageQueue>();
+mqAll.addAll(mqSet);
+Collections.sort(mqAll);
+Collections.sort(cidAll);
+
+// 3.根据分配策略进行队列分配
+AllocateMessageQueueStrategy strategy = this.allocateMessageQueueStrategy;
+List<MessageQueue> allocateResult = null;
+try {
+    allocateResult = strategy.allocate(
+        this.consumerGroup,
+        this.mQClientFactory.getClientId(),
+        mqAll,
+        cidAll);
+} catch (Throwable e) {
+    log.error("AllocateMessageQueueStrategy.allocate Exception. allocateMessageQueueStrategyName={}", strategy.getName(),
+              e);
+    return;
+}
+Set<MessageQueue> allocateResultSet = new HashSet<MessageQueue>();
+if (allocateResult != null) {
+    allocateResultSet.addAll(allocateResult);
+}
+
+// 4.根据分配结果更新本地的ProcessQueue
+boolean changed = this.updateProcessQueueTableInRebalance(topic, allocateResultSet, isOrder);
+if (changed) {
+    // 省略日志打印
+    this.messageQueueChanged(topic, mqSet, allocateResultSet);
+}
+```
+
+上面的第1步和第2步比较简单，下面就着重分析第3步根据分配策略分配队列和第4步更新本地处理队列。
+
+### 分配策略
+
+`RebalanceImpl#rebalanceByTopic(String, boolean)`的第3步是根据给定的分配策略进行队列分配，当然这里只能分配给自己这个消费端。
+
+分配策略接口是`AllocateMessageQueueStrategy`：
+
+![AllocateMessageQueueStrategy](rocketmq.assets/AllocateMessageQueueStrategy.png)
 
 
 
+![平均分配](rocketmq.assets/平均分配.png)
 
+一致性哈希分配：该算法会将consumer的hash值作为Node节点存放到hash环上，然后将queue的hash值也放到hash环 上，通过顺时针方向，距离queue最近的那个consumer就是该queue要分配的consumer。**缺点是分配不均，且消息队列负载信息不容易追踪，优点是消费队列扩容或缩容时再平衡时队列变动少**。不建议使用。
 
+机房策略看不懂。
 
+### 更新处理队列
 
+`RebalanceImpl#rebalanceByTopic(String, boolean)`的第4步更新本地处理队列。
 
+```java
+// 4.根据分配结果更新本地的ProcessQueue
+boolean changed = this.updateProcessQueueTableInRebalance(topic, allocateResultSet, isOrder);
+if (changed) {
+    // 省略日志打印
+    // 当再平衡结果有改变时，需要通知broker订阅关系修改了
+    this.messageQueueChanged(topic, mqSet, allocateResultSet);
+}
+```
 
+分析第1个方法：`RebalanceImpl#updateProcessQueueTableInRebalance`
 
+```java
+private boolean updateProcessQueueTableInRebalance(final String topic, final Set<MessageQueue> mqSet,final boolean isOrder) {
+    boolean changed = false;
+    // 1.先遍历当前处理队列，与新分配的队列比较，不存在的则移除并停止ProcessQueue的消息消费
+    Iterator<Entry<MessageQueue, ProcessQueue>> it = this.processQueueTable.entrySet().iterator();
+    while (it.hasNext()) {
+        Entry<MessageQueue, ProcessQueue> next = it.next();
+        MessageQueue mq = next.getKey();
+        ProcessQueue pq = next.getValue();
+        if (mq.getTopic().equals(topic)) {
+            if (!mqSet.contains(mq)) {// 如果新分配队列不包含该处理队列，则移除并停止ProcessQueue消费
+                pq.setDropped(true);
+                // 此方法会把MessageQueue及其消费进度和ProcessQueue从缓冲表中移除
+                if (this.removeUnnecessaryMessageQueue(mq, pq)) {
+                    it.remove();
+                    changed = true;
+                    log.info("doRebalance, {}, remove unnecessary mq, {}", consumerGroup, mq);
+                }
+            }
+        }// 省略其它判断
+    }
+    // 2.再遍历新分配队列，与处理队列比较，不存在的则创建PullRequest拉取请求任务
+    List<PullRequest> pullRequestList = new ArrayList<PullRequest>();
+    for (MessageQueue mq : mqSet) {
+        if (!this.processQueueTable.containsKey(mq)) {
+            if (isOrder && !this.lock(mq)) {
+                log.warn("doRebalance, {}, add a new mq failed, {}, because lock failed", consumerGroup, mq);
+                continue;
+            }
+			// 2.1 新建ProcessQueue
+            this.removeDirtyOffset(mq);
+            ProcessQueue pq = new ProcessQueue();
+			// 2.2 计算拉取偏移量，这里将根据不同消费位移策略进行处理
+            // 这里的具体细节在下面的 拉取位移 进行分析
+            long nextOffset = this.computePullFromWhereWithException(mq);
+  
+            if (nextOffset >= 0) {
+                ProcessQueue pre = this.processQueueTable.putIfAbsent(mq, pq);
+                if (pre != null) {
+                    log.info("doRebalance, {}, mq already exists, {}", consumerGroup, mq);
+                } else {
+                    // 2.3 新建PullRequest
+                    log.info("doRebalance, {}, add a new mq, {}", consumerGroup, mq);
+                    PullRequest pullRequest = new PullRequest();
+                    pullRequest.setConsumerGroup(consumerGroup);
+                    pullRequest.setNextOffset(nextOffset);
+                    pullRequest.setMessageQueue(mq);
+                    pullRequest.setProcessQueue(pq);
+                    pullRequestList.add(pullRequest);
+                    changed = true;
+                }
+            }
+        }
+    }
+    // 3.将新的PullRequest派发到拉取服务线程的阻塞队列中
+    this.dispatchPullRequest(pullRequestList);
+    return changed;
+}
+```
 
+这个方法就是直接比较新分配队列和处理的旧队列，将不再处理的队列移除，新加入的队列新建PullRequest并加入拉取服务线程的阻塞队列中。
 
+这里面只有2.2步比较复杂，它会根据不同的消费位移策略设置不同消费拉取偏移量，故下面针对这个进行具体分析。
 
+#### 计算拉取位移
 
+在`RebalanceImpl#updateProcessQueueTableInRebalance`的第2步中，新分配的队列需要设置拉取位移，这个位移将根据消费端配置`ConsumeFromWhere`进行不同处理。
 
+`RebalancePushImpl#computePullFromWhereWithException(MessageQueue)`部分代码如下：
+
+```java
+// 计算拉取偏移量
+public long computePullFromWhereWithException(MessageQueue mq) throws MQClientException {
+    long result = -1;
+    final ConsumeFromWhere consumeFromWhere = this.defaultMQPushConsumerImpl.getDefaultMQPushConsumer().getConsumeFromWhere();
+    final OffsetStore offsetStore = this.defaultMQPushConsumerImpl.getOffsetStore();
+    switch (consumeFromWhere) {
+        // 1.最新偏移量策略
+        case CONSUME_FROM_LAST_OFFSET: {
+            // 从broker的磁盘存储中获取消费位移
+            long lastOffset = offsetStore.readOffset(mq, ReadOffsetType.READ_FROM_STORE);
+            // 1.1 如果有则直接用这个(这里很可能出现重复消费)
+            if (lastOffset >= 0) {
+                result = lastOffset;
+            }
+            // 1.2 没有说明该队列是第1次被这个消费者组订阅，从broker获取最大偏移量作为初始消费位移
+            else if (-1 == lastOffset) {
+                result = this.mQClientFactory.getMQAdminImpl().maxOffset(mq);
+            } 
+            break;
+        }
+        // 2.最老偏移量策略
+        case CONSUME_FROM_FIRST_OFFSET: {
+            long lastOffset = offsetStore.readOffset(mq, ReadOffsetType.READ_FROM_STORE);
+            if (lastOffset >= 0) {
+                result = lastOffset;// 有则直接用
+            } else if (-1 == lastOffset) {
+                result = 0L;// 没有则从0开始(如果0偏移量消息已经删了呢？拉取消息过程中会自动修改拉取偏移量)
+            }
+            break;
+        }
+        // 3.启动时间戳策略
+        case CONSUME_FROM_TIMESTAMP: {
+            long lastOffset = offsetStore.readOffset(mq, ReadOffsetType.READ_FROM_STORE);
+            if (lastOffset >= 0) {
+                result = lastOffset;// 有则直接用
+            } else if (-1 == lastOffset) {
+                // 以消费者组启动时间戳查询对应的消费位移作为拉取偏移量
+                long timestamp = UtilAll.parseDate(this.defaultMQPushConsumerImpl.
+                                                   getDefaultMQPushConsumer().getConsumeTimestamp(),
+                                                   UtilAll.YYYYMMDDHHMMSS).getTime();
+                result = this.mQClientFactory.getMQAdminImpl().searchOffset(mq, timestamp);
+            }
+            break;
+        }
+    }
+    return result;
+}
+```
+
+这3中策略都会先判断broker端是否保存有消费记录，如果有，则直接用，这样虽然**可能会重复消费**，但是无疑是最正确的做法；
+
+如果没有，说明该消费者组是第1次订阅该队列：
+
+- CONSUME_FROM_LAST_OFFSET(默认)：以最新消息偏移量作为消费位移
+- CONSUME_FROM_FIRST_OFFSET：以0作为消费位移
+- CONSUME_FROM_TIMESTAMP：以消费者启动时间戳对应的消息作为消费位移
+
+上面代码其实省略了很多if/else判断，很可能result结果为-1，但是没关系，在上面的拉取消息服务的分析中知道，消息拉取偏移量在拉取过程中会被broker修正！
 
 # RocketMQ与Kafka比较
 
