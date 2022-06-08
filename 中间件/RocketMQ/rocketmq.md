@@ -3736,6 +3736,300 @@ RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息�
 
 # HA主从同步分析
 
+主从同步主要由以下类实现：
+
+`HAService`：主从同步核心实现类
+
+`HAService$HAClient`：主从同步客户端实现类
+
+`HAConnection`：master和slave的连接包装，它实现了master读slave请求和写消息
+
+除了这3个最重要的类，还有一些内部类，如：
+
+`HAService$AcceptSocketService`：master服务端实现类
+
+`HAService$GroupTransferService`：主从同步通知实现类，只是通知发送消息的生产者等待结束。
+
+## HAService
+
+```java
+/**
+ * 高可用主从同步服务类
+ *
+ * @see HAService#start()
+ */
+public class HAService {
+    private final AtomicInteger connectionCount = new AtomicInteger(0);// 连接数量
+    private final List<HAConnection> connectionList = new LinkedList<>();// 保存的tcp连接
+
+    private final AcceptSocketService acceptSocketService;// master服务器
+    private final GroupTransferService groupTransferService;// 注册同步通知
+    private final AtomicLong push2SlaveMaxOffset = new AtomicLong(0);// slave确认ACK的最大偏移量
+    // 启动方法
+    public void start() throws Exception {
+        this.acceptSocketService.beginAccept();// master服务器配置
+        this.acceptSocketService.start();// master服务器启动
+        this.groupTransferService.start();// 主从同步通知启动
+        this.haClient.start();
+    }
+}
+```
+
+`AcceptSocketService`是HAService的内部类，实现master服务端功能，包装了`java.nio`的`ServerSocketChannel`：
+
+```java
+/**
+ * 监听端口10912，等待slave连接并将其包装为 HAConnection
+ *
+ * @see AcceptSocketService#run()
+ */
+class AcceptSocketService extends ServiceThread {
+    private final SocketAddress socketAddressListen;// 监听地址，默认10912
+    private ServerSocketChannel serverSocketChannel;// 服务端通道
+    private Selector selector;// 选择器
+	
+    public void beginAccept() throws Exception {
+        this.serverSocketChannel = ServerSocketChannel.open();
+        this.selector = RemotingUtil.openSelector();
+        this.serverSocketChannel.socket().setReuseAddress(true);
+        this.serverSocketChannel.socket().bind(this.socketAddressListen);
+        this.serverSocketChannel.configureBlocking(false);// 非阻塞模式
+        this.serverSocketChannel.register(this.selector, SelectionKey.OP_ACCEPT);// 注册监听事件
+    }
+    // 很标准的NIO服务端程序，以下代码省略了不重要的部分
+    public void run() {
+        while (!this.isStopped()) {
+            // 1.等待连接，超时1s
+            this.selector.select(1000);
+            Set<SelectionKey> selected = this.selector.selectedKeys();
+            if (selected != null) {
+                for (SelectionKey k : selected) {
+                    // 2.有新连接到来，将连接包装为HAConnection
+                    if ((k.readyOps() & SelectionKey.OP_ACCEPT) != 0) {
+                        SocketChannel sc = ((ServerSocketChannel) k.channel()).accept();
+                        if (sc != null) {
+                            try {
+                                HAConnection conn = new HAConnection(HAService.this, sc);
+                                conn.start();
+                                HAService.this.addConnection(conn);
+                            } catch (Exception e) {
+                                sc.close();
+                            }
+                        }
+                    }
+                }
+                selected.clear();
+            }
+        }
+    }
+}
+```
+
+master服务端会一直监听10912端口等待slave连接，当有新链接，就把它包装为`HAConnection`，这个类会进行消息的同步请求读取和写入消息。
+
+## HAConnection
+
+master监听到slave的TCP连接事件后，就新建`SocketChannel`打开TCP连接，并包装为`HAConnection`。此类包含两个服务线程`WriteSocketService`和`ReadSocketService`，前者定时将CommitLog中新消息写入连接从而发给slave，后者从连接监听slave发送的8字节偏移量ACK。
+
+> 这个ACK还真可以理解为TCP那种序列号ACK了，master收到slave的ACK后，可以理解为slave已经收到并写入了ACK偏移量之前的所有消息，也理解为slave期待的下次拉取消息偏移量。
+
+```java
+public class HAConnection {
+    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
+    private final SocketChannel socketChannel;// 套接字通道
+    // 写服务，将nextTransferFromWhere之后的新消息写入slave
+    private final WriteSocketService writeSocketService;
+    // 读服务，监听读事件，根据slave反馈的ACK更新slaveAckOffset和slaveRequestOffset
+    private final ReadSocketService readSocketService;
+	
+    // slave请求拉取的偏移量，这个其实只是用来初始化写服务的nextTransferFromWhere，从代码来看只会更改1次
+    private volatile long slaveRequestOffset = -1;
+    private volatile long slaveAckOffset = -1;// slave反馈拉取完成的偏移量
+}
+```
+
+### ReadSocketService
+
+先来看读服务是如何处理slave发送的ACK请求的：
+
+```java
+class ReadSocketService extends ServiceThread {
+    private final Selector selector;// 选择器
+    private final SocketChannel socketChannel;// 套接字通道
+    // 默认1MB缓冲区
+    private final ByteBuffer byteBufferRead = ByteBuffer.allocate(READ_MAX_BUFFER_SIZE);
+    private int processPosition = 0;
+    private volatile long lastReadTimestamp = System.currentTimeMillis();
+
+    public void run() {
+       while (!this.isStopped()) {
+           this.selector.select(1000);
+           boolean ok = this.processReadEvent();
+           if (!ok) {
+               HAConnection.log.error("processReadEvent error");
+               break;
+           }
+           // 省略时间检查
+       	} 
+		// 省略资源清理
+    }    
+}
+```
+
+读服务线程监s通道是否有ACK消息到来：如果有则进行处理
+
+```java
+private boolean processReadEvent() {
+    // 省略缓冲区前置处理
+    while (this.byteBufferRead.hasRemaining()) {
+        // 1.从通道读取数据到缓冲区
+        int readSize = this.socketChannel.read(this.byteBufferRead);
+        if (readSize > 0) {
+            readSizeZeroTimes = 0;
+            this.lastReadTimestamp = HAConnection.this.haService.getDefaultMessageStore().getSystemClock().now();
+            if ((this.byteBufferRead.position() - this.processPosition) >= 8) {
+                int pos = this.byteBufferRead.position() - (this.byteBufferRead.position() % 8);
+                // 2.读8字节的偏移量ACK
+                long readOffset = this.byteBufferRead.getLong(pos - 8);
+                this.processPosition = pos;
+                // 3.更新slave反馈拉取完成的偏移量
+                HAConnection.this.slaveAckOffset = readOffset;
+                // slaveRequestOffset的初始化，也是唯一会改变其值的地方
+                if (HAConnection.this.slaveRequestOffset < 0) {
+                    HAConnection.this.slaveRequestOffset = readOffset;
+                    log.info("slave[" + HAConnection.this.clientAddr + "] request offset " + readOffset);
+                }
+                // 4.更新HAService.push2SlaveMaxOffset，
+                // 目的是让GroupCommitLog可以通知等待的发送结果
+                HAConnection.this.haService.notifyTransferSome(
+                    HAConnection.this.slaveAckOffset);
+            }
+        } else if (readSize == 0) {
+            if (++readSizeZeroTimes >= 3) {
+                break;
+            }
+        } else {
+            log.error("read socket[" + HAConnection.this.clientAddr + "] < 0");
+            return false;
+        }
+    } 
+    return true;
+}
+```
+
+读服务线程读到ACK后：
+
+第2步会将HAConnection.slaveAckOffset进行更新，目的是让写线程知道从哪开始发消息给slave；
+
+第4步会更新HAService.push2SlaveMaxOffset，目的是让GroupTransferService这个通知类可以看到那些消息已经同步成功了，从而通知由于同步等待主从复制而阻塞的消息发送者线程。
+
+### WriteSocketService
+
+```java
+class WriteSocketService extends ServiceThread {
+    private final Selector selector;// 选择器
+    private final SocketChannel socketChannel;// 套接字通道
+
+    private final int headerSize = 8 + 4;
+    private final ByteBuffer byteBufferHeader = ByteBuffer.allocate(headerSize);
+    private long nextTransferFromWhere = -1;// 下次传输偏移量
+    private SelectMappedBufferResult selectMappedBufferResult;
+    private boolean lastWriteOver = true;
+    private long lastWriteTimestamp = System.currentTimeMillis();
+
+    public void run() {
+        while (!this.isStopped()) {
+            this.selector.select(1000);// 等待上次消息写完，超时1s
+            // slaveRequestOffset未初始化，说明slave还没有发过ACK，等待slave发ACK
+            if (-1 == HAConnection.this.slaveRequestOffset) {
+                Thread.sleep(10);
+                continue;
+            }
+            // 1、说明是初次进行数据传输，计算待传输物理偏移量nextTransferFromWhere
+            if (-1 == this.nextTransferFromWhere) {
+                // 1.1 说明slave是新启动的，则偏移量为CommitLog最大值，只让它同步最新的消息
+                if (0 == HAConnection.this.slaveRequestOffset) {
+                    // 省略masterOffset的获取
+                    this.nextTransferFromWhere = masterOffset;
+                } else {
+                    // 1.2 slave之前有同步过，则就用slave传来的ACK偏移量
+                    this.nextTransferFromWhere = HAConnection.this.slaveRequestOffset;
+                }
+				// 省略日志打印
+            }
+            // 2、如果上次写事件已全部写入且距上次最后写入时间大于5s，则发一个心跳包，避免长连接关闭
+            if (this.lastWriteOver) {
+				// 省略interval计算
+                if (interval > 5000) {
+                    // 心跳包
+                    this.byteBufferHeader.position(0);
+                    this.byteBufferHeader.limit(headerSize);// 心跳包12B
+                    this.byteBufferHeader.putLong(this.nextTransferFromWhere);
+                    this.byteBufferHeader.putInt(0);// size消息长度默认0
+                    this.byteBufferHeader.flip();
+
+                    this.lastWriteOver = this.transferData();
+                    if (!this.lastWriteOver)
+                        continue;
+                }
+            } else {
+                // 3.如果上次还没传完，则接着传输
+                this.lastWriteOver = this.transferData();
+                if (!this.lastWriteOver)
+                    continue;
+            }
+
+            // 4.以待传输偏移量到CommitLog查到消息切片，将消息传输给slave
+            SelectMappedBufferResult selectResult =
+                HAConnection.this.haService.getDefaultMessageStore().
+                getCommitLogData(this.nextTransferFromWhere);
+            // 4.1 有新消息则发给slave，并更新nextTransferFromWhere
+            if (selectResult != null) {
+                int size = selectResult.getSize();
+                // 1次最多传32KB，这意味着可能末尾消息会不完整
+                if (size > 1024*32) size =1024*32;
+      
+                long thisOffset = this.nextTransferFromWhere;
+                this.nextTransferFromWhere += size;
+
+                selectResult.getByteBuffer().limit(size);
+                this.selectMappedBufferResult = selectResult;
+
+                // Build Header
+                this.byteBufferHeader.position(0);
+                this.byteBufferHeader.limit(headerSize);
+                this.byteBufferHeader.putLong(thisOffset);
+                this.byteBufferHeader.putInt(size);
+                this.byteBufferHeader.flip();
+
+                this.lastWriteOver = this.transferData();
+            } else {
+                // 4.2 无新消息则等待100ms
+                HAConnection.this.haService.getWaitNotifyObject().allWaitForRunning(100);
+            }
+        }
+		// 省略资源释放
+    }
+
+    // 此方法将缓冲区ByteBuffer数据写入套接字通道，即发给slave
+    private boolean transferData() throws Exception {
+		// 省略，比较常规的缓冲区数据写入通道
+    }
+}
+```
+
+上面代码中的5000和1024*32都是为了方便展示将默认值直接给出了，源代码为从配置获取。
+
+从上面4.2步可以看出，写服务线程就是**每100ms检查1次有无新消息写入CommitLog，有则发给slave**。
+
+> 有个疑惑，读服务线程会根据返回ACK维护HAConnection.slaveAckOffset，可是写线程服务几乎没用到这个变量，就单纯自己发自己的，发送偏移量也是自己单独维护一个，那如果发送失败了呢？
+>
+> 不应该是写服务时刻根据slave返回的ACK偏移量slaveAckOffset来检查消息发送吗？
+
+## HAClient
+
+
+
 
 
 # RocketMQ与Kafka比较
