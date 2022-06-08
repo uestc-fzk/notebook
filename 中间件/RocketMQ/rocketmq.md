@@ -1869,7 +1869,7 @@ public CompletableFuture<PutMessageStatus> submitFlushRequest(AppendMessageResul
         if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
             flushCommitLogService.wakeup();// 缓存异步刷盘线程
         } else {
-            // 2.2 开启了瞬态缓冲区，则缓存提交线程
+            // 2.2 开启了瞬态缓冲区，则唤醒提交线程
             commitLogService.wakeup();// 唤醒提交线程
         }
         return CompletableFuture.completedFuture(PutMessageStatus.PUT_OK);
@@ -2518,6 +2518,8 @@ public synchronized void start() throws MQClientException {
 
 3、消费端消息服务线程池是每个消费者组私有的，即1个消费者组有1个消费端消息服务线程池。
 
+> 注意：1个消费服务线程池默认有20个线程，不要在1个客户端内创建多个消费者组，这样会创建多个线程池。一个消费者组完全可以订阅所有感兴趣的topic。
+
 ## 拉取消息服务
 
 ### PullMessageService
@@ -2979,7 +2981,9 @@ public GetMessageResult getMessage(final String group, final String topic, final
 }
 ```
 
-从第3步来看，**tag过滤是直接根据tag哈希码进行匹配的**，这样查出来的消息可能不一定完全匹配，需要消费者端再次进行过滤。我认为你这样返回一条可能无用的消息所占用的网络IO并不见得比CPU计算开销低。
+3.2步是根据ConsumeQueue进行过滤，3.4是根据CommitLog中的消息内容进行过滤。
+
+从第3步来看，**tag过滤是直接根据tag哈希码进行匹配的**，这样查出来的消息可能不一定完全匹配，需要消费者端再次进行过滤。我认为这样返回一条可能无用的消息所占用的网络IO并不见得比CPU计算开销低，完全可以在通过tag哈希检查后，从CommitLog中查出消息后再进行一次tag过滤嘛。
 
 #### 消费者消息拉取回调处理
 
@@ -3025,7 +3029,7 @@ public void onException(Throwable e) {
 }
 ```
 
-拉取到结果首先进行的是tag过滤，因为服务端只是根据tag的哈希码进行的过滤，不一定完全正确。
+拉取到结果**首先进行的是tag过滤，因为服务端只是根据tag的哈希码进行的过滤，不一定完全正确**。
 
 可以看到当没有消息的时候还是要立刻再次调度拉取，推模式有点离谱了。
 
@@ -3701,6 +3705,38 @@ class DeliverDelayedMessageTimerTask implements Runnable {
 > 因为CommitLog文件一旦写入是不会进行修改的，若不修改，则该消息的原始topic和queueId就无法恢复，所以从顺序写文件考虑，就直接再存一条消息了。
 
 从延时消息被持久化两次来考虑的话，就**最好不要把大体积消息和很多消息设为延时消息**。
+
+## 顺序消息
+
+RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息按顺序消费。
+
+消费队列上的消息是按顺序拉取的，在并发消费模式下每次拉取的32个消息会提交给线程池(默认20个线程)进行消费，那这32条消息并不会按照顺序前后消费，而是一起消费的。这对于某些业务消息是不可取的，所以引入了顺序消息消费模式，其实就是在消费的时候给本地消费队列对应的ProcessQueue加个锁，保证该消费队列的消息同一时刻只会被线程池中1个线程消费。
+
+若需要topic级别的**全局顺序消费**，可以把topic配置为1个队列。
+
+顺序消息要考虑的有两点，一个是消息处理队列中的消息限制为1个线程消费，另一个是再平衡时，确保平衡后消息不会被重复消费(这样很可能引起消费乱序).
+
+[顺序消息流程图原图](https://www.processon.com/view/link/62a06054e401fd2930a8d141)
+
+![顺序消息流程图在线图](http://assets.processon.com/chart_image/62a04a09f346fb5dc7291612.png)
+
+顺序消息大致流程：(此处需要结合上诉的 **推模式拉取消息基本流程** 处一起分析)
+
+1、拉取消息时，在流控处如果发现是顺序消费，则先判断ProcessQueue处理队列是否锁定；
+
+> 目的在于判断broker端的消费队列是否由此消费端锁定，因为只有后者锁定了，才会去锁定本地的ProcessQueue；
+>
+> ConsumeMessageOrderlyService会注册1个20s调度1次的定时任务，它会调度RebalanceImpl#lockAll()去broker端锁定此消费端持有的所有消费队列，并对成功锁定的消费队列对应的本地ProcessQueue进行锁定。
+
+2、正常拉取流程，拉取成功后放入处理队列ProcessQueue，并提交消费请求到消费线程池；
+
+3、线程池内线程处理消费请求时，先去锁定此消费队列对应的内部锁，保证同一时间只有一个线程消费ProcessQueue中的消息，此时消息已经是顺序消费了；
+
+> 注意有2处锁定，前者互斥不同消费端拉取消息，后置互斥同一消费端内线程池内不同消费线程消费队列消息。
+
+# HA主从同步分析
+
+
 
 # RocketMQ与Kafka比较
 
