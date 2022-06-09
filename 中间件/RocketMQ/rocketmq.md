@@ -664,11 +664,11 @@ Producer发送的消息结构如下：
 
 
 
+# RocketMQ整体架构
 
+[RocketMQ整体架构原图](https://www.processon.com/view/link/62a1b35b7d9c08733ec26b38)
 
-
-
-
+![RocketMQ整体架构图](rocketmq.assets/RocketMQ整体架构图.png)
 
 # 消息发送分析
 
@@ -1387,7 +1387,7 @@ ConsumeQueue可以看做是索引文件，而CommitLog则是物理文件，每�
 
 Index文件是以消息的key为索引，消息物理偏移量为value的索引文件。这一个Index文件能存储消息索引条目为2000万。
 
-index文件大小=`40B+500万*4B+2000万*20B`
+index文件大小=`40B+500万*4B+2000万*20B`，大概400MB
 
 index文件布局，[原图](https://www.processon.com/view/link/629a14cde0b34d0728fdf19b)
 
@@ -2281,24 +2281,6 @@ consumerFilter.json  consumerFilter.json.bak  consumerOffset.json  consumerOffse
 	}
 }
 ```
-
-## 负载均衡和再平衡
-
-在集群消费模式下，某个消费队列只能被一个集群中的消费者消费，所以需要将topic的多个queue分配到集群内的消费者。常用的分配算法有AVG和AVG_BY_CIRCLE两种平均算法。
-
-注意当某个消费者组下的消费者实例数量大于队列的数量时，多余的消费者实例将分配不到任何队列。
-
-Rebalance即再均衡，指的是，将⼀个Topic下的多个Queue在同⼀个Consumer Group中的多个Consumer间进行重新分配的过程。
-
-
-
-
-
-
-
-
-
-
 
 ## DefaultMQPushConsumer
 
@@ -3827,6 +3809,52 @@ class AcceptSocketService extends ServiceThread {
 
 master服务端会一直监听10912端口等待slave连接，当有新链接，就把它包装为`HAConnection`，这个类会进行消息的同步请求读取和写入消息。
 
+### GroupTransferService
+
+这个类和同步刷盘的GroupCommitService实现上是相同的，都是对请求`GroupCommitRequest`的处理和放置结果Future。
+
+```java
+/**
+ * GroupTransferService Service
+ * 主从同步复制通知实现类
+ * 这个和同步刷盘GroupCommitService类实现相似
+ * 但是它仅仅只有通知功能，具体实现就是一直搁那查HAService.push2SlaveMaxOffset，此变量代表的是slave反馈的ACK，即slave当前同步的最大偏移量
+ * 当查的这个大于GroupCommitRequest要求的偏移量，则通知这个类
+ */
+class GroupTransferService extends ServiceThread {
+    private final WaitNotifyObject notifyTransferObject = new WaitNotifyObject();
+    private final PutMessageSpinLock lock = new PutMessageSpinLock();
+    private volatile LinkedList<CommitLog.GroupCommitRequest> requestsWrite = new LinkedList<>();
+    private volatile LinkedList<CommitLog.GroupCommitRequest> requestsRead = new LinkedList<>();
+
+    // 等待同步结果
+    private void doWaitTransfer() {
+        if (!this.requestsRead.isEmpty()) {
+            for (CommitLog.GroupCommitRequest req : this.requestsRead) {
+                boolean transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
+                long deadLine = req.getDeadLine();
+                while (!transferOK && deadLine - System.nanoTime() > 0) {
+                    this.notifyTransferObject.waitForRunning(1000);
+                    transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
+                }
+
+                req.wakeupCustomer(transferOK ? PutMessageStatus.PUT_OK : PutMessageStatus.FLUSH_SLAVE_TIMEOUT);
+            }
+
+            this.requestsRead = new LinkedList<>();
+        }
+    }
+}
+```
+
+上面只给出了这一个重要方法，其它方法和`GroupCommitService`没太大区别。
+
+这个方法也能看出，它就是检查HAService.push2SlaveMaxOffset变量，然后通知`GroupCommitRequest`是成功还是超时。
+
+> 那同步master和异步master有什么区别呢？
+>
+> 在broker端的HA服务上基本无区别。同步master的话，消息发送者线程会等待GroupCommitRequest的Future结果到来，异步master则直接返回生产者了。
+
 ## HAConnection
 
 master监听到slave的TCP连接事件后，就新建`SocketChannel`打开TCP连接，并包装为`HAConnection`。此类包含两个服务线程`WriteSocketService`和`ReadSocketService`，前者定时将CommitLog中新消息写入连接从而发给slave，后者从连接监听slave发送的8字节偏移量ACK。
@@ -4028,9 +4056,151 @@ class WriteSocketService extends ServiceThread {
 
 ## HAClient
 
+前面的`HAServive`和`HAConnection`都是master服务端的，从`HAConnection.ReadSocketService`来分析的话，slave客户端类`HAClient`应该需要定时上报当前CommitLog最大偏移量作为ACK；从`HAConnection.WriteSocketService`来分析，`HAClient`需要监听可读事件，然后将消息写入CommitLog。
 
+接下来就具体分析：
 
+```java
+/**
+ * slave客户端：主从同步的核心实现类
+ */
+class HAClient extends ServiceThread {
+    // 主服务器地址
+    private final AtomicReference<String> masterAddress = new AtomicReference<>();
+    // 缓冲区，8字节，ACK就是CommitLog当前最大偏移量只需要8字节
+    private final ByteBuffer reportOffset = ByteBuffer.allocate(8);
+    private final Selector selector;// 选择器
+    private SocketChannel socketChannel;// 套接字通道
+    // slave当前复制进度，即CommitLog文件最大偏移量
+    private long currentReportedOffset = 0;
+    // 读缓冲区，默认4MB，因为消息默认最大4MB
+    private ByteBuffer byteBufferRead = ByteBuffer.allocate(READ_MAX_BUFFER_SIZE);
+    
+    @Override
+    public void run() {
+        while (!this.isStopped()) {
+            // 省略try/catch
+            // 1.从服务器连接主服务器
+            if (this.connectMaster()) {
+                // 2.每5s向master反馈拉取位移
+                if (this.isTimeToReportOffset()) {
+                    boolean result = this.reportSlaveMaxOffset(this.currentReportedOffset);
+                    if (!result) {
+                        this.closeMaster();
+                        continue;
+                    }
+                }
+                // 3.等待并处理读事件
+                this.selector.select(1000);
+                boolean ok = this.processReadEvent();
+                if (!ok) {
+                    this.closeMaster();
+                    continue;
+                }
+				// 省略部分代码
+            } else {
+                this.waitForRunning(1000 * 5);
+            }
+        }
+    }
 
+	// 处理读事件
+    private boolean processReadEvent() {
+        int readSizeZeroTimes = 0;
+        while (this.byteBufferRead.hasRemaining()) {
+            // 省略try/catch
+            int readSize = this.socketChannel.read(this.byteBufferRead);
+            if (readSize > 0) {
+                readSizeZeroTimes = 0;
+                // 若从通道中读取到数据并放入缓冲区，则对缓冲区中数据进行处理
+                boolean result = this.dispatchReadRequest();
+                if (!result) {
+                    log.error("HAClient, dispatchReadRequest error");
+                    return false;
+                }
+            } else if (readSize == 0) {// 若读3次都没数据则退出
+                if (++readSizeZeroTimes >= 3) break;
+            }
+            // 省略部分代码
+        }
+        return true;
+    }
+	// 处理缓冲区中读取的数据
+    private boolean dispatchReadRequest() {
+        final int msgHeaderSize = 8 + 4; // phyoffset + size
+        while (true) {
+            int diff = this.byteBufferRead.position() - this.dispatchPosition;
+            if (diff >= msgHeaderSize) {// 如果这里不满足，说明是心跳包
+                // 1.读取响应头中masterPhyOffset和size
+                long masterPhyOffset = this.byteBufferRead.getLong(this.dispatchPosition);
+                int bodySize = this.byteBufferRead.getInt(this.dispatchPosition + 8);
+
+                // 2.将masterPhyOffset与本地最大偏移量比较，若不相同说明消息拉错了
+                long slavePhyOffset = HAService.this.defaultMessageStore.getMaxPhyOffset();
+                if (slavePhyOffset != 0) {
+                    if (slavePhyOffset != masterPhyOffset) {
+                        log.error("master pushed offset not equal the max phy offset in slave, SLAVE: "
+                                  + slavePhyOffset + " MASTER: " + masterPhyOffset);
+                        return false;
+                    }
+                }
+                // 3.将消息写入CommitLog
+                if (diff >= (msgHeaderSize + bodySize)) {
+                    byte[] bodyData = byteBufferRead.array();
+                    int dataStart = this.dispatchPosition + msgHeaderSize;
+                    // 这里会将传来的所有消息数据直接写入CommitLog都不带检查的，看来很相信它不会出错啊
+                    HAService.this.defaultMessageStore.appendToCommitLog(
+                        masterPhyOffset, bodyData, dataStart, bodySize);
+
+                    this.dispatchPosition += msgHeaderSize + bodySize;
+                    // 4.更新拉取位置并反馈给master
+                    if (!reportSlaveMaxOffsetPlus()) {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+            if (!this.byteBufferRead.hasRemaining()) 
+                this.reallocateByteBuffer();
+            break;
+        }
+        return true;
+    }
+
+    // 此方法就是直接把maxOffset写入套接字通道，即发ACK
+    private boolean reportSlaveMaxOffset(final long maxOffset) {
+       // 省略非常简单的NIO写入
+    }
+}
+```
+
+slave客户端大致步骤如下：
+
+1、slave连上master；
+
+2、若距上次发ACK已超过5s，则发1次ACK(功能类似于心跳包)；监听通道读事件最多1s；
+
+3、尝试对通道进行读取，若3次都没数据则进入下次循环；有数据则读入缓冲区，接着对缓冲区进行处理；
+
+4、先处理响应头，响应头中有master发送的消息中最小偏移量和整个响应体大小；
+
+5、将响应消息最小偏移量和本地CommitLog最大偏移量比较，若不相等说明拉错消息了，直接中断连接；
+
+6、拉取正确则直接把响应体写入CommitLog，并将新的拉取位置作为ACK反馈给master。
+
+## 同步or异步
+
+RocketMQ的多master多slave模式有两种复制方式：同步双写和异步复制。
+
+从上面的代码分析可以得知，**HA的复制一直都是异步复制**，`HAConnection.WriteSocketServie`每100ms检查1次有无新消息到来，有则发给slave。
+
+发送者线程在最后会提交刷盘请求和同步请求，且两者都是GroupCommitRequest，同步请求是发给HAService，最终发给了GroupTransferService，然后发送者线程将根据在同步master的情况下会等待这个请求的Future结果到来，异步master则直接返回生产者PUT_OK了。
+
+说白了，就是同步master没有实现消息写入立刻就去唤醒`HAConnection.WriteSocketServie`立刻发到slave，而是要等它自己100ms醒来。也就是同步master并没有做到及时复制，这和同步落盘是不一样的。
+
+> 那同步master有必要吗？
+>
+> 我认为还是有必要的，同步master下，发送者线程一直等待复制结果，若失败或超时，生产者才能知道slave复制失败了，生产者就可以进行消息重试。
 
 # RocketMQ与Kafka比较
 
