@@ -794,7 +794,13 @@ public class DefaultMessageStore implements MessageStore {
 
 这个建议直接看源码，这里给出我绘制的[DefaultMessageStore启动流程图](https://www.processon.com/view/link/62962c1c5653bb788c85bdaa)
 
+![DefaultMessageStore启动流程](rocketmq.assets/DefaultMessageStore启动流程.png)
+
 ### 发送存储流程
+
+[原图](https://www.processon.com/view/link/62a3040af346fb6b6e08aeef)
+
+![消息发送存储流程](rocketmq.assets/消息发送存储流程.png)
 
 #### putMessage
 
@@ -1175,7 +1181,7 @@ private void init(final String fileName, final int fileSize) throws IOException 
 
 ### 提交
 
-Commit操作仅仅在开启瞬态缓冲区后会被调用，因为瞬态缓冲开启后，消息存储流程为：`write到堆外直接内存-->commit到文件通道-->flush落盘`
+**Commit操作仅仅在开启瞬态缓冲区后会被调用**，因为瞬态缓冲开启后，消息存储流程为：`write到堆外直接内存-->commit到文件通道-->flush落盘`
 
 ```java
 /**
@@ -1318,7 +1324,11 @@ public class TransientStorePool {
 
 它会利用com.sun.jna.Library库锁定该批内存，避免被换到交换区，以此提高性能。
 
+瞬态缓冲池作用：实现内存级别读写分离，将写操作从CommitLog的内存映射缓存中剥离到缓冲池的堆外直接内存。
+
 ## CommitLog
+
+![image-20220610111433263](rocketmq.assets/image-20220610111433263.png)
 
  消息主题及元数据的存储主题，消息内容不定长。
 
@@ -1342,28 +1352,26 @@ CommitLog类中还有很多重要的方法：如写消息、commit消息、刷�
 
 消息采用定长20字节设计，30万条目组成，可以像数组一样随机访问，**每个文件大约5.72MB**。
 
-| 8B                      | 4B       | 8B        |
-| ----------------------- | -------- | --------- |
-| 消息物理偏移量phyOffset | 文件大小 | tag哈希码 |
-| phyOffset               | 文件大小 | tag哈希码 |
+| 8B                      | 4B   | 8B        |
+| ----------------------- | ---- | --------- |
+| 消息物理偏移量phyOffset | size | tag哈希码 |
+| phyOffset               | size | tag哈希码 |
 
-ConsumeQueue文件是提供给消费者根据topic消费消息的，那么重要的方法就是查询消息：
+ConsumeQueue文件是提供给消费者**根据topic消费消息**的，那么重要的方法就是查询消息：
 
 ```java
 /**
  * 根据此消息队列起始消息索引查询之后所有条目
- * @param startIndex 起始索引
+ * @param startIndex 起始索引，即消费队列内的第几条消息
  */
 public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
     int mappedFileSize = this.mappedFileSize;
-    long offset = startIndex * CQ_STORE_UNIT_SIZE;
+    long offset = startIndex * CQ_STORE_UNIT_SIZE;// 单个条目默认20B
     if (offset >= this.getMinLogicOffset()) {
         MappedFile mappedFile = this.mappedFileQueue.findMappedFileByOffset(offset);
-        if (mappedFile != null) {
+        if (mappedFile != null)
             // 这里会返回从给定位置到readPosition指针之间的缓冲区切片
             return mappedFile.selectMappedBuffer((int) (offset % mappedFileSize));
-        }
-        
     }
     return null;
 }
@@ -1371,13 +1379,13 @@ public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
 
 此方法可实现顺序读消息，根据返回的所有消息索引条目，遍历并取出物理偏移量再去CommitLog文件查询消息内容。
 
-ConsumeQueue也提供根据时间戳查消息在此消息队列中的偏移量，从上面的存储条目来看，并没有保存时间戳，那这个是如何实现的呢？
+ConsumeQueue也**提供根据时间戳查消息在此消息队列中的偏移量**，从上面的存储条目来看，并没有保存时间戳，那这个是如何实现的呢？
 
 大致步骤就是：
 
-1、先根据时间搓定位到ConsumeQueue的MappedFileQueue队列中的哪个MappedFile
+1、先**根据时间搓定位**到ConsumeQueue的MappedFileQueue队列中的哪个**MappedFile**
 
-2、在这个队列中进行二分查找，将mid索引的条目指向的物理消息的存储时间戳从CommitLog文件中查出来，进行比较，进行下一循环判断。
+2、在这个队列中进行**二分查找**，将mid索引的条目指向的物理消息的存储时间戳从CommitLog文件中查出来，进行比较，进行下一循环判断。
 
 ConsumeQueue可以看做是索引文件，而CommitLog则是物理文件，每次去CommitLog中查就类似于MySQL回表查询。
 
@@ -1391,7 +1399,7 @@ index文件大小=`40B+500万*4B+2000万*20B`，大概400MB
 
 index文件布局，[原图](https://www.processon.com/view/link/629a14cde0b34d0728fdf19b)
 
-![index文件布局](http://assets.processon.com/chart_image/629a011d079129763c17d4d6.png)
+![Index文件](rocketmq.assets/Index文件.png)
 
 ```java
 /**
@@ -1587,17 +1595,13 @@ ConsumeQueue和Index文件都是基于CommitLog文件构建，消息写入Commit
  * TODO 消息转发服务线程
  */
 class ReputMessageService extends ServiceThread {
-
     private volatile long reputFromOffset = 0;// 消息转发偏移量
 	/** 此方法判断是否需要进行消息转发 */
     private boolean isCommitLogAvailable() {
         return this.reputFromOffset < DefaultMessageStore.this.commitLog.getMaxOffset();
     }
-	
-    @Override
-    public void run() {
-        DefaultMessageStore.log.info(this.getServiceName() + " service started");
 
+    public void run() {
         while (!this.isStopped()) {
             try {
                 Thread.sleep(1);// 每毫秒启动1次
@@ -1606,8 +1610,6 @@ class ReputMessageService extends ServiceThread {
                 DefaultMessageStore.log.warn(this.getServiceName() + " service has exception. ", e);
             }
         }
-
-        DefaultMessageStore.log.info(this.getServiceName() + " service end");
     }
 }
 ```
@@ -1750,10 +1752,10 @@ private boolean putMessagePositionInfo(final long offset, final int size, final 
 
 可以看到消费队列的写入的条目就是20字节，并且直接写入文件末尾。
 
-| 8B                      | 4B       | 8B        |
-| ----------------------- | -------- | --------- |
-| 消息物理偏移量phyOffset | 文件大小 | tag哈希码 |
-| phyOffset               | 文件大小 | tag哈希码 |
+| 8B                      | 4B   | 8B        |
+| ----------------------- | ---- | --------- |
+| 消息物理偏移量phyOffset | size | tag哈希码 |
+| phyOffset               | size | tag哈希码 |
 
 ### 更新Index
 
@@ -1764,7 +1766,6 @@ private boolean putMessagePositionInfo(final long offset, final int size, final 
  * TODO 更新Index转发类
  */
 class CommitLogDispatcherBuildIndex implements CommitLogDispatcher {
-
     @Override
     public void dispatch(DispatchRequest request) {
         if (DefaultMessageStore.this.messageStoreConfig.isMessageIndexEnable()) {
@@ -1916,8 +1917,6 @@ class GroupCommitService extends FlushCommitLogService {
     }
     
     public void run() {
-        CommitLog.log.info(this.getServiceName() + " service started");
-
         while (!this.isStopped()) {
             try {
                 /*
