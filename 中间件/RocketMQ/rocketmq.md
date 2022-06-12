@@ -644,8 +644,6 @@ producer.send(message);
 
 ## 事务消息
 
-
-
 ## 批量消息
 
 生产者进行消息发送时可以一次发送多条消息，这可以大大提升Producer的发送效率。不过需要注意以下几点： 
@@ -1826,6 +1824,10 @@ putKey()方法呢可以看上面Index部分，具体描述了Index索引的插�
 
 ## 刷盘
 
+[原图](https://www.processon.com/view/link/62a5ec9c6376893f4920ca4f)
+
+![刷盘流程](rocketmq.assets/刷盘流程.png)
+
 RocketMQ的读写基于java NIO 内存映射机制。
 
 这里只分析CommitLog文件的刷盘，ConsumeQueue和Index文件刷盘机制类似。
@@ -2578,7 +2580,7 @@ public class PullMessageService extends ServiceThread {
 
 **消费者组会为订阅的topic的每个queue都保留一个`PullRequest`**，并放入拉取服务线程的阻塞队列中进行调度，它们分别代表了从该topic的不同队列拉取消息的任务。
 
-> 拉取请求是在RebalanceImpl中创建的。
+> 拉取请求是在RebalanceImpl中创建的。DefaultMQPushConsumer消费者组启动的时候会主动调用1次再平衡，它会创建PullRequest，之后的再平衡如果发生了变化也会创建PullRequest。
 
 ```java
 /**
@@ -2693,7 +2695,7 @@ public class ProcessQueue {
 
 [消息拉取流程图原图](https://www.processon.com/view/link/629ef4d6e401fd2930a4c8ae)
 
-![消息拉取流程图在线图](http://assets.processon.com/chart_image/629e0712e0b34d46d73cf2d9.png)
+![消息拉取流程](rocketmq.assets/消息拉取流程.png)
 
 #### 消费者拉取消息请求
 
@@ -2729,8 +2731,14 @@ public void pullMessage(final PullRequest pullRequest) {
             return;
         }
     } else {
-        // 2.4 如果是顺序消息消费，看不懂？
-       	// 省略顺序消息处理
+        // 2.4 如果是顺序消息消费，这里会先判断是否broker的消费队列是否以后被此消费端锁定
+        if (processQueue.isLocked()) {
+			// 省略
+        } else {
+            this.executePullRequestLater(pullRequest, pullTimeDelayMillsWhenException);
+            log.info("pull message later because not locked in broker, {}", pullRequest);
+            return;
+        }
     }
     // 3.获取该topic的订阅信息
     final SubscriptionData subscriptionData = this.rebalanceImpl.getSubscriptionInner().get(pullRequest.getMessageQueue().getTopic());
@@ -2777,11 +2785,11 @@ public void pullMessage(final PullRequest pullRequest) {
 }
 ```
 
-在上面的第2步流控中，有以下几种流控规则：①ProcessQueue中消息总数流控；②ProcessQueue中消息总大小流控；③ProcessQueue中并发消息跨度流控；④ProcessQueue中顺序消息流控；
+在上面的第2步流控中，有以下几种流控规则：①ProcessQueue中消息总数流控；②ProcessQueue中消息总大小流控；③ProcessQueue中并发消息跨度流控。
 
 > 为什么要进行消息流控呢？
 >
-> 因为消息拉取请求PullRequest在成功拉取消息后，立刻就放入了拉取消息服务线程的阻塞队列中从而进行下次拉取调度，如果拉取速度很快，而消费速度很慢，这会造成大量的消息积压，这个情况也可能由消费端重启引起。
+> 因为消息拉取请求PullRequest在成功拉取消息后，立刻就放入了拉取消息服务线程的阻塞队列中从而进行下次拉取调度，如果拉取速度很快，而消费速度很慢，这会造成大量的消息积压并占用大量内存，这个情况也可能由消费端重启引起。
 >
 > 为什么流控规则里会专门针对并发消息消费的跨度流控呢？
 >
@@ -3200,9 +3208,9 @@ public void notifyMessageArriving(final String topic, final int queueId, final l
 
 #### 消息转发服务通知
 
-在上面的长轮询线程中，每5s唤醒1次进行拉取任务的检查新消息或过期处理。5s的实时性较差，与推模式的初衷相违背，所以RocketMQ还有一个机制可以保证消息的实时通知。
+在上面的长轮询线程中，每5s唤醒1次进行拉取任务的检查新消息或过期处理。**5s的实时性较差，与推模式的初衷相违背**，所以RocketMQ还有一个机制可以保证消息的实时通知。
 
-其实就是消息写入CommitLog内存映射缓冲区后，不是有转发服务线程嘛，这个线程是1ms启动1次，所以实时性非常高，在它检查到新消息到来转发给ConsumeQueue和Index后，会同时调用长轮询服务线程`PullRequestHoldService#notifyMessageArriving()`方法唤醒挂起拉取请求：
+其实就是消息写入CommitLog内存映射缓冲区后，不是有**转发服务线程嘛，这个线程是1ms启动1次，所以实时性非常高**，在它检查到新消息到来转发给ConsumeQueue和Index后，会同时调用长轮询服务线程`PullRequestHoldService#notifyMessageArriving()`方法唤醒挂起拉取请求：
 
 `ReputMessageService#doReput()`消息转发方法部分相关代码：
 
@@ -3474,6 +3482,8 @@ producer.send(message);
 
 实现原理如图：[延时消息全流程](https://www.processon.com/view/link/6297271f7d9c085adb7d4597)
 
+![延时消息流程](rocketmq.assets/延时消息流程.png)
+
 #### 生产者端
 
 延时消息的发送只需要在发送消息前给消息标记一下就可以了：
@@ -3695,11 +3705,11 @@ RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息�
 
 若需要topic级别的**全局顺序消费**，可以把topic配置为1个队列。
 
-顺序消息要考虑的有两点，一个是消息处理队列中的消息限制为1个线程消费，另一个是再平衡时，确保平衡后消息不会被重复消费(这样很可能引起消费乱序).
+顺序消息要考虑的有两点，一个是消息处理队列中的消息限制为1个线程消费，另一个是再平衡时，确保平衡后消息不会被重复消费(重复消费很可能引起消费乱序).
 
 [顺序消息流程图原图](https://www.processon.com/view/link/62a06054e401fd2930a8d141)
 
-![顺序消息流程图在线图](http://assets.processon.com/chart_image/62a04a09f346fb5dc7291612.png)
+![顺序消息流程](rocketmq.assets/顺序消息流程.png)
 
 顺序消息大致流程：(此处需要结合上诉的 **推模式拉取消息基本流程** 处一起分析)
 
@@ -3713,9 +3723,29 @@ RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息�
 
 3、线程池内线程处理消费请求时，先去锁定此消费队列对应的内部锁，保证同一时间只有一个线程消费ProcessQueue中的消息，此时消息已经是顺序消费了；
 
-> 注意有2处锁定，前者互斥不同消费端拉取消息，后置互斥同一消费端内线程池内不同消费线程消费队列消息。
+> 注意有2处锁定，前者互斥不同消费端拉取消息，后者互斥同一消费端内线程池内不同消费线程消费队列消息。
+>
+> 问题1：为什么顺序消息要向broker端发请求锁定消费队列，不加锁可以吗？那为什么并发消费模式下不加锁呢？
+>
+> 我的回答：
+>
+> 考虑一个场景，消费者A消费队列0，此时正在处理队列0的消息1和消息2，且已经处理完了消息1，正在处理消息2，但还没有提交消息1的消费位移；
+>
+> 忽然增加了一个消费者B，消费者B再平衡后获取队列0，如果不加锁，将直接拉取得到消息1和消息2，此时消费者A还不知道它已经没有队列0的消费权利了，那么可能会出现A刚处理完消息2，B处理完消息1，这在宏观上来看就是消息1在消息2之后又处理了1次，那这和顺序消息就违背了，所以必须加锁等待A顺序处理完成。
+>
+> 并发模式下为什么不加锁呢？因为没这个必要，RocketMQ不保证消息不被重复消费！加锁会导致最长20s的消费停顿。
+>
+> 问题2：上面场景中，如果A解锁之前挂了怎么办？
+>
+> 答：锁是有时间限制的。
+>
+> 问题3：为什么要20s后才发请求解锁？
+>
+> 答：因为消息最长消费时限是15s，顺序消费情况下，为了严格保证消费顺序，需要等待再平衡过程中正在处理的消息处理完成或超时，然后将消费位移提交。
 
 # HA主从同步分析
+
+![主从同步流程](rocketmq.assets/主从同步流程.png)
 
 主从同步主要由以下类实现：
 
@@ -3756,6 +3786,8 @@ public class HAService {
 }
 ```
 
+### AcceptSocketService
+
 `AcceptSocketService`是HAService的内部类，实现master服务端功能，包装了`java.nio`的`ServerSocketChannel`：
 
 ```java
@@ -3786,7 +3818,7 @@ class AcceptSocketService extends ServiceThread {
             if (selected != null) {
                 for (SelectionKey k : selected) {
                     // 2.有新连接到来，将连接包装为HAConnection
-                    if ((k.readyOps() & SelectionKey.OP_ACCEPT) != 0) {
+                    if ((k.readyOps() & SelectionKe y.OP_ACCEPT) != 0) {
                         SocketChannel sc = ((ServerSocketChannel) k.channel()).accept();
                         if (sc != null) {
                             try {
@@ -4214,3 +4246,5 @@ RocketMQ功能性更好：
 > 3.消息标签tag，消息key+消息时间戳过滤查询
 >
 > 4.顺序消息
+
+再平衡不同。
