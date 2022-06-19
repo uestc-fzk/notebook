@@ -23,7 +23,6 @@ daocloud镜像市场：https://hub.daocloud.io/
 容器相关：
 
 ```bash
-
 ## 容器操作
 docker stop 容器id  						# 停止指定的容器
 docker stop $(docker ps -qa) 			# 停止全部容器

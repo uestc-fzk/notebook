@@ -1255,7 +1255,7 @@ public int flush(final int flushLeastPages) {
             } catch (Throwable e) {
                 log.error("Error occurred when force data to disk.", e);
             }
-            // 将读指针(提交指针)设置为刷盘指针
+            // 将读指针(提交指针)赋给刷盘指针
             this.flushedPosition.set(value);
             this.release();
         } else {
@@ -1385,6 +1385,10 @@ public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
 此方法可实现顺序读消息，根据返回的所有消息索引条目，遍历并取出物理偏移量再去CommitLog文件查询消息内容。
 
 ConsumeQueue也**提供根据时间戳查消息在此消息队列中的偏移量**，从上面的存储条目来看，并没有保存时间戳，那这个是如何实现的呢？
+
+> 为什么要提供根据时间戳查消息呢？
+>
+> 因为消费者组初始消费位移可以指定最老、最新、时间戳3种策略，当指定为时间戳时就需要这个方法了。
 
 大致步骤就是：
 
@@ -2800,7 +2804,7 @@ public void pullMessage(final PullRequest pullRequest) {
 >
 > 为什么流控规则里会专门针对并发消息消费的跨度流控呢？
 >
-> 因为消费位移的提交是以ProcessQueue中最小偏移量进行提交的，并发消费情况下，最小偏移量消息如果消费时间很长，那么会导致其后的消息都消费了但却无法通知broker提交消费位移，如果此时消费者挂了，那么这些消费过的消息在之后都将被重复消费！跨度流控可以限制重复消费的消息数量。
+> 因为消费位移的提交是以ProcessQueue中最小偏移量进行提交的，并发消费情况下，最小偏移量消息a如果消费时间很长，那么会导致其后的消息都消费了但却无法通知broker提交消费位移，如果此时消费者挂了或发生再平衡，其它消费者拿到该队列消费权利，从broker获取消费位移为a-1，那么a和之后的很多消息都会被重复消费！跨度流控可以限制重复消费的消息数量。
 
 第4步的回调将在下面分析；
 
