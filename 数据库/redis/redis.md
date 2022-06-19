@@ -24,8 +24,6 @@
 
 > MySQL数据库也经常存储一些大文本的字段，导致数据库表非常的大，在做数据库恢复的时候就导致非常的慢，不容易快速恢复数据库，比如1000万4KB大小的文本就接近40GB的大小，如果能把这些数据从MySQL省去，MySQL将变的非常的小，关系数据库很强大，但是它并不能很好的应付所有的应用场景，MySQL的扩展性差（需要复杂的技术来实现），大数据下IO压力大，表结构更改困难，正是当前使用MySQL的开发人员面临的问题。
 
-
-
 今天我们可以通过第三方平台（如：Google，FaceBook等）可以很容易的访问和抓取数据。用户的个人信息，社交网络，地理位置，用户生成的数据和用户操作日志已经成倍的增加、我们如果要对这些用户数据进行挖掘，那SQL数据库已经不适合这些应用了，而NoSQL数据库的发展却能很好的处理这些大的数据！
 
 ## 什么是NoSQL
@@ -426,8 +424,6 @@ root       35437   35340  0 23:46 pts/1    00:00:00 grep --color=auto redis
 
 ## redis数据类型
 
-Redis 是一个开源（BSD许可）的，内存中的数据结构存储系统，它可以用作数据库、缓存和消息中间件。 它支持多种类型的数据结构，如 [字符串（strings）](http://www.redis.cn/topics/data-types-intro.html#strings)， [散列（hashes）](http://www.redis.cn/topics/data-types-intro.html#hashes)， [列表（lists）](http://www.redis.cn/topics/data-types-intro.html#lists)， [集合（sets）](http://www.redis.cn/topics/data-types-intro.html#sets)， [有序集合（sorted sets）](http://www.redis.cn/topics/data-types-intro.html#sorted-sets) 与范围查询， [bitmaps](http://www.redis.cn/topics/data-types-intro.html#bitmaps)， [hyperloglogs](http://www.redis.cn/topics/data-types-intro.html#hyperloglogs) 和 [地理空间（geospatial）](http://www.redis.cn/commands/geoadd.html) 索引半径查询。 Redis 内置了 [复制（replication）](http://www.redis.cn/topics/replication.html)，[LUA脚本（Lua scripting）](http://www.redis.cn/commands/eval.html)， [LRU驱动事件（LRU eviction）](http://www.redis.cn/topics/lru-cache.html)，[事务（transactions）](http://www.redis.cn/topics/transactions.html) 和不同级别的 [磁盘持久化（persistence）](http://www.redis.cn/topics/persistence.html)， 并通过 [Redis哨兵（Sentinel）](http://www.redis.cn/topics/sentinel.html)和自动 [分区（Cluster）](http://www.redis.cn/topics/cluster-tutorial.html)提供高可用性（high availability）。
-
 | 类型        | 简介                           | 特性                                                         | 场景                                                         |
 | :---------- | :----------------------------- | :----------------------------------------------------------- | :----------------------------------------------------------- |
 | strings     | 二进制安全、最基本类型         | 可以包含任何数据。比如jpg图片或者序列化的对象、最大能存储 **512MB** | key、节拍序列                                                |
@@ -459,17 +455,9 @@ key值是二进制安全的，这意味着可以用任何二进制序列作为ke
 
 关于key的几条规则：
 
-> - 太长的键值不是个好主意，例如1024字节的键值就不是个好主意，不仅因为消耗内存，而且在数据中查找这类键值的计算成本很高。
-> - 太短的键值通常也不是好主意，如果你要用”u:1000:pwd”来代替”user:1000:password”，这没有什么问题，但后者更易阅读，并且由此增加的空间消耗相对于key object和value object本身来说很小。当然，没人阻止您一定要用更短的键值节省一丁点儿空间。
-> - 最好坚持一种模式。例如：`object-type:id:field` 就是个不错的注意，像这样`user:1000:password`。我喜欢对多单词的字段名中加上一个点，就像这样：`comment:1234:reply.to`。
-
-### strings
-
-这是**最简单Redis类型**。如果你只用这种类型，Redis就像一个可以持久化的memcached服务器（注：memcache的数据仅保存在内存中，服务器重启后，数据将丢失）。
-
-string 类型是二进制安全的。意思是 redis 的 string 可以包含任何数据。比如jpg图片或者序列化的对象。
-
-string 类型是 Redis 最基本的数据类型，string 类型的值最大能存储 **512MB**。
+> - 不要太长，消耗内存，数据中查找成本很高；
+> - 不要太短，key相对value而言并不会用什么空间；
+> - 最好坚持一种模式。例如：`object-type:id:field`，如`user:1000:password`
 
 ### Lists
 
@@ -477,8 +465,6 @@ Redis lists基于Linked Lists实现。
 Redis 列表是简单的字符串列表，按照插入顺序排序
 
 Redis Lists用linked list实现的原因是：对于数据库系统来说，至关重要的特性是：能非常快的在很大的列表上添加元素。另一个重要因素是，正如你将要看到的：Redis lists能在常数时间取得常数长度。
-
-如果快速访问集合元素很重要，建议使用可排序集合(sorted sets)。
 
 ### hashes
 
@@ -1413,62 +1399,45 @@ ZADD 命令在`key`后面分数/成员（score/member）对前面支持一些参
 
 排行榜应用，取TOP N操作 ！ 
 
-
-
 ### redis Geo
 
 Redis 的 GEO 特性在 Redis 3.2 版本中推出， 这个功能可以将用户给定的地理位置信息储存起来， 并对这些信息进行操作。来实现诸如**附近位置、摇一摇**这类依赖于地理位置信息的功能。geo的数据类型为zset。
 
 > 可能需要的经纬度网站：https://jingweidu.bmcx.com/
 
-Redis GEO 操作方法有：
+业界比较通用的地理位置距离排序算法是GeoHash算法，**将二维的经纬度数据映射到一维的整数**，距离近的二维坐标映射到一维后也很近。
 
-- geoadd：添加地理位置的坐标。
-- geopos：获取地理位置的坐标。
-- geodist：计算两个位置之间的距离。
-- georadius：根据用户给定的经纬度坐标来获取指定范围内的地理位置集合。
-- georadiusbymember：根据储存在位置集合里面的某个地点获取指定范围内的地理位置集合。
-- geohash：返回一个或多个位置对象的 geohash 值。
+Redis中经纬度用52位整数进行编码，以GeoHash算法得到的52位整数值作为score放入zset中，即**存储数据结构为zset**。
 
-1、GEOADD
+1、GEOADD：添加地理位置的坐标
 
-> **GEOADD key longitude latitude member [longitude latitude member ...]**
->
-> **时间复杂度：**每一个元素添加是O(log(N)) ，N是sorted set的元素数量。
->
-> 将指定的地理空间位置（纬度、经度、名称）添加到指定的`key`中。这些数据将会存储到`sorted set`这样的目的是为了方便使用[GEORADIUS](http://www.redis.cn/commands/georadius.html)或者[GEORADIUSBYMEMBER](http://www.redis.cn/commands/georadiusbymember.html)命令对数据进行半径查询等操作。
->
-> 采用标准格式的参数x,y,所以经度必须在纬度之前。
->
-> 坐标的限制是可以被编入索引的，区域面积可以很接近极点但是不能索引。
->
-> - 有效的经度从-180度到180度。
-> - 有效的纬度从-85.05112878度到85.05112878度。
->
-> 超过这个范围，将会报错
+> GEOADD key longitude latitude member [longitude latitude member ...]
 
-2、GEOPOS
+**时间复杂度：**每一个元素添加是O(logN)，N是zset的元素数量。
+
+将指定的地理空间位置（纬度、经度、名称）添加到指定的`key`中。这些数据将会存储到`zset`，目的是为了方便使用[GEORADIUS](http://www.redis.cn/commands/georadius.html)或者[GEORADIUSBYMEMBER](http://www.redis.cn/commands/georadiusbymember.html)命令对数据进行半径查询等操作。
+
+- 有效的经度从-180度到180度。
+- 有效的纬度从-85.05112878度到85.05112878度。
+
+2、GEOPOS：获取地理位置的坐标
 
 > geopos key member [member...] 
 >
-> 从key里返回所有给定位置元素的位置（经度和纬度）
 
-3、GEODIST
+3、GEODIST：计算两个位置之间的距离
 
 > **GEODIST key member1 member2 [unit]**
->
-> **时间复杂度：**O(log(N))
->
-> 返回两个给定位置之间的距离。
->
-> 指定单位的参数 unit 必须是以下单位的其中一个：
->
-> - **m** 表示单位为米。[默认]
-> - **km** 表示单位为千米。
-> - **mi** 表示单位为英里。
-> - **ft** 表示单位为英尺。
->
-> `GEODIST` 命令在计算距离时会假设地球为完美的球形， 在极限情况下， 这一假设最大会造成 0.5% 的误差。
+
+**时间复杂度：**O(logN)
+指定单位的参数 unit 必须是以下单位的其中一个：
+
+- m 米[默认]
+- km 千米
+- mi 英里
+- ft 英尺
+
+`GEODIST` 命令在计算距离时会假设地球为完美的球形，在极限情况下，这一假设最大会造成 0.5% 的误差
 
 ```shell
 127.0.0.1:6379> geoadd china:sichuan 104.10194 30.65984 chengdu
@@ -1482,81 +1451,63 @@ Redis GEO 操作方法有：
 "244121.6926"
 ```
 
+4、GEORADIUS：根据用户给定的经纬度坐标来获取指定范围内的地理位置集合
 
-
-4、GEORADIUS
+如根据用户定位计算“附近的车”、“附近的餐馆”等。
 
 > GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]
->
-> 以给定的经纬度为中心， 返回键包含的位置元素当中， 与中心的距离不超过给定最大距离radius的所有位置元素。
->
-> 范围可以使用以下其中一个单位：
->
-> - **m** 表示单位为米。
-> - **km** 表示单位为千米。
-> - **mi** 表示单位为英里。
-> - **ft** 表示单位为英尺。
->
 
-> 在给定以下可选项时， 命令会返回额外的信息：
->
+以给定的经纬度为中心， 返回键包含的位置元素当中， 与中心的距离不超过给定最大距离radius的所有位置元素。范围同GEODIST命令。
+
+在给定以下可选项时， 命令会返回额外的信息：
+
 > - `WITHDIST`: 在返回位置元素的同时， 将位置元素与中心之间的距离也一并返回。 距离的单位和用户给定的范围单位保持一致。
-> - `WITHCOORD`: 将位置元素的经度和维度也一并返回。
+>- `WITHCOORD`: 将位置元素的经度和维度也一并返回。
 > - `WITHHASH`: 以 52 位有符号整数的形式， 返回位置元素经过原始 geohash 编码的有序集合分值。 这个选项主要用于底层应用或者调试， 实际中的作用并不大。
->
-
+> 
 > 命令默认返回未排序的位置元素。 通过以下两个参数， 用户可以指定被返回位置元素的排序方式：
 >
 > - `ASC`: 根据中心的位置， 按照从近到远的方式返回位置元素。
 > - `DESC`: 根据中心的位置， 按照从远到近的方式返回位置元素。
 >
 
-> 在默认情况下， GEORADIUS 命令会返回所有匹配的位置元素。 虽然用户可以使用 **COUNT `<count>`** 选项去获取前 N 个匹配元素， 但是因为命令在内部可能会需要对所有被匹配的元素进行处理， 所以在对一个非常大的区域进行搜索时， 即使只使用 `COUNT` 选项去获取少量元素， 命令的执行速度也可能会非常慢。 但是从另一方面来说， 使用 `COUNT` 选项去减少需要返回的元素数量， 对于减少带宽来说仍然是非常有用的。
+在默认情况下， GEORADIUS 命令会返回所有匹配的位置元素。 虽然用户可以使用 **COUNT `<count>`** 选项去获取前 N 个匹配元素， 但是因为命令在内部可能会需要对所有被匹配的元素进行处理， 所以在对一个非常大的区域进行搜索时， 即使只使用 `COUNT` 选项去获取少量元素， 命令的执行速度也可能会非常慢。 但是从另一方面来说， 使用 `COUNT` 选项去减少需要返回的元素数量， 对于减少带宽来说仍然是非常有用的。
 
 ```shell
 127.0.0.1:6379>  georadius china:sichuan 108.93425 34.23053 1000 km withcoord withdist COUNT 2 ASC
 1) 1) "guangan"
    2) "470.0438"
-   3) 1) "106.64188116788864136"	--------> 这数组都嵌套成啥样了哦
+   3) 1) "106.64188116788864136"
       2) "30.4739195998597765"
 2) 1) "chongqing"
-   2) "582.6435"
-   3) 1) "106.54040783643722534"
-      2) "29.40268053517299762"
+   2) "582.6435"					# 距离
+   3) 1) "106.54040783643722534"  	# 经度
+      2) "29.40268053517299762"		# 纬度
 127.0.0.1:6379> georadius china:sichuan 108.93425 34.23053 1000 km  COUNT 2 ASC
 1) "guangan"
 2) "chongqing"
-
 ```
 
-> **返回值：**
->
-> - 在没有给定任何 `WITH` 选项的情况下， 命令只会返回一个像 [“New York”,”Milan”,”Paris”] 这样的线性（linear）列表。
-> - 在指定了 `WITHCOORD` 、 `WITHDIST` 、 `WITHHASH` 等选项的情况下， 命令返回一个二层嵌套数组， 内层的每个子数组就表示一个元素。
->
-> 在返回嵌套数组时， 子数组的第一个元素总是位置元素的名字。 至于额外的信息， 则会作为子数组的后续元素， 按照以下顺序被返回：
->
-> 1. 以浮点数格式返回的中心与位置元素之间的距离， 单位与用户指定范围时的单位一致。
-> 2. geohash 整数。
-> 3. 由两个元素组成的坐标，分别为经度和纬度
-
-
-
-5、GEORADIUSBYMEMBER
+5、GEORADIUSBYMEMBER：查询元素附近的其它元素
 
 > **GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]**
->
-> 同上一个命令几乎一致，区别在于，上一个是自己输入经度纬度，这个是从key中选择一个元素做中心点
 
-6、GEOHASH
+同上一个命令几乎一致，区别在于，上一个是自己输入经度纬度，这个是从key中选择一个元素做中心点
 
-> **GEOHASH key member [member ...]**
->
-> 返回一个或多个位置元素的 [Geohash](https://en.wikipedia.org/wiki/Geohash) 表示。
->
-> 通常使用表示位置的元素使用不同的技术，使用Geohash位置52点整数编码。由于编码和解码过程中所使用的初始最小和最大坐标不同，编码的编码也不同于标准。此命令返回一个**标准的Geohash**，在[维基百科](https://en.wikipedia.org/wiki/Geohash)和[geohash.org](http://geohash.org/)网站都有相关描述
->
-> 该命令将返回11个字符的Geohash字符串；两个字符串越相似 表示距离越近
+```shell
+redis:6379> GEORADIUSBYMEMBER company baidu 7000 km COUNT 3
+1) "baidu"
+2) "juejin"
+3) "jingdong"
+```
+
+6、GEOHASH：返回一个或多个位置对象的 geohash 值
+
+> GEOHASH key member [member ...]
+
+返回一个或多个位置元素的 [Geohash](https://en.wikipedia.org/wiki/Geohash) 值。
+该命令将返回11个字符的Geohash字符串；两个字符串越相似 表示距离越近。
+可以用这个编码去http://geohash.org上查看定位是否正确。
 
 ```shell
 127.0.0.1:6379> geohash china:sichuan chengdu guangan
@@ -1564,13 +1515,13 @@ Redis GEO 操作方法有：
 2) "wm7v6ew5ry0"
 ```
 
-7、sorted sets命令
+7、zset命令
 
-GEO没有提供删除成员的命令，但是因为GEO的底层实现是zset，所以可以借用zrem命令实现对地理位置信息的删除. 
+GEO没有提供删除成员的命令，但是因为GEO的底层实现是zset，所以可以借用zrem命令实现对地理位置信息的删除。其他的z系列命令都是有效的哦。
 
-其他的z系列命令都是有效的哦。
-
-
+> 注意：GEO数据用zset存储，在一个地图应用中，车、餐馆、人的数据可能会有几百万条，全部存入一个zset集合中，在Redis集群环境下，zset可能会迁移到另一个节点，单个key过大会对集群迁移造成影响，集群环境中单个key不要超过1MB。
+>
+> 建议Geo的数据单独用一个Redis实例部署，不用集群环境。而且数据量过大的情况要进行拆分，如按城市拆、区域拆等。
 
 ### redis HyperLogLog
 
