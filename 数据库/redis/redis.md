@@ -3357,33 +3357,19 @@ master进行快照同步在非SSD磁盘时会比较耗时，对master产生较�
 
 Redis 2.8.18 开始支持无磁盘复制。子进程**直接通过套接字将快照内容发给 slave**，master子进程一边遍历内存，一边序列化内容发给slave，无需使用磁盘作为中间储存介质。slave接受内容并保持到本地rdb，然后加载。
 
-**Redis如何处理key的过期**
+#### 处理key过期
 
-Redis 的过期机制可以限制 key 的生存时间。此功能取决于 Redis 实例计算时间的能力，但是，即使使用 Lua 脚本更改了这些 key，Redis slaves 也能正确地复制具有过期时间的 key。
+Redis 使用以下手段使过期的 key 的复制能够正确工作：
 
-为了实现这样的功能，Redis 不能依靠主从使用同步时钟，因为这是一个无法解决的并且会导致 race condition 和数据集不一致的问题，所以 Redis 使用三种主要的技术使过期的 key 的复制能够正确工作：
-
-- slave 不会让 key 过期，而是等待 master 让 key 过期。当一个 master 让一个 key 到期（或由于 LRU 算法将之驱逐）时，它会合成一个 DEL 命令并传输到所有的 slave。
-- 但是，由于这是 master 驱动的 key 过期行为，master 无法及时提供 DEL 命令，所以有时候 slave 的内存中仍然可能存在在逻辑上已经过期的 key 。为了处理这个问题，slave 使用它的逻辑时钟以报告只有在不违反数据集的一致性的读取操作（从主机的新命令到达）中才存在 key。用这种方法，slave 避免报告逻辑过期的 key 仍然存在。在实际应用中，使用 slave 程序进行缩放的 HTML 碎片缓存，将避免返回已经比期望的时间更早的数据项。
-- 在Lua脚本执行期间，不执行任何 key 过期操作。当一个Lua脚本运行时，从概念上讲，master 中的时间是被冻结的，这样脚本运行的时候，一个给定的键要么存在要么不存在。这可以防止 key 在脚本中间过期，保证将相同的脚本发送到 slave ，从而在二者的数据集中产生相同的效果。
+- slave 不会让 key 过期，而是等待 master 让 key 过期。**master合成一个 DEL 命令**并传输到所有的 slave。
+- slave使用其逻辑时钟报告key不存在。
+- Lua脚本执行期间，不执行任何 key 过期操作。当一个Lua脚本运行时，从概念上讲，master 中的时间是被冻结的，这样脚本运行的时候，一个给定的键要么存在要么不存在。这可以防止 key 在脚本中间过期，保证将相同的脚本发送到 slave ，从而在二者的数据集中产生相同的效果。
 
 一旦一个 slave 被提升为一个 master ，它将开始独立地过期 key，而不需要任何旧 master 的帮助。
 
-**重新启动和故障转移后的部分重同步**
-
-从 Redis 4.0 开始，当一个实例在故障转移后被提升为 master 时，它仍然能够与旧 master 的 slaves 进行部分重同步。为此，slave 会记住旧 master 的旧 `replication ID` 和`复制偏移量`，因此即使询问旧的 replication ID，其也可以将部分复制缓冲提供给连接的 slave 。
-
-但是，升级的 slave 的新 replication ID 将不同，因为它构成了数据集的不同历史记录。例如，master 可以返回可用，并且可以在一段时间内继续接受写入命令，因此在被提升的 slave 中使用相同的 replication ID 将违反一对复制标识和偏移对只能标识单一数据集的规则。
-
-另外，slave 在关机并重新启动后，能够在 RDB 文件中存储所需信息，以便与 master 进行重同步。这在升级的情况下很有用。当需要时，最好使用 SHUTDOWN 命令来执行 slave 的保存和退出操作。
-
 ### demo
 
-一般来说，工程中应用redis往往是多台服务器，因为：
-
-1、从结构上，单个Redis服务器会发生单点故障，并且一台服务器需要处理所有的请求负载，压力较大；
-
-2、从容量上，单个Redis服务器内存容量有限，就算一台Redis服务器内存容量为256G，也不能将所有内存用作Redis存储内存，一般来说，==单台Redis最大使用内存不应该超过20G==。
+一般来说，工程中应用redis往往是多台服务器。
 
 ![image-20210904211156227](redis.assets/image-20210904211156227.png)
 
@@ -3432,10 +3418,14 @@ repl_backlog_histlen:0
 
 #### 一主二从
 
-==默认情况，每一台都是主节点==；一般情况下，只需要配置从节点即可。
+默认情况，每一台都是主节点；一般情况下，只需要配置从节点即可。
 
 ```shell
-slaveof host post  # 在从库配置
+slaveof host port  # 在slave配置可以指定其master
+
+# 下面两个命令可以提供有关主实例和副本实例的当前复制参数的大量信息
+INFO replication
+ROLE
 ```
 
 ![redis主从复制](redis.assets/redis主从复制.png)
@@ -3468,8 +3458,6 @@ slaveof host post  # 在从库配置
 
 ![image-20210904222353541](redis.assets/image-20210904222353541.png)
 
-
-
 在没有哨兵模式的情况下呢，如果主节点挂了，这个时候，可以手动让从节点变为主节点。
 
 `slaveof no one`，可以让从节点变为主节点，然后再去将其他从节点配置到这个新的主节点即可。
@@ -3478,12 +3466,9 @@ slaveof host post  # 在从库配置
 
 ```shell
 # 作为某个master的replica
-#
 # replicaof <masterip> <masterport>
 
-
-# 如果主机受密码保护（使用下面的“requirepass”配置指令），则可以在启动复制同步过程之前通知复制副本进行身份验证，否则主机将拒绝复制副本请求。
-#
+# 如果master有密码（使用“requirepass”配置），这里必须配置slave连接master先进行身份验证，否则master将拒绝复制副本请求。
 # masterauth <master-password>
 
 
@@ -3494,9 +3479,9 @@ replica-read-only yes
 
 
 # 全量重同步策略：disk or socket.
-# 1） Disk-backed：Redis主机创建一个新进程，将RDB文件写入磁盘。稍后，该文件由父进程以增量方式传输到副本。
-# 2） diskless：Redis master创建一个新进程，直接将RDB文件写入副本套接字，而根本不接触磁盘。
-# With slow disks and fast (large bandwidth) networks, diskless replication works better.
+# 1） Disk-backed：master先进行rdb持久化，将RDB文件发给slave。
+# 2） diskless：无盘复制，master子进程直接通过套接字将快照内容发给 slave。
+# 垃圾磁盘且网速很好的情况下无盘复制更好，此时可以开启无盘复制
 repl-diskless-sync no
 # 无磁盘复制可以使用 repl-diskless-sync 配置参数。repl-diskless-sync-delay 参数可以延迟启动数据传输，目的可以在第一个 slave就绪后，等待更多的 slave就绪。以second为单位
 repl-diskless-sync-delay 5
@@ -3530,9 +3515,26 @@ repl-disable-tcp-nodelay no
 # 但是，特殊优先级为0的副本将标记为无法执行主机角色，因此Redis Sentinel将永远不会选择优先级为0的副本进行升级。
 # 默认情况下，优先级为100。
 replica-priority 100
+
+# 限制master写入
+# Redis采用异步复制，若master挂了，slave可能没有收到所有的同步指令流，即部分数据丢失。如果主从延迟很大，那么丢失的数据会很多。
+# 像MQ中间件一般是同步复制保证消息不丢失，但是Redis只能异步复制，无法保证数据不丢失，那就限制数据少丢失。
+# 下面这个配置要求至少3个slave在线master才能写入:
+#
+# min-replicas-to-write 3 # 主节点有n个从节点在线，默认0，即禁用此限制
+# min-replicas-max-lag 10 # 不在线判断间隔，从节点距离上次发心跳时长(默认1s1次)，单位second
+
+# 当使用Docker这类容器或NAT地址转换时，使用端口转发或网络地址转换时，
+# Redis 复制需要格外小心，尤其是在使用 Redis Sentinel 或其他集群时，
+# 客户端通过INFO或ROLE命令来发现slave地址，这将显示slave连接master的IP:port，这也许不一定是想要的ip:port。
+# 下面两个配置可以在slave连接上master时指定自己的ip和port，从而让ROLE或INFO命令通告客户端这个特定的ip:port
+# replica-announce-ip 5.5.5.5
+# replica-announce-port 1234
 ```
 
+注意：Redis有个`maxmemory <bytes>`的配置指定使用的最大内存，默认情况下，副本将被忽略`maxmemory`（除非在故障转移后或手动将其提升为主副本）。key的驱逐由master处理，将DEL命令发送到replica。这可以确保主从一致性，这也意味着也许master还未达到限制，而slave早已超过限制，redis建议我们自己做好监控。
 
+可以配置slave不能忽略maxmemory：`replica-ignore-maxmemory no`
 
 ## redis 哨兵
 
