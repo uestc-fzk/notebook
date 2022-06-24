@@ -3548,11 +3548,21 @@ Redis 的 Sentinel 系统用于管理多个 Redis 服务器，该系统执行以
 
 Redis Sentinel 是一个分布式系统， 你可以在一个架构中运行多个 Sentinel 进程（progress）， 这些进程使用**流言协议**（gossip protocols)来接收关于主服务器是否下线的信息， 并使用**投票协议**（agreement protocols）来决定是否执行自动故障迁移， 以及选择哪个从服务器作为新的主服务器。
 
-虽然 Redis Sentinel 释出为一个单独的可执行文件 redis-sentinel ， 但实际上它只是一个运行在特殊模式下的 Redis 服务器， 你可以在启动一个普通 Redis 服务器时通过给定 –sentinel 选项来启动 Redis Sentinel 。
+![image-20210904223939601](redis.assets/image-20210904223939601.png)
+
+这里的哨兵有两个作用
+
+- 通过发送命令，让Redis服务器返回监控其运行状态，包括主服务器和从服务器。
+
+- 当哨兵监测到master宕机，会自动将slave切换成master，然后通过**发布订阅模式**通知其他的从服务器，修改配置文件，让它们切换主机。
+
+然而一个哨兵进程对Redis服务器进行监控，可能会出现问题，为此，我们可以使用多个哨兵进行监控。各个哨兵之间还会进行监控，这样就形成了多哨兵模式。
+
+![image-20210904224055556](redis.assets/image-20210904224055556.png)
 
 ### 启动sentinel
 
-有2种方法启动哨兵
+有2种方法启动哨兵：哨兵其实是Redis服务的某种特殊服务
 
 ```shell
 # 1.直接以sentinel脚本启动
@@ -3564,7 +3574,7 @@ redis-server redis.conf sentinel.conf --sentinel
 
 ![image-20210906102156434](redis.assets/image-20210906102156434.png)
 
-其中`redis-sentinel`就在src目录下哦。
+其中`redis-sentinel`脚本就在src目录下哦。
 
 启动Sentinel必须指定配置文件且其必须可写，否则启动失败。
 
@@ -3640,7 +3650,7 @@ SENTINEL announce-hostnames no
 #### 主观下线和客观下线
 
 - 主观下线（Subjectively Down，`SDOWN`）指的是单个 Sentinel 实例对服务器做出的下线判断。如果一个服务器没有在 `master-down-after-milliseconds` 选项所指定的时间内，对向它发送 PING 命令的 Sentinel 返回一个有效回复（valid reply），那么 Sentinel 就会将这个服务器标记为主观下线。
-- 客观下线（Objectively Down，`ODOWN`）指的是多个 Sentinel 实例在对同一个服务器做出 SDOWN 判断， 并且通过 `SENTINEL is-master-down-by-addr` 命令互相交流之后， 得出的服务器下线判断。
+- 客观下线（Objectively Down，`ODOWN`）指的是至少`<quorum>`个 Sentinel 实例在对同一个服务器做出 SDOWN 判断， 并且通过 `SENTINEL is-master-down-by-addr` 命令互相交流之后， 得出的服务器下线判断。
 
 从SDOWN到ODOWN没有使用强共识算法，使用的是**流言协议**：
 
@@ -3650,9 +3660,54 @@ SENTINEL announce-hostnames no
 
 只要一个 Sentinel 发现某个主服务器进入了客观下线状态，这个 Sentinel 就可能会被其他 Sentinel 推选出，并对失效的主服务器执行自动故障迁移操作。
 
-> 注意，配置`sentinel monitor mymaster 127.0.0.1 6379 2`无论设置要多少个 Sentinel 同意才能判断master客观下线，一个 Sentinel 都需要获得系统中多数Sentinel 的支持，才被选为**故障转移的领导者并被授权执行**。
+> 注意，配置`sentinel monitor <master-name> <ip> <redis-port> <quorum>`无论设置要多少个 Sentinel 同意才能判断master客观下线，一个 Sentinel 都需要获得系统中多数Sentinel 的支持，才被选为**故障转移的领导者并被授权执行**。
 >
 > 即如果**大多数Sentinel进程无法通信的话，Sentinel永远不会故障迁移**。
+
+#### 副本选择和优先级
+
+当master被sentinel认为ODOWN且已经获得故障迁移授权时，会选择一个副本晋升为master，规则如下：
+
+1、副本与master断连时间超过`(down-after-milliseconds * 10) + milliseconds_since_master_is_in_SDOWN_state`的将被忽略；
+
+2、配置`replica-priority`的副本优先级，首选值小的；
+
+3、优先级相同再检查replica处理的replication offset，从master获取更多数据的replica优先级更高；
+
+4、若都相同，则选择runId最小的replica。
+
+### 哨兵任务
+
+#### 定时任务
+
+1、每个sentinel每秒向它所知道的master、replica和sentinel发送`ping`命令
+
+2、如果某个实例未在`down-after-milliseconds`内返回1次有效回复，则被认为主观下线；
+
+3、如果master被标记为主观下线，所有监视它的 sentinel 以每秒一次的频率确认主服务器的确进入了主观下线状态；
+
+4、当认为它下线的sentinel数量达到配置的数量，master被标记为客观下线；
+
+5、一般情况下，每个 Sentinel 会以每 10 秒一次的频率向它已知的所有主服务器和从服务器发送 INFO 命令。 
+而如果被标记为主观下线，评率改为1s1次。
+
+6、当没有足够数量的 Sentinel 同意主服务器已经下线， 主服务器的客观下线状态就会被移除。 当主服务器重新向 Sentinel 的 PING 命令返回有效回复时， 主服务器的主观下线状态就会被移除。
+
+#### 自动发现sentinel和replica
+
+每个sentinel可以和其它sentinel进行连接，互相检查，信息交换。
+
+不用专门去sentinel里配置其它sentinel的地址，因为sentinel将通过发布订阅功能来自动发现其它sentinel。频道：`sentinel:hello`。
+
+同时，也不需手动列出主服务器属下的所有从服务器，sentinel会询问master获取replica的信息。
+
+- sentinel以2s1次的频率，向被它监视的所有主服务器和从服务器的 `sentinel:hello` 频道发送一条信息，包含了 Sentinel 的 IP 地址、端口号和运行 ID （runid）。
+
+- 每个 Sentinel 都订阅了被它监视的所有master和replica的 `sentinel:hello` 频道， 查找之前未出现过的 sentinel （looking for unknown sentinels）。 当一个 Sentinel 发现一个新的 Sentinel 时， 它会将新的 Sentinel 添加到一个列表中， 这个列表保存了 Sentinel 已知的， 监视同一个主服务器的所有其他 Sentinel 。
+
+- Sentinel 发送的信息中还包括完整的主服务器当前配置（configuration）。 如果一个 Sentinel 包含的主服务器配置比另一个 Sentinel 发送的配置要旧， 那么这个 Sentinel 会立即升级到新配置上。
+
+- 添加新的 sentinel之前，如果列表中存在相同的id或者地址(ip+端口)的sentinel，则移除旧的，加新的。
 
 ### 主从+哨兵搭建
 
@@ -3710,7 +3765,7 @@ maxmemory-policy allkeys-lru
 save 3600 1 300 100 60 10000
 dbfilename dump_6379.rdb
 # 持久化-aof配置
-appendonly no
+appendonly yes
 appendfilename "appendonly_6379.aof"
 appenddirname "appendonlydir"
 appendfsync everysec
@@ -3895,9 +3950,7 @@ slave2和slave1基本差不多。
 
 #### 故障迁移
 
-对master使用这个命令`./redis-cli -p 6379 DEBUG sleep 30`，此命令使master在30秒内不可达，模拟了网络分区。
-
-不过这个命令需要开启`enable-debug-command`，在上面的配置并没有打开这个选项：它不能被命令修改
+对master使用这个命令`./redis-cli -p 6379 DEBUG sleep 30`，此命令使master在30秒内不可达，模拟了网络分区。不过这个命令需要开启`enable-debug-command`，在上面的配置并没有打开这个选项：它不能被命令修改：
 
 ```shell
 127.0.0.1:6379> config get enable-debug-command
@@ -3976,124 +4029,27 @@ slave2和slave1基本差不多。
 
 3、sentinel投票选故障迁移领导者，开始第1次故障迁移尝试；
 
-4、选择`101.34.5.36:6379`作为新master，将旧master作为slave。
+4、选择`101.34.5.36:6379`作为新master，向此replica发送`slaveof no one`命令，转为主服务器；将旧master作为replica，向其它从服务器发送`slaveof `命令，让它们去跟随新的master；
+
+5、其它replica同步新的master，同步完成则结束故障迁移。
 
 此时如果去查看`sentinel.conf`文件会发现master已经自动改为新地址了。
 
-> 注意：哨兵永远不会忘记指定的master和其它replica，即使很长一段时间都无法访问。当旧master恢复后，sentinel会重新配置旧master成为主节点，这还挺令人意外的。
+> 注意：哨兵永远不会忘记指定的master和其它replica，即使很长一段时间都无法访问。**当旧master恢复后，sentinel会重新配置旧master成为主节点**，这还挺令人意外的。
 >
 > 如果想从sentinel监控的replica列表中永久删除某个副本，需要给所有sentinel服务发送命令：`sentinel reset <master名>`，这会清除该master名先前的副本列表，仅添加此时master的副本列表。
 
-### 哨兵任务
-
-**定时任务：**
-
-1、每个sentinel每秒向它所知道的master、replica和sentinel发送`ping`命令
-
-2、如果某个实例未在`down-after-milliseconds`内返回1次有效回复，则被认为主观下线；
-
-3、如果master被标记为主观下线，所有监视它的 sentinel 以每秒一次的频率确认主服务器的确进入了主观下线状态；
-
-4、当认为它下线的sentinel数量达到配置的数量，master被标记为客观下线；
-
-5、一般情况下，每个 Sentinel 会以每 10 秒一次的频率向它已知的所有主服务器和从服务器发送 INFO 命令。 
-而如果被标记为主观下线，评率改为1s1次。
-
-6、当没有足够数量的 Sentinel 同意主服务器已经下线， 主服务器的客观下线状态就会被移除。 当主服务器重新向 Sentinel 的 PING 命令返回有效回复时， 主服务器的主观下线状态就会被移除。
-
-**自动发现sentinel和replica**
-
-每个sentinel可以和其它sentinel进行连接，互相检查，信息交换。
-
-不用专门去sentinel里配置其它sentinel的地址，因为sentinel将通过发布订阅功能来自动发现其它sentinel。频道：`sentinel:hello`。
-
-同时，也不需手动列出主服务器属下的所有从服务器，sentinel会询问master获取replica的信息。
-
-- sentinel以2s1次的频率，向被它监视的所有主服务器和从服务器的 **sentinel**:hello 频道发送一条信息，包含了 Sentinel 的 IP 地址、端口号和运行 ID （runid）。
-
-- 每个 Sentinel 都订阅了被它监视的所有master和replica的 **sentinel**:hello 频道， 查找之前未出现过的 sentinel （looking for unknown sentinels）。 当一个 Sentinel 发现一个新的 Sentinel 时， 它会将新的 Sentinel 添加到一个列表中， 这个列表保存了 Sentinel 已知的， 监视同一个主服务器的所有其他 Sentinel 。
-
-- Sentinel 发送的信息中还包括完整的主服务器当前配置（configuration）。 如果一个 Sentinel 包含的主服务器配置比另一个 Sentinel 发送的配置要旧， 那么这个 Sentinel 会立即升级到新配置上。
-
-- 添加新的 sentinel之前，如果列表中存在相同的id或者地址(ip+端口)的sentinel，则移除旧的，加新的。
-
-
-
-### sentinel 命令
-
-在默认情况下， Sentinel 使用 `TCP` 端口 26379 （普通 Redis 服务器使用的是 6379 ）。
-
-Sentinel 接受 Redis 协议格式的命令请求， 所以你可以使用 redis-cli 或者任何其他 Redis 客户端来与 Sentinel 进行通讯。
-
-有两种方式可以和 Sentinel 进行通讯：
-
-- 第一种方法是通过直接发送命令来查询被监视 Redis 服务器的当前状态， 以及 Sentinel 所知道的关于其他 Sentinel 的信息， 诸如此类。
-- 另一种方法是使用发布与订阅功能， 通过接收 Sentinel 发送的通知： 当执行故障转移操作， 或者某个被监视的服务器被判断为主观下线或者客观下线时， Sentinel 就会发送相应的信息。
-
-sentinel可以接受以下命令：
-
-| 命令                 | 描述                                                         | 返回                           |
-| -------------------- | ------------------------------------------------------------ | ------------------------------ |
-| PING                 | 测试连接是否可用或测试连接延时；可以带参数                   | `PONG`或者返回`PING`后面带的参 |
-| sentinel master_name | 返回给定名字的主服务器的 IP 地址和端口号。<br />如果master正在故障转移或者已转移完成，将返回新marster的IP与端口 |                                |
-| sentinel masters     | 列出所有被监视的主服务器及其当前状态。                       |                                |
-| sentinel slaves      | 列出给定主服务器的所有从服务器，以及这些从服务器的当前状态。 |                                |
-| sentinel reset       | 重置所有名字和给定模式 pattern 相匹配的master。包括故障转移，及其replica以及sentinel |                                |
-| sentinel failover    | 当master失效时，在不询问其他 Sentinel 意见的情况下， 强制开始一次自动故障迁移 |                                |
-
-
-
-### 故障迁移
-
-> failover
-
-![image-20210906151622737](redis.assets/image-20210906151622737.png)
-
-![image-20210906151641510](redis.assets/image-20210906151641510.png)
-
-![image-20210906151658034](redis.assets/image-20210906151658034.png)
-
-**故障迁移步骤：**
-
-1、发现master进入客观下线状态；
-
-2、纪元自增，并尝试在这个纪元中当选。
-
-3、若当选失败，则在设定的故障迁移超时时间的两倍之后， 重新尝试当选。若成功，则向下执行；
-
-4、选1个replica升级为master；
-
-5、向此replica发送`slaveof no one`命令，转为主服务器；
-
-6、通过发布订阅，将更新后的配置传播给其他sentinel，其他 Sentinel 对它们自己的配置进行更新；
-
-7、向从服务器发送`slaveof `命令，让它们去跟随新的master；
-
-8、当所有replica都已经开始复制新的master时，领头sentinel结束故障迁移。
-
-Sentinel 都会向被重新配置的实例发送一个 `CONFIG REWRITE` 命令， 从而确保这些配置会持久化在硬盘里。
-
-**选择新的master的规则：**
-
-1、失效master的从replica，那些被标记为主观下线、已断线、或者最后一次回复 [PING](http://www.redis.cn/commands/ping.html) 命令的时间大于五秒钟的从服务器都会被淘汰。
-
-2、那些与失效master连接断开的时长超过 down-after 选项指定的时长十倍的从服务器都会被淘汰。
-
-3、在剩下的replica中，选出复制偏移量（replication offset）最大的那个从服务器作为新的主服务器；
-
-4、 如果复制偏移量不可用， 或者从服务器的复制偏移量相同， 那么带有最小运行 ID 的那个从服务器成为新的主服务器。
-
 **Sentinel 自动故障迁移的一致性特质**
 
-Sentinel 自动故障迁移使用 **Raft 算法**来选举领头（leader） Sentinel ， 从而确保在一个给定的**纪元**（epoch）里， 只有一个领头产生。
+Sentinel 自动故障迁移使用 **Raft 算法**来选举leader Sentinel ， 从而确保在一个给定的**纪元**（epoch）里， 只有一个领头产生。
 
 更高的配置纪元总是优于较低的纪元， 因此每个 Sentinel 都会主动使用更新的纪元来代替自己的配置。
 
 简单来说， 我们可以将 Sentinel 配置看作是一个带有版本号的状态。 一个状态会以最后写入者胜出（last-write-wins）的方式（也即是，最新的配置总是胜出）传播至所有其他 Sentinel 。
 
-举个例子， 当出现网络分割（network partitions）时， 一个 Sentinel 可能会包含了较旧的配置， 而当这个 Sentinel 接到其他 Sentinel 发来的版本更新的配置时， Sentinel 就会对自己的配置进行更新。
+举个例子， 当出现网络分区(network partitions)时， 一个 Sentinel 可能会包含了较旧的配置， 而当这个 Sentinel 接到其他 Sentinel 发来的版本更新的配置时，Sentinel 就会对自己的配置进行更新。
 
-如果要在网络分割出现的情况下仍然保持一致性， 那么应该使用 min-slaves-to-write 选项， 让主服务器在连接的从实例少于给定数量时停止执行写操作， 与此同时， 应该在每个运行 Redis 主服务器或从服务器的机器上运行 Redis Sentinel 进程。
+如果要在网络分区出现的情况下仍然保持一致性， 那么应该使用 `min-slaves-to-write` 选项， 让master在连接的replica少于给定数量时拒绝写操作。
 
 **Sentinel 状态的持久化**
 
@@ -4103,350 +4059,418 @@ Sentinel 的状态会被持久化在 Sentinel 配置文件里面。
 
 这意味着停止和重启 Sentinel 进程都是安全的。sentinel.conf文件因此必须是可写可读的。
 
-### 哨兵模式(重点)
-
-#### 介绍
-
-主从切换技术的方法是：当主服务器宕机后，需要手动把一台从服务器切换为主服务器，这就需要人工干预，费事费力，还会造成一段时间内服务不可用。这不是一种推荐的方式，更多时候，我们优先考虑哨兵模式。Redis从2.8开始正式提供了Sentinel（哨兵） 架构来解决这个问题。
-
-哨兵模式是一种特殊的模式，首先Redis提供了哨兵的命令，哨兵是一个独立的进程，作为进程，它会独立运行。其原理是**哨兵通过发送命令，等待Redis服务器响应，从而监控运行的多个Redis实例**
-
-![image-20210904223939601](redis.assets/image-20210904223939601.png)
-
-这里的哨兵有两个作用
-
-- 通过发送命令，让Redis服务器返回监控其运行状态，包括主服务器和从服务器。
-
-- 当哨兵监测到master宕机，会自动将slave切换成master，然后通过**发布订阅模式**通知其他的从服务器，修改配置文件，让它们切换主机。
-
-然而一个哨兵进程对Redis服务器进行监控，可能会出现问题，为此，我们可以使用多个哨兵进行监控。各个哨兵之间还会进行监控，这样就形成了多哨兵模式。
-
-![image-20210904224055556](redis.assets/image-20210904224055556.png)
-
-假设主服务器宕机，哨兵1先检测到这个结果，系统并不会马上进行failover过程，仅仅是哨兵1主观的认为主服务器不可用，这个现象成为**主观下线**。当后面的哨兵也检测到主服务器不可用，并且数量达到一定值时，那么哨兵之间就会进行一次投票，投票的结果由一个哨兵发起，进行failover[故障转移]操作。切换成功后，就会通过发布订阅模式，让各个哨兵把自己监控的从服务器实现切换主机，这个过程称为**客观下线**。
-
-#### demo
-
-1、一主二从架构；
-
-2、新建 sentinel.conf 文件，名字千万不要错
-
-3、配置哨兵，填写内容
-
-- sentinel monitor 被监控主机名字 127.0.0.1 6379 1
-
-- 上面最后一个数字1，表示主机挂掉后slave投票看让谁接替成为主机，得票数多少后成为主机
-
-4、启动哨兵
-
-5、挂掉master之后；检测到master挂了，投票新选
-
-6、重新主从继续开工，info replication 查查看
-
-7、问题：如果之前的master 重启回来，会不会双master 冲突？ 之前的回来就自动成为小弟了
-
-![redis-哨兵模式](redis.assets/redis-哨兵模式.png)
-
-此时再去看看sentinel.conf里面看看哦：
-
-```shell
-sentinel myid 62152c33b9cf08ede91f8a34a6ea4e565328b67b
-# Generated by CONFIG REWRITE
-protected-mode no
-port 26379
-user default on nopass ~* +@all
-dir "/usr/local/bin"
-sentinel deny-scripts-reconfig yes
-sentinel monitor my-redis-marster 127.0.0.1 6380 1
-sentinel config-epoch my-redis-marster 1
-sentinel leader-epoch my-redis-marster 1
-sentinel known-replica my-redis-marster 127.0.0.1 6379
-sentinel known-replica my-redis-marster 127.0.0.1 6381
-sentinel current-epoch 1
-```
-
-> 可以看到这个配置文件被自动改为了去检测6380了。
-
-#### 优缺点
-
-**优点**
-
-1. 哨兵集群模式是基于主从模式的，所有主从的优点，哨兵模式同样具有。
-
-2. 主从可以切换，故障可以转移，系统可用性更好。
-
-3. 哨兵模式是主从模式的升级，系统更健壮，可用性更高。
-
-**缺点**
-
-1. Redis较难支持在线扩容，在集群容量达到上限时在线扩容会变得很复杂。
-
-2. 实现哨兵模式的配置也不简单，甚至可以说有些繁琐
-
-
-
 ## redis cluster
 
-> redis英文文档：https://redis.io/topics/cluster-tutorial
+> redis英文文档：https://redis.io/docs/manual/scaling/
+>
+> Redis cluster内部工作原理：[Redis cluster规范](https://redis.io/docs/reference/cluster-spec/)
 
 ### 概述
 
->**Redis 支持三种集群方案**
->
->- 主从复制模式
->- Sentinel（哨兵）模式
->- Cluster 模式
->
->Redis 的哨兵模式基本已经可以实现高可用，读写分离 ，但是在这种模式下每台 Redis 服务器都存储相同的数据，很浪费内存，所以在 redis3.0上加入了 Cluster 集群模式，实现了 Redis 的分布式存储，**也就是说每台 Redis 节点上存储不同的内容**。
-
-下面写到的集群，默认都是cluster模式。
-
-**Redis集群介绍**
-
-Redis 集群是一个提供在**多个Redis间节点间共享数据**的程序集。
-
-Redis集群并不支持处理多个keys的命令,因为这需要在不同的节点间移动数据,从而达不到像Redis那样的性能,在高负载的情况下可能会导致不可预料的错误.
-
-Redis 集群通过**分区**来提供**一定程度的可用性**,在实际环境中当某个节点宕机或者不可达的情况下继续处理命令. Redis 集群的优势:
+Redis Cluster集群通过**分区**提供负载均衡和可用性，当某个节点宕机或者不可达的情况下继续处理命令。Redis 集群的优势:
 
 - 自动分割数据到不同的节点上。
-- 整个集群的部分节点失败或者不可达的情况下能够继续处理命令。
+- 整个集群的部分节点不可达的情况下能够继续处理命令。
 
-**集群的数据分片**
+#### 集群TCP端口
 
-Redis 集群没有使用一致性hash, 而是引入了 **哈希槽**的概念.
-
-Redis 集群有16384个哈希槽,每个key通过CRC16校验后对16384取模来决定放置哪个槽.集群的每个节点负责一部分hash槽,举个例子,比如当前集群有3个节点,那么:
-
-- 节点 A 包含 0 到 5500号哈希槽.
-- 节点 B 包含5501 到 11000 号哈希槽.
-- 节点 C 包含11001 到 16384号哈希槽.
-
-这种结构很容易添加或者删除节点. 比如如果我想新添加个节点D, 我需要从节点 A, B, C中得部分槽到D上. 如果我想移除节点A,需要将A中的槽移到B和C节点上,然后将没有任何槽的A节点从集群中移除即可. 由于从一个节点将哈希槽移动到另一个节点并不会停止服务,所以无论添加删除或者改变某个节点的哈希槽的数量都不会造成集群不可用的状态.
-
-**集群的主从复制模型**
-
-集群使用了主从复制模型，每个节点都会有N-1个从节点。
-
-比如上面例子中，集群中有A，B，C3个节点，如果节点B失败了，那么整个集群就会以为缺少5501-11000这个范围的槽而不可用.
-
-然而如果在集群创建的时候（或者过一段时间）我们为每个节点添加一个从节点A1，B1，C1,那么整个集群便有三个master节点和三个slave节点组成，这样在节点B失败后，集群便会选举B1为新的主节点继续服务，整个集群便不会因为槽找不到而不可用了
-
-不过当B和B1 都失败后，集群是不可用的.
-
-**Redis一致性保证**
-
-Redis 并不能保证数据的**强一致性**. 这意味这在实际中集群在特定的条件下可能会丢失写操作.
-
-原因1：异步复制
-
-- 客户端向B写如1条命令
-- master B 向客户端返回命令执行回复(OK)
-- master B 向从节点B1，B2...发送写命令
-
-这个时候如果在从节点写之前进行查询，那是查不到的。
-
-原因2：网络分区
-
-> 一个客户端与至少包括一个主节点在内的少数实例被孤立。
->
-> 举个例子 假设集群包含 A 、 B 、 C 、 A1 、 B1 、 C1 六个节点， 其中 A 、B 、C 为主节点， A1 、B1 、C1 为A，B，C的从节点， 还有一个客户端 Z1 假设集群中发生网络分区，那么集群可能会分为两方，大部分的一方包含节点 A 、C 、A1 、B1 和 C1 ，小部分的一方则包含节点 B 和客户端 Z1 .
->
-> Z1仍然能够向主节点B中写入, 如果网络分区发生时间较短,那么集群将会继续正常运作,如果分区的时间足够让大部分的一方将B1选举为新的master，那么Z1写入B中得数据便丢失了.
->
-> 注意， 在网络分裂出现期间， 客户端 Z1 可以向主节点 B 发送写命令的最大时间是有限制的， 这一时间限制称为节点超时时间（node timeout）， 是 Redis 集群的一个重要的配置选项：
-
-**集群TCP端口**
-
-每个 Redis Cluster 节点都需要打开两个 TCP 连接。
+每个 Redis Cluster 节点都需要打开两个 TCP 连接端口：
 
 - 服务客户端的普通端口，如6379
 
-- 数据端口，客户端口+10000，如16379
+- **集群总线端口**，客户端口+10000，如16379
 
-第2个用于集群总线，即使用二进制协议的节点到节点通信通道。
-节点使用集群总线进行故障检测、配置更新、故障转移授权等。客户端永远不要尝试与集群总线端口通信，而应始终与普通 Redis 命令端口通信，但**请确保在防火墙中打开这两个端口**，否则 Redis 集群节点将无法通信。
+第2个用于集群总线，即使用二进制协议的节点到节点通信通道。节点使用集群总线进行**故障检测**、**配置更新**、**故障转移授权**等。**请确保在防火墙中打开这两个端口**，否则 Redis 集群节点将无法通信。
 
-如果您不同时打开两个 TCP 端口，您的集群将无法按预期工作。
-
-**集群优缺点**
-
-优点：
-
-> 实现扩容
-> 分摊压力
-> 无中心配置相对简单
-
-缺点：
-
-> 多键操作是不被支持的 
-> 多键的Redis事务是不被支持的。lua脚本不被支持
-> 由于集群方案出现较晚，很多公司已经采用了其他的集群方案，而代理或者客户端分片的方案想要迁移至redis cluster，需要整体迁移而不是逐步过渡，复杂度较大。
-
-### 两台轻量云搭建集群
-
-> 此demo由两台阿里轻量云服务器搭建。
-> 106.15.235.113和47.111.18.182
+> **集群与Docker**
 >
-> 准备6个redis实例：106.15.235.113:6379,106.15.235.113:6380,106.15.235.113:6381,
-> 47.111.18.182:6389,47.111.18.182:6390,47.111.18.182:6391
+> 目前Redis Cluster不支持NAT和docker，若要docker与cluster兼容，需要使用docker的 `host networking mode`. 
 
-> 要让集群运行，至少需要3个节点，不过在刚开始试用集群功能时， 强烈建议使用六个节点： 其中三个为主节点， 而其余三个则是各个主节点的从节点。
+#### 集群的数据分片
 
-> 建议先去redis.conf文件读一下`REDIS CLUSTER`部分的配置。
+Redis 集群没有使用一致性hash, 而是引入了**哈希槽**的概念.
 
-#### 准备
+Redis 集群有16384个哈希槽，每个key通过**CRC16校验后对16384取模**来决定放置哪个槽。集群的每个节点负责一部分hash槽，举个例子，比如当前集群有3个节点，那么：
 
-> 一个最小的Redis集群配置文件：
+- 节点 A 包含 0 到 5500号哈希槽
+- 节点 B 包含5501 到 11000 号哈希槽
+- 节点 C 包含11001 到 16384号哈希槽
+
+这种结构很容易添加或者删除节点。由于从一个节点将哈希槽移动到另一个节点并不会停止服务，所以无论添加删除或者改变某个节点的哈希槽的数量都不会造成集群不可用的状态。
+
+Cluster支持**多建操作，但是要求单个命令(或事物、Lua脚本)涉及的键都在同一个哈希槽**。可以通过哈希标签功能强制多个不同key分配到同一个哈希槽。
+
+#### 集群的主从复制模型
+
+Cluster集群使用了主从复制模型，每个主节点可以有N-1个从节点。
+
+Cluster集群同哨兵模式一样实现了主从切换，当某个主节点挂了，将其某个从节点晋升为主节点。如果主节点和其从节点全挂了，Redis Cluster将无法运行。
+
+#### Redis一致性保证
+
+Redis 并不能保证数据的**强一致性**，只能保证**最终一致性**。这意味这在实际中集群在特定的条件下可能会丢失写操作。
+
+原因1：**异步复制**，不可能用同步复制，那太影响性能了。
+
+原因2：**网络分区**
+
+一个客户端与至少包括一个主节点在内的少数实例被孤立。
+举个例子假设集群包含 A 、 B 、 C 、 A1 、 B1 、 C1 六个节点， 其中 A 、B 、C 为主节点， A1 、B1 、C1 为A，B，C的从节点， 还有一个客户端 Z1。
+
+假设集群中发生网络分区，那么集群可能会分为两方，大部分的一方包含节点 A 、C 、A1 、B1 和 C1 ，小部分的一方则包含节点 B 和客户端 Z1。
+
+Z1仍然能够向主节点B中写入，如果网络分区发生时间较短，那么集群将会继续正常运作，如果分区的时间足够让大部分的一方将B1选举为新的master，那么Z1写入B中得数据便丢失了。
+
+注意，在网络分区出现期间，Z1 能够发送到 B 的写入量有一个**最大窗口**，这一时间限制称为节点超时时间（node timeout），是 Redis 集群的一个重要的配置选项。
+
+### 配置解析
+
+redis.conf中关于Cluster部分配置：
 
 ```shell
-port 7000
-cluster-enabled yes
-cluster-config-file nodes.conf
-cluster-node-timeout 5000
-# appendonly yes # 我将其注释了
+################################ REDIS CLUSTER  ###############################
+
+# 开启集群，作为集群节点，默认是Redis单节点
+# cluster-enabled yes
+
+# 每个集群节点有一个集群配置文件。此文件不要手动修改，它由节点创建和修改。
+# 节点发生更改时自动持久化集群配置（基本上是状态）的文件，为了能够在启动时重新读取它。
+# 该文件列出了集群中的其他节点、它们的状态、持久变量等内容。
+# cluster-config-file nodes-6379.conf
+
+# 节点被认为挂掉的最长不可达时间，单位ms
+# 此值非常重要，它是下面很多配置的乘积因子
+# cluster-node-timeout 15000
+
+# 集群总线端口，默认0代表Redis服务端口+10000
+# cluster-port 0
+
+# replica有效因子
+# 挂掉master的replica的数据如果太老应该拒绝故障迁移
+# 没有很好的方式计算replica的"data age"，所以用下面两种检查来排查replica
+# 1) 如果有多个replica可进行故障迁移，它们会交换消息，replica根据它们的offset获取等级，从故障迁移开始后应用这个与等级成比例的延迟
+# 2) 每个replica计算和master失联时间，若超过下面计算值则不参与故障迁移
+#	(node-timeout * cluster-replica-validity-factor) + repl-ping-replica-period
+#   
+# 因子过大可能导致有很老数据的replica成为master，
+# 因子过小可能导致没有任何replica成为master，此时cluster集群将不可用直至master恢复
+# 因子为0，replica将始终认为自己有效，
+# cluster-replica-validity-factor 10
+
+# Cluster replicas are able to migrate to orphaned masters, that are masters
+# that are left without working replicas. This improves the cluster ability
+# to resist to failures as otherwise an orphaned master can't be failed over
+# in case of failure if it has no working replicas.
+#
+# Replicas migrate to orphaned masters only if there are still at least a
+# given number of other working replicas for their old master. This number
+# is the "migration barrier". A migration barrier of 1 means that a replica
+# will migrate only if there is at least 1 other working replica for its master
+# and so forth. It usually reflects the number of replicas you want for every
+# master in your cluster.
+#
+# Default is 1 (replicas migrate only if their masters remain with at least
+# one replica). To disable migration just set it to a very large value or
+# set cluster-allow-replica-migration to 'no'.
+# A value of 0 can be set but is useful only for debugging and dangerous
+# in production.
+#
+# cluster-migration-barrier 1
+
+# Turning off this option allows to use less automatic cluster configuration.
+# It both disables migration to orphaned masters and migration from masters
+# that became empty.
+#
+# Default is 'yes' (allow automatic migrations).
+#
+# cluster-allow-replica-migration yes
+
+# By default Redis Cluster nodes stop accepting queries if they detect there
+# is at least a hash slot uncovered (no available node is serving it).
+# This way if the cluster is partially down (for example a range of hash slots
+# are no longer covered) all the cluster becomes, eventually, unavailable.
+# It automatically returns available as soon as all the slots are covered again.
+#
+# However sometimes you want the subset of the cluster which is working,
+# to continue to accept queries for the part of the key space that is still
+# covered. In order to do so, just set the cluster-require-full-coverage
+# option to no.
+#
+# cluster-require-full-coverage yes
+
+# This option, when set to yes, prevents replicas from trying to failover its
+# master during master failures. However the replica can still perform a
+# manual failover, if forced to do so.
+#
+# This is useful in different scenarios, especially in the case of multiple
+# data center operations, where we want one side to never be promoted if not
+# in the case of a total DC failure.
+#
+# cluster-replica-no-failover no
+
+# This option, when set to yes, allows nodes to serve read traffic while the
+# cluster is in a down state, as long as it believes it owns the slots.
+#
+# This is useful for two cases.  The first case is for when an application
+# doesn't require consistency of data during node failures or network partitions.
+# One example of this is a cache, where as long as the node has the data it
+# should be able to serve it.
+#
+# The second use case is for configurations that don't meet the recommended
+# three shards but want to enable cluster mode and scale later. A
+# master outage in a 1 or 2 shard configuration causes a read/write outage to the
+# entire cluster without this option set, with it set there is only a write outage.
+# Without a quorum of masters, slot ownership will not change automatically.
+#
+# cluster-allow-reads-when-down no
+
+# This option, when set to yes, allows nodes to serve pubsub shard traffic while
+# the cluster is in a down state, as long as it believes it owns the slots.
+#
+# This is useful if the application would like to use the pubsub feature even when
+# the cluster global stable state is not OK. If the application wants to make sure only
+# one shard is serving a given channel, this feature should be kept as yes.
+#
+# cluster-allow-pubsubshard-when-down yes
+
+# Cluster link send buffer limit is the limit on the memory usage of an individual
+# cluster bus link's send buffer in bytes. Cluster links would be freed if they exceed
+# this limit. This is to primarily prevent send buffers from growing unbounded on links
+# toward slow peers (E.g. PubSub messages being piled up).
+# This limit is disabled by default. Enable this limit when 'mem_cluster_links' INFO field
+# and/or 'send-buffer-allocated' entries in the 'CLUSTER LINKS` command output continuously increase.
+# Minimum limit of 1gb is recommended so that cluster link buffer can fit in at least a single
+# PubSub message by default. (client-query-buffer-limit default value is 1gb)
+#
+# cluster-link-sendbuf-limit 0
+ 
+# Clusters can configure their announced hostname using this config. This is a common use case for 
+# applications that need to use TLS Server Name Indication (SNI) or dealing with DNS based
+# routing. By default this value is only shown as additional metadata in the CLUSTER SLOTS
+# command, but can be changed using 'cluster-preferred-endpoint-type' config. This value is 
+# communicated along the clusterbus to all nodes, setting it to an empty string will remove 
+# the hostname and also propagate the removal.
+#
+# cluster-announce-hostname ""
+
+# Clusters can advertise how clients should connect to them using either their IP address,
+# a user defined hostname, or by declaring they have no endpoint. Which endpoint is
+# shown as the preferred endpoint is set by using the cluster-preferred-endpoint-type
+# config with values 'ip', 'hostname', or 'unknown-endpoint'. This value controls how
+# the endpoint returned for MOVED/ASKING requests as well as the first field of CLUSTER SLOTS. 
+# If the preferred endpoint type is set to hostname, but no announced hostname is set, a '?' 
+# will be returned instead.
+#
+# When a cluster advertises itself as having an unknown endpoint, it's indicating that
+# the server doesn't know how clients can reach the cluster. This can happen in certain 
+# networking situations where there are multiple possible routes to the node, and the 
+# server doesn't know which one the client took. In this case, the server is expecting
+# the client to reach out on the same endpoint it used for making the last request, but use
+# the port provided in the response.
+#
+# cluster-preferred-endpoint-type ip
+
+# In order to setup your cluster make sure to read the documentation
+# available at https://redis.io web site.
+
+########################## CLUSTER DOCKER/NAT support  ########################
+
+# In certain deployments, Redis Cluster nodes address discovery fails, because
+# addresses are NAT-ted or because ports are forwarded (the typical case is
+# Docker and other containers).
+#
+# In order to make Redis Cluster working in such environments, a static
+# configuration where each node knows its public address is needed. The
+# following four options are used for this scope, and are:
+#
+# * cluster-announce-ip
+# * cluster-announce-port
+# * cluster-announce-tls-port
+# * cluster-announce-bus-port
+#
+# Each instructs the node about its address, client ports (for connections
+# without and with TLS) and cluster message bus port. The information is then
+# published in the header of the bus packets so that other nodes will be able to
+# correctly map the address of the node publishing the information.
+#
+# If cluster-tls is set to yes and cluster-announce-tls-port is omitted or set
+# to zero, then cluster-announce-port refers to the TLS port. Note also that
+# cluster-announce-tls-port has no effect if cluster-tls is set to no.
+#
+# If the above options are not used, the normal Redis Cluster auto-detection
+# will be used instead.
+#
+# Note that when remapped, the bus port may not be at the fixed offset of
+# clients port + 10000, so you can specify any port and bus-port depending
+# on how they get remapped. If the bus-port is not set, a fixed offset of
+# 10000 will be used as usual.
+#
+# Example:
+#
+# cluster-announce-ip 10.1.1.5
+# cluster-announce-tls-port 6379
+# cluster-announce-port 0
+# cluster-announce-bus-port 6380
 ```
 
-启用集群模式的只是`cluster-enabled` 指令。每个实例还包含存储此节点配置的文件的路径，默认情况下为`nodes.conf`. 这个文件永远不会被人类触及；它只是在 Redis 集群实例启动时生成，并在每次需要时更新。
+### Cluster集群搭建
 
-**1、开放端口**
+以3台轻量云服务器进行搭建，3主3从。每个服务器分别启动6379和6380端口。
 
-先开放2台服务器的12个端口，即上面6个端口和这6个端口+10000的通信端口。
+强烈**建议将cluster相关的所有文件放在一个目录**，把工作目录也设为这个。
+如果启动成功，此目录会包含如下文件：
 
 ```shell
-#!/bin/bash
-for i
-do
-  echo "open-port: $i "
-  firewall-cmd --zone=public --add-port=$i/tcp --permanent
-done
-# 重启防火墙
-echo "firewall reload......"
-firewall-cmd --reload
+[root@k8s-master clusterTestDir]# ls
+6380Dir        nodes-6379.conf  redis_6379.pid  redis.conf
+appendonlydir  redis_6379.log   redis-cli       redis-server 
+
+[root@k8s-master clusterTestDir]# cd 6380Dir/ && ls
+appendonlydir  nodes-6380.conf  redis_6380.pid  redis.conf
+dump_6380.rdb  redis_6380.log   redis-cli       redis-server
 ```
 
-这是写的一个方便开启端口的shell脚本，运行方式为`./filename.sh 8080 9090`，挺简单的。
+这样想看哪个日志文件或者配置文件都超级方便。
+
+可以将6380端口的Redis实例放在一个目录内，如上面所示。
+
+#### 配置准备
+
+> 注意：在未初始化集群之前，所有节点都还不知道谁会成为master，谁会成为slave，所以千万不要在配置中指定`replicaof <masterip> <masterport> `，这将启动失败。
+
+下面是`124.223.192.8:6379`Redis实例配置，其它Redis实例在这基础上改点ip或端口即可。
 
 ```shell
-#!/bin/bash
-for i
-do
- echo "$i is closed"
- firewall-cmd --zone=public --remove-port=$i/tcp --permanent
-done
-echo "firewall is reloading......"
-firewall-cmd --reload
-```
-
-这个呢就是快速关闭端口的shell脚本咯，运行方式`./filename.sh 8080 9090`。
-
-**2、目录准备**
-
-因为集群会生成大量的文件，所以建议呢专门搞一个目录来放，如`myredis`.
-把`redis-server`，`redis-cli`，都cp到此目录。
-
-> 注意：如果不把这两个cp到此目录，那么在redis.conf里配置的默认工作目录`./`会使得生成那一堆文件存在于`redis-server`所在目录。
-
-**3、配置修改**
-
-准备1个redis-basic.conf文件和6个redis-63xx.conf文件。当然也放在`myredis`目录咯。
-其中basic是复制的默认配置文件redis.conf之后再在其基础上进行修改。
-
-需要改的配置：
-注释掉bind，requirepass，protected-mode no，daemonize yes，pidfile文件，port，logfile，dbfilename，appendonly no(如果开的话，还得改一下aof文件名)。
-还可以配上maxmemory和回收策略。
-还有集群cluster配置。
-
-redis-basic.conf配置：在原有默认的redis.conf基础上注释掉bind，requirepass，protected-mode no，daemonize yes
-redis-63xx.conf：
-
-```shell
-# 引入基本配置，后面的配置将覆盖之前的配置
-include redis-basic.conf
+# include /path/to/fragments/*.conf
 port 6379
-pidfile "/var/run/redis_6379.pid"
-dbfilename dump6379.rdb
+# cluster模式最好最好不要设置密码
+# requirepass !MyRedis123456
+protected-mode no
+# 后台启动
+daemonize yes
 # 工作目录
-dir ./
-logfile "6379.log"
+dir /opt/redisDemo/redis-7.0.2/clusterTestDir
+pidfile ./redis_6379.pid
+logfile ./redis_6379.log
 
-# 缓存策略
-maxmemory 100mb
+# 广播自己的ip:port
+replica-announce-ip 124.223.192.8
+replica-announce-port 6379
+
+# 内存设置
+maxmemory 256mb
 maxmemory-policy allkeys-lru
 
-# 开启集群模式
-cluster-enabled yes  
-# 设定节点配置文件名
-cluster-config-file nodes-6379.conf 
-# 设定节点失联时间，超过该时间（毫秒），集群自动进行主从切换。
-cluster-node-timeout 15000 
+# 持久化-rdb配置
+save 3600 1 300 100 60 10000
+dbfilename dump_6379.rdb
+# 持久化-aof配置
+appendonly yes
+appendfilename "appendonly_6379.aof"
+appenddirname "appendonlydir"
+appendfsync everysec
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+
+# cluster集群配置
+cluster-enabled yes
+cluster-config-file nodes-6379.conf
+cluster-node-timeout 15000
+cluster-port 16379
+
+# 在集群中广播ip:port
+cluster-announce-ip 124.223.192.8
+cluster-announce-tls-port 6379
+cluster-announce-port 6379
+cluster-announce-bus-port 16379
 ```
 
-> 快速配置小技巧：先cp5个，再对每个文件查找替换：%s/6379/6380
+> 快速配置小技巧：先cp5个，再对每个文件查找替换：`%s/6379/6380`
 > 在底线命令模式下，先按`:`，再接后面的即可实现快速查找替换。
 > `/6379`的话就是快速查找了。
 
-![image-20210907201747959](redis.assets/image-20210907201747959.png)
+其实从这里的配置可以发现一个细节，cluster中的每个节点似乎没有配置其它节点的ip，也没配置谁是master谁是slave。
 
 #### 创建集群
 
-呃，启动的话，应该就是`./redis-server redis-63xx.conf`。
-可以建立一个shell文件：open-cluster-half.sh
+##### 启动6个Redis服务
+
+先将6个Redis服务都启动，然后此时随便看一个服务启动日志：
 
 ```shell
-#!/bin/bash
-./redis-server redis-6379.conf
-./redis-server redis-6380.conf
-./redis-server redis-6381.conf
-# ./redis-server redis-6389.conf
-# ./redis-server redis-6390.conf
-# ./redis-server redis-6391.conf
+[root@k8s-master clusterTestDir]# ./redis-server redis.conf 
+[root@k8s-master clusterTestDir]# cd 6380Dir/
+[root@k8s-master 6380Dir]# ./redis-server redis.conf 
+[root@k8s-master 6380Dir]# cat redis_6380.log 
+14666:C 24 Jun 2022 16:51:00.530 # oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+14666:C 24 Jun 2022 16:51:00.530 # Redis version=7.0.2, bits=64, commit=00000000, modified=0, pid=14666, just started
+14666:C 24 Jun 2022 16:51:00.530 # Configuration loaded
+14666:M 24 Jun 2022 16:51:00.531 * monotonic clock: POSIX clock_gettime
+14666:M 24 Jun 2022 16:51:00.532 * No cluster configuration found, I'm c3b6e53a0a29f01b359486ab2bbab791f3e2b804
+14666:M 24 Jun 2022 16:51:00.539 * Running mode=cluster, port=6380.
+14666:M 24 Jun 2022 16:51:00.539 # WARNING: The TCP backlog setting of 511 cannot be enforced because /proc/sys/net/core/somaxconn is set to the lower value of 128.
+14666:M 24 Jun 2022 16:51:00.539 # Server initialized
+14666:M 24 Jun 2022 16:51:00.539 # WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+14666:M 24 Jun 2022 16:51:00.545 * Creating AOF base file appendonly_6380.aof.1.base.rdb on server start
+14666:M 24 Jun 2022 16:51:00.548 * Creating AOF incr file appendonly_6380.aof.1.incr.aof on server start
+14666:M 24 Jun 2022 16:51:00.549 * Ready to accept connections
 ```
 
-另一个云服务器就注释上半截，打开下半截。
-
-分别在两个服务器开启6379、6380、6381，6389/6390/6391
-
-启动完成之后，各个服务器会生成3个node_xxxx.conf配置文件：当然这个图不对
-
-![image-20210907203030861](redis.assets/image-20210907203030861.png)
-
-**构建集群**
-
-对于**Redis5以上**，可用`redis-cli`来创建。redis5以下需要用其他方式构建，去看官网。
+启动日志中这里需要注意：
 
 ```shell
-./redis-cli -a '!MyRedis123456' --cluster create 106.15.235.113:6379 106.15.235.113:6380 106.15.235.113:6381 47.111.18.182:6389 47.111.18.182:6390 47.111.18.182:6391 --cluster-replicas 1
+14666:M 24 Jun 2022 16:51:00.532 * No cluster configuration found, I'm c3b6e53a0a29f01b359486ab2bbab791f3e2b804
 ```
 
-这里使用的命令是**create**，创建一个新集群。选项`--cluster-replicas 1`意味为每个创建的主节点创建一个从节点。其他参数是用来创建新集群的实例的地址列表。
+没有发现集群配置是指没有发现早已存在的集群配置文件，即这个配置`cluster-config-file`指定的文件，如果有的话说明集群早已建立，此节点将恢复到集群中。
 
-Redis-cli 会为你推荐一个配置。通过键入**yes**接受建议的配置。集群将被配置和*加入*，这意味着实例将被引导到彼此交谈。
+后面这个是`NodeID`，集群上下文中唯一名称，每个节点都用这个id记住其它节点，而不是`ip:port`。
+
+##### 创建集群
+
+此时6个Redis节点虽然都已经建立，也可以连接，但是无法查询和写入，因为它们还没有创建集群，节点之间没有联系。从前面的配置可以发现cluster集群无法在配置中指定有哪些节点ip，也无法指定谁是master或slave，因为这些都将在集群的创建命令中指定。
+
+对于Redis5以上，可用`redis-cli`来创建。redis5以下需要用其他方式构建，去看官网。
+
+创建集群命令：`--cluster-replicas`选项指定每个master有1个replica。
 
 ```shell
+./redis-cli --cluster create 124.223.192.8:6379 124.223.192.8:6380 \
+101.34.5.36:6379 101.34.5.36:6380 106.15.235.113:6379 106.15.235.113:6380 \
+--cluster-replicas 1
+```
+
+输入示例：
+
+```shell
+[root@k8s-master clusterTestDir]# ./redis-cli --cluster create 124.223.192.8:6379 124.223.192.8:6380 \
+> 101.34.5.36:6379 101.34.5.36:6380 106.15.235.113:6379 106.15.235.113:6380 \
+> --cluster-replicas 1
 >>> Performing hash slots allocation on 6 nodes...
 Master[0] -> Slots 0 - 5460
 Master[1] -> Slots 5461 - 10922
 Master[2] -> Slots 10923 - 16383
-Adding replica 47.111.18.182:6391 to 106.15.235.113:6379
-Adding replica 106.15.235.113:6381 to 47.111.18.182:6389
-Adding replica 47.111.18.182:6390 to 106.15.235.113:6380
-M: 66538af421de34e8aabc33986c0eab434201e12a 106.15.235.113:6379
+Adding replica 101.34.5.36:6380 to 124.223.192.8:6379
+Adding replica 106.15.235.113:6380 to 101.34.5.36:6379
+Adding replica 124.223.192.8:6380 to 106.15.235.113:6379
+M: 3814914b4c007b1962ff97b6e33041eda4d37dde 124.223.192.8:6379
    slots:[0-5460] (5461 slots) master
-M: af781706fa6b12e15fdf45b880bfb61760f4a52f 106.15.235.113:6380
-   slots:[10923-16383] (5461 slots) master
-S: 8fb277fbaa7bb69eadf4b5ae33053711189972f6 106.15.235.113:6381
-   replicates 942c86ca6518116beeecade76973b297be82b23c
-M: 942c86ca6518116beeecade76973b297be82b23c 47.111.18.182:6389
+S: c3b6e53a0a29f01b359486ab2bbab791f3e2b804 124.223.192.8:6380
+   replicates 41be457cc34570de8982ad67c924db7fe81adba0
+M: 7c8a4758f097d9fd6c7ad8e6b824317a68ce158f 101.34.5.36:6379
    slots:[5461-10922] (5462 slots) master
-S: 0af0b52e997a52cb75731a9eef25cea48f8a21a3 47.111.18.182:6390
-   replicates af781706fa6b12e15fdf45b880bfb61760f4a52f
-S: 92986bbfb3304e495e9f42e8c4e0d0218ec67139 47.111.18.182:6391
-   replicates 66538af421de34e8aabc33986c0eab434201e12a
-Can I set the above configuration? (type 'yes' to accept): yes ---> 这里yes即可
+S: 4058a64d805a23ae977f52a480b5933d7dc69a93 101.34.5.36:6380
+   replicates 3814914b4c007b1962ff97b6e33041eda4d37dde
+M: 41be457cc34570de8982ad67c924db7fe81adba0 106.15.235.113:6379
+   slots:[10923-16383] (5461 slots) master
+S: 686e36dc8b479ca6e364c29178a3a64430319ddc 106.15.235.113:6380
+   replicates 7c8a4758f097d9fd6c7ad8e6b824317a68ce158f
+Can I set the above configuration? (type 'yes' to accept): 
 ```
 
-可以看到是虽然我们将106IP的端口放在前3个，但是似乎它给的推荐配置并没有选前3个同一IP的作为master呢。这样也好。
+Redis-cli 会为你推荐一个master-replca配置，上面这个可以看到还是非常的合理，**slot槽平均分配给3个master**，且**不会让同一台云服务器上的两个Redis实例建立主从关系**，从而避免了主从同时挂掉的风险。
+
+通过键入**yes**接受建议的配置。集群将被创建，这意味着实例将被引导到彼此交谈。
 
 最后，如果一切顺利，你会看到这样的消息：
 
@@ -4457,140 +4481,127 @@ Can I set the above configuration? (type 'yes' to accept): yes ---> 这里yes即
 [OK] All 16384 slots covered.
 ```
 
-**什么是slots**
+#### 集群测试
 
-> 一个 Redis 集群包含 16384 个插槽（hash slot）， 数据库中的每个键都属于这 16384 个插槽的其中一个， 集群使用公式 CRC16(key) % 16384 来计算键 key 属于哪个槽， 其中 CRC16(key) 语句用于计算键 key 的 CRC16 校验和 。
-> 集群中的每个节点负责处理一部分插槽。
-
-#### 登录集群
+命令`./redis-cli -c -p 6379`，`-c` 采用集群策略连接，会自动根据哈希槽切换master。
 
 ```shell
-./redis-cli -c -p 6379
+124.223.192.8:6379> hset myMap1 username fzk
+-> Redirected to slot [12747] located at 106.15.235.113:6379
+(integer) 1
+106.15.235.113:6379> hget myMap1 username
+"fzk"
 ```
 
-`-c` 采用集群策略连接，设置数据会自动切换到相应的写主机
+`cluster nodes`可以获取集群信息，看到master、replica和slot槽的分配。
+
+`CLUSTER KEYSLOT key`  返回key的slot槽。
+
+`CLUSTER GETKEYSINSLOT <slot> <count> `返回 count 个 slot 槽中的键。
+
+##### 哈希标签
+
+不在一个slot下的键值，是不能使用mget，mset等多键操作。
 
 ```shell
-[root@iZuf6el32a2l9b73omo6cgZ bin]# ./redis-cli -c -p 6379
-127.0.0.1:6379> auth !MyRedis123456
-OK
-127.0.0.1:6379> set k1 hello
--> Redirected to slot [12706] located at 127.0.0.1:6381
-(error) NOAUTH Authentication required.  
-127.0.0.1:6381> auth !MyRedis123456
-OK
-127.0.0.1:6381> keys *
-(empty array)
-127.0.0.1:6381> set k1 hello
-OK
+106.15.235.113:6379> mset k1 v1 k2 v2
+(error) CROSSSLOT Keys in request don't hash to the same slot
+106.15.235.113:6379> mget k1 k2
+(error) CROSSSLOT Keys in request don't hash to the same slot
+106.15.235.113:6379> 
 ```
 
-从这里发现了一个问题：我䒑这tm的重定向之后，怎么还要重新输密码呢？
+可以通过`{}`来定义组的概念，从而使**key中`{}`内相同内容的键值对放到一个slot中**去。
 
-**`cluster nodes`获取集群信息**
+```shell
+106.15.235.113:6379> mset k1{group1} hello k2{group1} world
+-> Redirected to slot [7859] located at 101.34.5.36:6379
+OK
+101.34.5.36:6379> mget k1{group1} k2{group1}
+1) "hello"
+2) "world"
+
+
+101.34.5.36:6379> cluster keyslot k1{group1}
+(integer) 7859
+101.34.5.36:6379> cluster keyslot k2{group1}
+(integer) 7859
+101.34.5.36:6379> cluster getkeysinslot 7859 10
+1) "k2{group1}"
+2) "k1{group1}"
+```
+
+##### slot重分配
+
+启动时集群是平均分配slot到各个master，可以手动将一些slot迁移到其它master。
+
+命令示例如下：
+
+```shell
+./redis-cli --cluster reshard <host>:<port> --cluster-from <node-id> --cluster-to <node-id> --cluster-slots <number of slots> --cluster-yes
+```
+
+`--cluster-yes`选项将自动对命令提示问题回答yes，一般用在shell脚本里面。
+
+案例如下：
+
+```shell
+./redis-cli --cluster reshard 124.223.192.8:6379 \
+--cluster-from 3814914b4c007b1962ff97b6e33041eda4d37dde \
+--cluster-to 7c8a4758f097d9fd6c7ad8e6b824317a68ce158f \
+--cluster-slots 1000
+```
+
+`node-id`可以通过`./redis-cli cluster nodes`命令查询。
 
 ```shell
 127.0.0.1:6379> cluster nodes
-942c86ca6518116beeecade76973b297be82b23c 47.111.18.182:6389@16389 master - 0 1631108895651 4 connected 5461-10922
-0af0b52e997a52cb75731a9eef25cea48f8a21a3 47.111.18.182:6390@16390 slave af781706fa6b12e15fdf45b880bfb61760f4a52f 0 1631108896654 2 connected
-8fb277fbaa7bb69eadf4b5ae33053711189972f6 106.15.235.113:6381@16381 slave 942c86ca6518116beeecade76973b297be82b23c 0 1631108896000 4 connected
-66538af421de34e8aabc33986c0eab434201e12a 172.24.12.69:6379@16379 myself,master - 0 1631108897000 1 connected 0-5460
-af781706fa6b12e15fdf45b880bfb61760f4a52f 106.15.235.113:6380@16380 master - 0 1631108895000 2 connected 10923-16383
-92986bbfb3304e495e9f42e8c4e0d0218ec67139 47.111.18.182:6391@16391 slave 66538af421de34e8aabc33986c0eab434201e12a 0 1631108897662 1 connected
+41be457cc34570de8982ad67c924db7fe81adba0 106.15.235.113:6379@16379 master - 0 1656064909010 5 connected 10923-16383
+c3b6e53a0a29f01b359486ab2bbab791f3e2b804 124.223.192.8:6380@16380 slave 41be457cc34570de8982ad67c924db7fe81adba0 0 1656064908000 5 connected
+7c8a4758f097d9fd6c7ad8e6b824317a68ce158f 101.34.5.36:6379@16379 master - 0 1656064909000 7 connected 0-999 5461-10922
+3814914b4c007b1962ff97b6e33041eda4d37dde 124.223.192.8:6379@16379 myself,master - 0 1656064910000 1 connected 1000-5460
+4058a64d805a23ae977f52a480b5933d7dc69a93 101.34.5.36:6380@16380 slave 3814914b4c007b1962ff97b6e33041eda4d37dde 0 1656064911015 1 connected
+686e36dc8b479ca6e364c29178a3a64430319ddc 106.15.235.113:6380@16380 slave 7c8a4758f097d9fd6c7ad8e6b824317a68ce158f 0 1656064910014 7 connected
 ```
 
-可以看到我们的：
-
-6379分到了0-5460哈希槽，6389分到5461-10922，6380分到10923-16383.
-
-**对于`-c`的解释**
-
-在redis-cli每次录入、查询键值，redis都会计算出该key应该送往的插槽，如果不是该客户端对应服务器的插槽，redis会报错，并告知应前往的redis实例地址和端口。
-
-```shell
-[root@iZuf6el32a2l9b73omo6cgZ bin]# redis-cli -p 6379
-127.0.0.1:6379> auth !MyRedis123456
-OK
-127.0.0.1:6379> get k1
-(error) MOVED 12706 127.0.0.1:6381
-```
-
-`–c `参数实现自动重定向。
-
-如 `redis-cli  -c –p 6379` 登入后，再录入、查询键值对可以自动重定向。
-
-#### 集群放入与查询值
-
-不在一个slot下的键值，是不能使用mget,mset等多键操作。
-
-```shell
-127.0.0.1:6379> mget k1 k100
-(error) CROSSSLOT Keys in request don't hash to the same slot
-127.0.0.1:6379> mset k1 hello k100 world
-(error) CROSSSLOT Keys in request don't hash to the same slot
-```
-
-可以通过{}来定义组的概念，从而使key中{}内相同内容的键值对放到一个slot中去。
-
-```shell
-127.0.0.1:6380> mset k1{group1} hello k2{group1} world
-OK
-```
-
-**CLUSTER KEYSLOT key**   返回key的slot槽。
-
-**CLUSTER GETKEYSINSLOT <slot> <count> **返回 count 个 slot 槽中的键。
-
-```shell
-127.0.0.1:6380> cluster keyslot k1{group1}
-(integer) 7859
-127.0.0.1:6380> cluster keyslot k100{group1}
-(integer) 7859
-127.0.0.1:6380> cluster getkeysinslot 7859 10
-1) "k1{group1}"
-2) "k2{group1}"
-```
+可以看到`124.223.192.8:6379`的slot槽从1000-5460少了前1000个。`101.34.5.36:6379`的slot为`0-999 5461-10922`
 
 #### 关闭集群
 
 由于有6个redis实例，一个个开和关，太麻烦了，所以直接写到shell脚本中即可。
 
-关闭脚本：close-cluster-half.sh
+关闭脚本：close-cluster.sh，这一个脚本可以关闭6个Redis实例
 
 ```sh
 #!/bin/bash
-./redis-cli -a '!MyRedis123456' -p 6379 shutdown
-./redis-cli -a '!MyRedis123456' -p 6380 shutdown
-./redis-cli -a '!MyRedis123456' -p 6381 shutdown
-# ./redis-cli -a '!MyRedis123456' -p 6389 shutdown
-# ./redis-cli -a '!MyRedis123456' -p 6390 shutdown
-# ./redis-cli -a '!MyRedis123456' -p 6391 shutdown
+./redis-cli -h 124.223.192.8 -p 6380 shutdown
+./redis-cli -h 101.34.5.36 -p 6380 shutdown
+./redis-cli -h 106.15.235.113 -p 6380 shutdown
+
+./redis-cli -h 124.223.192.8 -p 6379 shutdown
+./redis-cli -h 101.34.5.36 -p 6379 shutdown
+./redis-cli -h 106.15.235.113 -p 6379 shutdown
+# 如果有密码的话，-a指定密码
+# ./redis-cli -a '123456' -h 101.34.5.36 -p 6389 shutdown
 ```
 
-**因为rdb文件和node.conf 文件的存在，在第一次构建集群之后，以后的开启不需要再次构建集群了。**
+**如果不删集群配置文件的话，因为node.conf 文件的存在，在第一次构建集群之后，以后的开启不需要再次构建集群了。**
 
-那么，彻底清掉集群，就要删除rdb和node.conf文件了，写个shell脚本：remove-nodes-dump.sh
+那么，彻底清掉集群，就要删除rdb、aof和node.conf文件了，写个shell脚本：remove-nodes-dump.sh，这个脚本只能清理一个服务器上的，3个服务器都需要清理。
 
 ```shell
 #!/bin/bash
-# 删除nodes.conf文件
+# 如果要删干净的话
 rm -rf nodes-6379.conf
-rm -rf nodes-6380.conf
-rm -rf nodes-6381.conf
-rm -rf nodes-6389.conf
-rm -rf nodes-6390.conf
-rm -rf nodes-6391.conf
+rm -rf dump_6379.rdb
+rm -rf appendonlydir
 
-# 删除rdb文件
-rm -rf dump6379.rdb
-rm -rf dump6380.rdb
-rm -rf dump6381.rdb
-rm -rf dump6389.rdb
-rm -rf dump6390.rdb
-rm -rf dump6391.rdb
+rm -rf 6380Dir/nodes-6380.conf
+rm -rf 6380Dir/dump_6380.rdb
+rm -rf 6381Dir/appendonlydir
 ```
 
-这样，再次通过`open-cluster-half.sh`打开集群就需要重新构建了。
+这样，重启集群就需要重新构建了。
 
 ### 故障转移
 
