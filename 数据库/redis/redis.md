@@ -356,7 +356,7 @@ root       35437   35340  0 23:46 pts/1    00:00:00 grep --color=auto redis
 
 # redis学习
 
-## redis数据类型
+## 基本数据类型
 
 | 类型        | 简介                           | 特性                                                     | 应用场景                                                     |
 | :---------- | :----------------------------- | :------------------------------------------------------- | :----------------------------------------------------------- |
@@ -365,8 +365,8 @@ root       35437   35340  0 23:46 pts/1    00:00:00 grep --color=auto redis
 | sets        | 哈希表实现、不重复             | 添加，删除，查找的复杂度都是 O(1)。                      | 1.共同好友；2.好友推荐时,根据tag求交集,大于某个阈值就可以推荐 |
 | sorted sets | 在set基础上，元素多了score权重 | 每个元素都会关联一个 double 类型的分数。按分数顺序存储。 | 排行榜                                                       |
 | hashes      | value保存map                   | 特别适合用于存储对象                                     | 存对象信息                                                   |
-| geo         | 存储地理位置信息               | 数据类型为zset；存储指定的地理空间位置、计算距离等       | 附近的人、摇一摇                                             |
-| hyperloglog | 做基数统计的算法               | 每个 HyperLogLog 键只需要花费 12 KB 内存                 | 网页浏览用户数量                                             |
+| geo         | 存储地理位置信息               | 基于zset；存储指定的地理空间位置、计算距离等             | 附近的人、摇一摇                                             |
+| hyperloglog | 做基数统计的算法               | 基于string；每个 HyperLogLog 键只占 12 KB 内存           | 网页浏览用户数量                                             |
 
 ![image-20210903114842004](redis.assets/image-20210903114842004.png)
 
@@ -411,8 +411,6 @@ redis> GETRANGE ts 0 3
 "0043"
 ```
 
-
-
 ### lists
 
 类似Java的LinkedList，可用于异步队列。
@@ -423,158 +421,6 @@ redis> GETRANGE ts 0 3
 
 list可被用来**实现聊天系统**。还可以作为不同进程间传递消息的队列。关键是，你可以每次都以原先添加的顺序访问数据。这不需要任何`SQL ORDER BY `操作，将会非常快，也会很容易扩展到百万级别元素的规模。
 
-
-
-### hashes
-
-Redis hash 是一个 string 类型的 field（字段） 和 value（值） 的映射表，hash 特别适合用于**存储对象**。**数组+链表**实现。
-
-值得注意的是，小的 hash 被用特殊方式编码，非常节约内存。
-
-### sets
-
-Redis 的 Set 是 string 类型的无序集合。集合是通过哈希表实现的。
-
-可用于**去重**，取**交集和差集**。
-
-### sorted sets
-
-有序集合是一种类似于集合和哈希混合的数据类型。与集合一样，有序集合由唯一的、不重复的字符串元素组成，因此在某种意义上，有序集合也是一个集合。
-
-然而，虽然集合内的元素没有排序，排序集合中的每个元素都与一个浮点值相关联，称为*分数* （这就是为什么该类型也类似于散列，因为每个元素都映射到一个值）。
-
-此外，有序集合中的元素是按*顺序获取的*（因此它们不是按请求排序的，顺序是用于表示有序集合的数据结构的一个特性）。它们根据以下规则排序：
-
-- 如果 A 和 B 是具有不同分数的两个元素，如果 A.score 是 > B.score，则 A > B 
-- 如果 A 和 B 的分数完全相同， 如果 A 字符串按字典顺序大于 B 字符串，则 A > B。A 和 B 字符串不能相等，因为排序集只有唯一元素。
-
-
-
-## Redis命令
-
-Redis命令十分丰富，包括的命令组有Cluster、Connection、Geo、Hashes、HyperLogLog、Keys、Lists、Pub/Sub、Scripting、Server、Sets、Sorted Sets、Strings、Transactions一共14个redis命令组两百多个redis命令，Redis中文命令大全。您可以通过下面的检索功能快速查找命令，已下是全部已知的redis命令列表。如果您有兴趣的话也可以查看我们的[网站结构图](http://www.redis.cn/map.html),它以节点图的形式展示了所有redis命令。
-
-> redis命令大全：http://www.redis.cn/commands.html
-
-### redis命令
-
-Redis 命令用于在 redis 服务上执行操作。
-
-要在 redis 服务上执行命令需要一个 redis 客户端。Redis 客户端在我们之前下载的的 redis 的安装包中。
-
-#### 本地redis服务
-
-```shell
-127.0.0.1:6379> redis-cli
-127.0.0.1:6379> ping
-PONG
-```
-
-ping命令可以检查redis服务是否启动。
-
-> 注意：连接 redis-cli，增加参数 --raw ，可以**强制输出中文**，不然会乱码
-
-#### 远程服务器
-
-```shell
-# -a 指定密码
-[root@iZuf6el32a2l9b73omo6cgZ bin]# redis-cli  -h 127.0.0.1 -p 6379 -a "mypass"
-```
-
-### redis Key
-
-Redis 键命令用于管理 redis 的键。
-
-![image-20210901153120391](redis.assets/image-20210901153120391.png)
-
-![image-20210901153135162](redis.assets/image-20210901153135162.png)
-
-#### KEYS pattern
-
->查找所有符合给定模式pattern（正则表达式）的 key 。
->
->时间复杂度为O(N)，N为数据库里面key的数量。
->
->例如，Redis在一个有1百万个key的数据库里面执行一次查询需要的时间是40毫秒 。
-
-**警告**: `KEYS` 的速度非常快，但在一个大的数据库中使用它仍然可能造成性能问题，如果你需要从一个数据集中查找特定的 `KEYS`， 你最好还是用 Redis 的集合结构 [SETS](http://www.redis.cn/commands/sets.html) 来代替。
-
-可以用来查询所有key：`keys *`
-
-```shell
-127.0.0.1:6379> set mykey1 1
-OK
-127.0.0.1:6379> set mykey2 2
-OK
-127.0.0.1:6379> keys *
-1) "mykey2"
-2) "mykey1"
-```
-
-#### MOVE key db
-
->**时间复杂度：**O(1)
->
->将当前数据库的 key 移动到给定的数据库 db 当中。
->
->如果当前数据库(源数据库)和给定数据库(目标数据库)有相同名字的给定 key ，或者 key 不存在于当前数据库，那么 MOVE 没有任何效果。
->
->因此，也可以利用这一特性，将 `MOVE` 当作锁(locking)原语(primitive)。
->
->成功返回1，失败返回0
-
-```shell
-127.0.0.1:6379> move mykey1 2
-(integer) 1
-127.0.0.1:6379> select 2
-OK
-127.0.0.1:6379[2]> keys *
-1) "mykey1"
-127.0.0.1:6379[2]> 
-```
-
-
-
-> 其他命令细节请看菜鸟教程或中文redis网站。
-
-### redis lists
-
-#### list入门命令
-
-
-
-4、其他命令
-
->Lindex key index
->
->> 按照索引下标获得元素（-1代表最后一个，0代表是第一个） 
->> 当 key 位置的值不是一个列表的时候，会返回一个error。
->
->Llen key 
->
->> 用于返回列表的长度。 
->>  如果 key 不存在，那么就被看作是空list，并且返回长度为 0。
->>  当存储在 key 里的值不是一个list的话，会返回error
->
->Lrem key count value 
->
->> 从存于 key 的列表里移除前 count 次出现的值为 value 的元素。
->
->>  这个 count 参数通过下面几种方式影响这个操作：
->>
->> - count > 0: 从头往尾移除值为 value 的元素。
->> - count < 0: 从尾往头移除值为 value 的元素。
->> - count = 0: 移除所有值为 value 的元素。
->
->LSET key index value
->
->> 设置 index 位置的list元素的值为 value。 
->> 当index超出范围时会返回一个error。
->
->LINSERT key BEFORE|AFTER pivot value
->
->>LINSERT key BEFORE|AFTER pivot value
-
 #### list阻塞操作
 
 可以使用Redis来实现生产者和消费者模型，如使用LPUSH和RPOP来实现该功能。但会遇到这种情景：list是空，这时候消费者就需要轮询来获取数据，这样就会增加redis的访问压力、增加消费端的cpu时间，而很多访问都是无用的。为此redis提供了阻塞式访问 [BRPOP](http://www.redis.cn/commands/brpop.html) 和 [BLPOP](http://www.redis.cn/commands/blpop.html) 命令。 消费者可以在获取数据时指定如果数据不存在阻塞的时间，如果在时限内获得数据则立即返回，如果超时还没有数据则返回null, 0表示一直阻塞。
@@ -583,8 +429,7 @@ OK
 
 1、**RPOPLPUSH source destination**
 
-> O(1)
-> 原子性地返回并移除存储在 source 的列表的最后一个元素（列表尾部元素）， 并把该元素放入存储在 destination 的列表的第一个元素位置（列表头部）。
+> 原子性地返回并移除存储在 source 的列表的最后一个元素（列表尾部元素），并把该元素放入存储在 destination 的列表的第一个元素位置（列表头部）。
 > 如果 source 不存在，那么会返回 nil 值，并且不会执行任何操作。 
 > 如果 source 和 destination 是同样的，这个命令也可以当作是一个旋转列表的命令。
 
@@ -611,17 +456,12 @@ OK
 
 > RPOPLPUSH 命令的 source 和 destination 是相同的话， 那么客户端在访问一个拥有n个元素的列表时，可以在 O(N) 时间里一个接一个获取列表元素， 而不用像 [LRANGE](http://www.redis.cn/commands/lrange.html) 那样需要把整个列表从服务器端传送到客户端。
 
-
-
 2、**BRPOPLPUSH source destination timeout**
 
-> `BRPOPLPUSH` 是 [RPOPLPUSH](http://www.redis.cn/commands/rpoplpush.html) 的阻塞版本。 当 source 包含元素的时候，这个命令表现得跟 [RPOPLPUSH](http://www.redis.cn/commands/rpoplpush.html) 一模一样。 当 source 是空的时候，Redis将会阻塞这个连接，直到另一个客户端 push 元素进入或者达到 timeout 时限。 timeout 为 0 能用于无限期阻塞客户端。
-
-
+`BRPOPLPUSH` 是 [RPOPLPUSH](http://www.redis.cn/commands/rpoplpush.html) 的阻塞版本。 
 
 3、**BLPOP key [key ...] timeout**
 
-> O(1)
 > 命令LPOP的阻塞版本，list中没有元素可弹出的时候，连接将被BLPOP命令阻塞。
 > 当给定多个 key 参数时，按参数 key 的先后顺序依次检查各个列表，弹出第一个非空列表的头元素。
 >
@@ -652,51 +492,29 @@ OK
 (17.56s)	---->等待了18s
 ```
 
-- 多个客户端阻塞与同一个key时，从第一个被阻塞的处理到最后一个被阻塞的，即FIFO
+- 多个客户端阻塞与同一个key时，FIFO顺序处理
 
-- 一个客户端阻塞于多个key时，若多个 key 的元素同时可用（可能是因为事务或者某个Lua脚本向多个list添加元素）， 那么客户端会解除阻塞，并使用第一个接收到 push 操作的 key（假设它拥有足够的元素为我们的客户端服务，因为有可能存在其他客户端同样是被这个key阻塞着）
+- 一个客户端阻塞于多个key时，若多个 key 的元素同时可用（可能是因为事务或者某个Lua脚本向多个list添加元素）， 那么客户端会解除阻塞，并使用第一个接收到 push 操作的 key
 
-  > 从根本上来说，在执行完每个命令之后，Redis 会把一个所有 key 都获得数据并且至少使一个客户端阻塞了的 list 运行一次。 这个 list 按照新数据的接收时间进行整理，即是从第一个接收数据的 key 到最后一个。在处理每个 key 的时候，只要这个 key 里有元素， Redis就会对所有等待这个key的客户端按照“先进先出”(FIFO)的顺序进行服务。若这个 key 是空的，或者没有客户端在等待这个 key， 那么将会去处理下一个从之前的命令或事务或脚本中获得新数据的 key，如此等等。
+>从根本上来说，在执行完每个命令之后，Redis 会把一个所有 key 都获得数据并且至少使一个客户端阻塞了的 list 运行一次。 这个 list 按照新数据的接收时间进行整理，即是从第一个接收数据的 key 到最后一个。在处理每个 key 的时候，只要这个 key 里有元素， Redis就会对所有等待这个key的客户端按照“先进先出”(FIFO)的顺序进行服务。若这个 key 是空的，或者没有客户端在等待这个 key， 那么将会去处理下一个从之前的命令或事务或脚本中获得新数据的 key，如此等等。
 
+- 不要在事务中使用BLPOP：
 
-
-**当多个元素被 push 进入一个 list 时 BLPOP 的行为**
-
-有时候一个 list 会在同一概念的命令的情况下接收到多个元素：
-
-- 像 LPUSH mylist a b c 这样的可变 push 操作。
-- 在对一个向同一个 list 进行多次 push 操作的 MULTI 块执行完 EXEC 语句后。
-- 使用 Redis 2.6 或者更新的版本执行一个 Lua 脚本。
-
-对于 Redis 2.6 之后来说，所采取的行为是先执行多个 push 命令，然后在执行了这个命令之后再去服务被阻塞的客户端。
-
-```shell
-# 客户端1
-127.0.0.1:6379> blpop mylist 100
-1) "mylist"
-2) "c"
-(47.70s)
-# 客户端2
-127.0.0.1:6379> lpush mylist a b c
-(integer) 3
-```
-
-而如果是redis2.4版本，将会弹出a。
-
->注意：
->
 >在一个 [MULTI](http://www.redis.cn/commands/multi.html) / [EXEC](http://www.redis.cn/commands/exec.html) 块里面使用 [BLPOP](http://www.redis.cn/commands/blpop.html) 并没有很大意义，因为它要求整个服务器被阻塞以保证块执行时的原子性，这就阻止了其他客户端执行一个 push 操作。 因此，一个在 [MULTI](http://www.redis.cn/commands/multi.html) / [EXEC](http://www.redis.cn/commands/exec.html) 里面的 [BLPOP](http://www.redis.cn/commands/blpop.html) 命令会在 list 为空的时候返回一个 `nil` 值，这跟超时(timeout)的时候发生的一样。
 >
 >如果你喜欢科幻小说，那么想象一下时间是以无限的速度在 MULTI / EXEC 块中流逝……
+
+应用：**事件提醒**，类似于Golang中的管道消监听吧，这个可以实现分布式的管道消息提醒。
 
 4、BRPOP key [key ...] timeout
 
 同BLPOP几乎一致。是 [RPOP](http://www.redis.cn/commands/commands/rpop.html) 的阻塞版本
 
-### redis hashes
+### hashes
 
-Redis hash 是一个 string 类型的 field（字段） 和 value（值） 的映射表，hash 特别适合用于存储对象。
-Redis 中每个 hash 可以存储 232 - 1 键值对（40多亿）。
+Redis hash 是一个 string 类型的 field（字段） 和 value（值） 的映射表，hash 特别适合用于**存储对象**。**数组+链表**实现。
+
+值得注意的是，小的 hash 被用特殊方式编码，非常节约内存。
 
 1、基本命令
 
@@ -704,26 +522,6 @@ Redis 中每个 hash 可以存储 232 - 1 键值对（40多亿）。
 > hmset、hmget 同时将多个field-value对设置到哈希表中。会覆盖哈希表中已存在的字段。 
 > hgetall 用于返回哈希表中，所有的字段和值。 
 > hdel 用于删除哈希表 key 中的一个或多个指定字段 
-
-```shell
-127.0.0.1:6379> hmset myhash f1 hello f2 world
-OK
-127.0.0.1:6379> hmget myhash f1 f2
-1) "hello"
-2) "world"
-127.0.0.1:6379> hget myhash f1
-"hello"
-127.0.0.1:6379> hgetall myhash
-1) "f1"
-2) "hello"
-3) "f2"
-4) "world"
-127.0.0.1:6379> hdel myhash f1
-(integer) 1
-127.0.0.1:6379> hgetall myhash
-1) "f2"
-2) "world"
-```
 
 2、常用命令
 
@@ -736,334 +534,58 @@ OK
 
 感觉和之前的strings以及list的命令都差不多。
 
+### sets
 
+Redis 的 Set 是 string 类型的无序集合，集合成员唯一。集合是通过哈希表实现的。
 
-### redis sets
+可用于**去重**，取**交集和差集**。
 
-Redis 的 Set 是 String 类型的无序集合。集合成员是唯一的，这就意味着集合中不能出现重复的数据。
+常用命令
 
-Redis 中集合是通过哈希表实现的，所以添加，删除，查找的复杂度都是 O(1)。
+1、`SRANDMEMBER key [count]`
 
-集合中最大的成员数为 232 - 1 (4294967295, 每个集合可存储40多亿个成员)。
+随机返回count个不同的元素，count可正可负：
 
-1、基本命令
+- 正数：类似从集合中拿元素不放回，不返重复元素，且count大于集合元素个数时仅返回所有集合元素
+- 负数：类似从集合中拿元素又放回，很可能返回重复元素
 
-> SADD key member [member...]	
+> **返回元素的分布**：分布并不是绝对均匀的哦
 >
-> > 添加一个或多个指定的member元素到集合的 key中 
-> >
-> > 返回新添加成功的个数
+> 所使用的算法（在dict.c中实现）对哈希表桶进行采样以找到非空桶。一旦找到非空桶，由于我们在哈希表的实现中使用了链接法，因此会检查桶中的元素数量，并且选出一个随机元素。
 >
-> SMEMBERS key
->
-> > 返回key集合中所有的元素
-> > 该命令的作用与使用一个参数的[SINTER](http://www.redis.cn/commands/sinter.html) 命令作用相同.
->
-> SISMEMBER key member
->
-> > 返回成员 member 是否是存储的集合 key的成员.
-> > 返回值：如果是，1；否则0
->
-> SCARD key
->
-> > 获取集合元素个数
->
-> SREM key member [member...]
->
-> > 在key集合中移除指定的元素. 如果指定的元素不是key集合中的元素则忽略 如果key集合不存在则被视为一个空的集合，该命令返回0.
-> >
-> > 如果key的类型不是一个集合,则返回错误.
+> 这意味着，如果整个哈希表中有两个非空桶，其中一个有三个元素，另一个只有一个元素，那么其桶中单独存在的元素将以更高的概率返回。
 
-```shell
-127.0.0.1:6379> sadd myset 1
-(integer) 1
-127.0.0.1:6379> sadd myset 1 2 3
-(integer) 2							------> 返回的是2，而不是3
-127.0.0.1:6379> smembers myset
-1) "1"
-2) "2"
-3) "3"
-127.0.0.1:6379> sismember myset 100
-(integer) 0
-127.0.0.1:6379> scard myset
-(integer) 3
-127.0.0.1:6379> srem myset 100
-(integer) 0
-127.0.0.1:6379> srem myset 1
-(integer) 1
-```
+2、`SPOP key [count]`
 
-2、常用命令
+随机从集合中移除count个元素，操作与`SRANDMEMBER`类似。
 
-> SRANDMEMBER key [count]
->
-> > 仅提供key参数，那么随机返回key集合中的一个元素.
-> >
-> > Redis 2.6开始，可以接受 count 参数，如果count是整数且小于元素的个数，返回含有 count 个不同的元素的数组，如果count是个整数且大于集合中元素的个数时，仅返回整个集合的所有元素，当count是负数，则会返回一个包含count的绝对值的个数元素的数组，如果count的绝对值大于元素的个数，则返回的结果集里会出现一个元素出现多次的情况.
-> >
-> > 仅提供key参数时，该命令作用类似于SPOP命令，不同的是SPOP命令会将被选择的随机元素从集合中移除，而SRANDMEMBER仅仅是返回该随记元素，而不做任何操作.
-> >
-> > **对于count的情况：**
-> >
-> > 1.正数：
-> >
-> > - 不会返回重复的元素。
-> > - 如果count参数的值大于集合内的元素数量，此命令将会仅返回整个集合，没有额外的元素。
-> >
-> > 2.负数：
-> >
-> > - 此时，就像是从盒子拿了又放回去，所有是很大可能有重复元素出现的哦
-> >
-> > **返回元素的分布：**分布并不是绝对均匀的哦
-> >
-> > > 所使用的算法（在dict.c中实现）对哈希表桶进行采样以找到非空桶。一旦找到非空桶，由于我们在哈希表的实现中使用了链接法，因此会检查桶中的元素数量，并且选出一个随机元素。
-> >
-> > > 这意味着，如果你在整个哈希表中有两个非空桶，其中一个有三个元素，另一个只有一个元素，那么其桶中单独存在的元素将以更高的概率返回。
+3、`SMOVE source destination member`
 
-```shell
-127.0.0.1:6379> srandmember myset 1
-1) "2"		-------------> 返回的是一个元素数组
-127.0.0.1:6379> srandmember myset
-"2" 			---------> 返回的是元素
-127.0.0.1:6379> srandmember myset -5
-1) "5"
-2) "5"
-3) "2"
-4) "4"
-5) "2"
-```
+将source集合的某元素移动到destination集合。
 
-> SPOP key [count]
->
-> >从存储在`key`的集合中移除并返回一个或多个随机元素。
-> >
-> >返回：被删除的元素，或者当`key`不存在时返回`nil`。
-> >
-> >应用：实现一个基于 web 的扑克游戏
+4、集合间命令
 
-```shell
-127.0.0.1:6379> smembers myset
-1) "1"
-2) "2"
-3) "3"
-4) "4"
-5) "5"
-127.0.0.1:6379> spop myset 1
-1) "2"
-127.0.0.1:6379> smembers myset
-1) "1"
-2) "3"
-3) "4"
-4) "5"
-```
+- 差集： `sdiff key [key...]`
 
-> SMOVE source destination member
->
-> > 将member从source集合移动到destination集合中. 对于其他的客户端,在特定的时间元素将会作为source或者destination集合的成员出现.
-> >
-> > 返回：
-> >
-> > - 如果该元素成功移除,返回1
-> > - 如果该元素不是 source集合成员,无任何操作,则返回0.
+- 交集： `sinter key [key...]`
 
-```shell
-127.0.0.1:6379> sadd myset1 a b  c
-(integer) 3
-127.0.0.1:6379> smove myset myset1 1
-(integer) 1
-127.0.0.1:6379> smove myset myset1 1000
-(integer) 0
-127.0.0.1:6379> smembers myset1
-1) "c"
-2) "1"
-3) "b"
-4) "a"
-```
-
-3、集合间命令
-
-- 差集： sdiff  key [key...]
-
-- 交集： sinter  key [key...]
-
-- 并集： sunion key [key...]
-
-```shell
-127.0.0.1:6379> sadd myset1 1 2 3
-(integer) 3
-127.0.0.1:6379> sadd myset2 2 3 4 
-(integer) 3
-127.0.0.1:6379> sadd myset3 3 4 5
-(integer) 3
-127.0.0.1:6379> sdiff myset1 myset2 myset3
-1) "1"
-127.0.0.1:6379> sinter myset1 myset2 myset3
-1) "3"
-127.0.0.1:6379> sunion myset1 myset2 myset3
-1) "1"
-2) "2"
-3) "3"
-4) "4"
-5) "5"
-```
+- 并集： `sunion key [key...]`
 
 应用：在微博应用中，可以将一个用户所有的关注人存在一个集合中，将其所有粉丝存在一个集合。Redis还为集合提供了求交集、并集、差集等操作，可以非常方便的实现如**共同关注、共同喜好、二度好友**等功能，对上面的所有集合操作，你还可以使用不同的命令选择将结果返回给客户端还是存集到一个新的集合中。
 
+- 差集保存： `sdiffstore destination key [key...]`
 
+- 交集保存： `sinterstore destination key [key...]`
 
-- 差集保存： sdiffstore  destination  key [key...]
+- 并集保存： `sunionstore destination key [key...]`
 
-- 交集保存： sinterstore destination   key [key...]
+### sorted sets
 
-- 并集保存： sunionstore destination  key [key...]
+有序集合是一种类似于集合和哈希混合的数据类型。与集合一样，有序集合由唯一的、不重复的字符串元素组成，有序集合也是一个集合，每个元素都会关联一个 **double 类型的分数**用于排序。
 
-> 命令作用类似于[SUNION](http://www.redis.cn/commands/sunion.html)命令,不同的是它并不返回结果集,而是将结果存储在destination集合中.
->
-> 如果destination 已经存在,则将其覆盖.
->
-> 返回：结果集元素的个数.
+有序集合的成员是唯一的,但分数(score)却可以重复。分数从小到大排序，若相等则按元素字典顺序排。
 
-```shell
-127.0.0.1:6379> sdiffstore myset4 myset1 myset2 myset3
-(integer) 1
-127.0.0.1:6379> smembers myset4
-1) "1"
-```
-
-
-
-### redis sorted sets
-
-Redis 有序集合和集合一样也是 string 类型元素的集合,且不允许重复的成员。
-
-不同的是每个元素都会关联一个 **double 类型的分数**。redis 正是通过分数来为集合中的成员进行从小到大的排序。
-
-有序集合的成员是唯一的,但分数(score)却可以重复。
-
-集合是通过哈希表实现的，所以添加，删除，查找的复杂度都是 O(1)。 集合中最大的成员数为 2^32^ - 1 (4294967295, 每个集合可存储40多亿个成员)。
-
-#### ZADD
-
-ZADD key [NX|XX] [CH] [INCR] score member [score member ...]
-
->**时间复杂度：**O(log(N)) for each item added, where N is the number of elements in the sorted set.
->
->将所有指定成员添加到键为`key`有序集合（sorted set）里面。 添加时可以指定多个分数/成员（score/member）对。 如果指定添加的成员已经是有序集合里面的成员，则会更新改成员的分数（scrore）并更新到正确的排序位置。
->
->如果`key`不存在，将会创建一个新的有序集合（sorted set）并将分数/成员（score/member）对添加到有序集合，就像原来存在一个空的有序集合一样。如果`key`存在，但是类型不是有序集合，将会返回一个错误应答。
->
->分数值是一个双精度的浮点型数字字符串。`+inf`和`-inf`都是有效值。
->
->**返回值**
->
->[Integer reply](http://www.redis.cn/topics/protocol.html#integer-reply), 包括:
->
->- 添加到有序集合的成员数量，不包括已经存在更新分数的成员。如果指定`INCR`参数, 返回将会变成[bulk-string-reply](http://www.redis.cn/topics/protocol.html#bulk-string-reply) ：
->
->- 成员的新分数（双精度的浮点型数字）字符串。
-
-**ZADD 参数（options） (>= Redis 3.0.2)**
-
-ZADD 命令在`key`后面分数/成员（score/member）对前面支持一些参数，他们是：
-
-- **XX**: 仅仅更新存在的成员，不添加新成员。
-- **NX**: 不更新存在的成员。只添加新成员。
-- **CH**: 修改返回值为发生变化的成员总数，原始是返回新添加成员的总数 (CH 是 *changed* 的意思)。更改的元素是**新添加的成员**，已经存在的成员**更新分数**。 所以在命令中指定的成员有相同的分数将不被计算在内。注：在通常情况下，`ZADD`返回值只计算新添加成员的数量。
-- **INCR**: 当`ZADD`指定这个选项时，成员的操作就等同[ZINCRBY](http://www.redis.cn/commands/zincrby.html)命令，对成员的分数进行递增操作。
-
-#### 常用命令
-
-1、zrange
-
-> **ZRANGE key start stop [WITHSCORES]**
->
-> > 返回存储在有序集合`key`中的指定范围的元素。 返回的元素可以认为是按得分从最低到最高排列。 
-> > 如果得分相同，将按字典排序。
-
-```shell
-127.0.0.1:6379> zadd myzset 1 hello 2 world 3 !
-(integer) 3
-127.0.0.1:6379> zrange myzset 0 -1
-1) "hello"
-2) "world"
-3) "!"
-127.0.0.1:6379> zrange myzset 0 -1 withscores
-1) "hello"
-2) "1"
-3) "world"
-4) "2"
-5) "!"
-6) "3"
-```
-
-> **ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]**
->
-> > 返回key的有序集合中的分数在min和max之间的所有元素（包括分数等于max或者min的元素）。
-> >
-> > 可选的LIMIT参数指定返回结果的数量及区间（类似SQL中SELECT LIMIT offset, count）。
-> >
-> > 可选参数WITHSCORES会返回元素和其分数，而不只是元素
-> >
-> > min和max可以是-inf和+inf，这样一来，你就可以在不知道有序集的最低和最高score值的情况下，使用ZRANGEBYSCORE这类命令。
-> > inf表示无穷大
-> >
-> > 默认情况下，区间的取值使用闭区间(小于等于或大于等于)，你也可以通过给参数前增加(符号来使用可选的开区间(小于或大于)。
-
-```shell
-127.0.0.1:6379> zadd salary 1000 fzk 1200 wn 500 fhl
-(integer) 3
-127.0.0.1:6379> zrangebyscore salary (500 (1200 withscores
-1) "fzk"
-2) "1000"
-127.0.0.1:6379> zrangebyscore salary -inf inf withscores
-1) "fhl"
-2) "500"
-3) "fzk"
-4) "1000"
-5) "wn"
-6) "1200"
-```
-
-2、ZREM
-
-> **ZREM key member [member ...]**
->
-> >当key存在，但是其不是有序集合类型，就返回一个错误。
-> >
-> >返回值：返回的是从有序集合中删除的成员个数，不包括不存在的成员。
-
-3、ZCARD
-
-> 返回key的有序集元素个数。
->
-> **时间复杂度：**O(1)
->
-> 返回值：key存在的时候，返回有序集的元素个数，否则返回0。
-
-4、ZCOUNT
-
-> **ZCOUNT key min max**
->
-> 计算有序集合中指定分数区间的成员数量。
-
-5、ZRANK
-
-> **ZRANK key member**
->
-> > 返回有序集key中成员member的排名，排名以0为底  
->
-> **ZREVRANK key member**
->
-> >返回有序集中成员的排名。其中有序集成员按分数值递减(从大到小)排序。
-
-```shell
-127.0.0.1:6379> zcount salary (500 1200
-(integer) 2
-127.0.0.1:6379> zrank salary fzk
-(integer) 1
-127.0.0.1:6379> zrevrank salary wn
-(integer) 0
-```
+应用场景：排行榜
 
 和set相比，sorted set增加了一个权重参数score，使得集合中的元素能够按score进行有序排列，
 比如一个存储全班同学成绩的sorted set，其集合value可以是同学的学号，而score就可以是其考试得分，
@@ -1073,37 +595,173 @@ ZADD 命令在`key`后面分数/成员（score/member）对前面支持一些参
 
 排行榜应用，取TOP N操作 ！ 
 
+常用命令：
+
+1、`ZADD key [NX|XX] [CH] [INCR] score member [score member ...]`
+
+**时间复杂度：**O(log(N)) for each item added, where N is the number of elements in the sorted set.
+
+无则添加，有则更新分数。
+
+**ZADD 参数（options） (>= Redis 3.0.2)**
+
+ZADD 命令在`key`后面分数/成员（score/member）对前面支持一些参数，他们是：
+
+- **XX**: 仅更新存在的成员，不添加新成员。
+- **NX**: 不更新存在的成员，只添加新成员。
+- **CH**: 修改返回值为发生变化的成员总数，原始是返回新添加成员的总数 (CH 是 *changed* 的意思)。更改的元素是**新添加的成员**，已经存在的成员**更新分数**。 所以在命令中指定的成员有相同的分数将不被计算在内。注：在通常情况下，`ZADD`返回值只计算新添加成员的数量。
+- **INCR**: 当`ZADD`指定这个选项时，成员的操作就等同[ZINCRBY](http://www.redis.cn/commands/zincrby.html)命令，对成员的分数进行递增操作。
+
+2、ZRANGE
+
+2.1、`ZRANGE key start stop [WITHSCORES]`
+
+时间复杂度：O(lgN + M)。
+
+start和stop指索引，从0开始，闭区间。
+
+2.2、 `ZREVRANGE key start stop [WITHSCRORES]`同上不过是分数倒序、字典倒序的
+
+2.3、`ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`
+
+时间复杂度：O(lgN + M)。
+
+返回分数score在min和max之间的元素，默认闭区间，可以通过给参数前添加`(`表示开区间符号.
+
+min和max可以是-inf和+inf，这样一来，你就可以在不知道有序集的最低和最高score值的情况下，使用ZRANGEBYSCORE这类命令。inf表示无穷大。
+
+LIMIT参数指定返回结果的数量及区间（类似SQL中SELECT LIMIT offset, count）。
+
+```shell
+127.0.0.1:6379> zrangebyscore salary (500 (1200 withscores
+1) "fzk"
+2) "1000"
+127.0.0.1:6379> zrangebyscore salary -inf inf withscores
+1) "sb"
+2) "500"
+3) "fzk"
+4) "1000"
+5) "wn"
+6) "1200"
+```
+
+2.4、`ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]`同上倒序
+
+3、`ZRANK key member`
+
+返回member的排名，排名以0为底。
+
+`ZREVRANK key member`返回倒序排名。
+
+## Redis命令
+
+Redis命令十分丰富，包括的命令组有Cluster、Connection、Geo、Hashes、HyperLogLog、Keys、Lists、Pub/Sub、Scripting、Server、Sets、Sorted Sets、Strings、Transactions一共14个redis命令组两百多个redis命令。
+
+> redis中文命令大全：http://www.redis.cn/commands.html
+
+5中基本数据类型的重要命令在上面部分已经分析过了，下面只分析其它命令。
+
+### redis-cli命令
+
+Redis 命令用于在 redis 服务上执行操作。
+
+要在 redis 服务上执行命令需要一个 redis 客户端。Redis 客户端在我们之前下载的的 redis 的安装包中。
+
+```shell
+127.0.0.1:6379> ping # ping命令可以检查redis服务是否启动。
+PONG
+```
+
+> 注意：连接 redis-cli，增加参数 --raw ，可以**强制输出中文**，不然会乱码
+
+```shell
+# -a 指定密码; -n 指定数据库
+[root@iZuf6el32a2l9b73omo6cgZ bin]# ./redis-cli  -h 127.0.0.1 -p 6379 -a "mypass" -n 0
+
+# -r 指定命令重复次数；-i指定命令调用间隔，单位秒
+./redis-cli -r 5 -i 1 INCR k1
+
+# 连续统计模式，实时监控Redis实例
+./redis-cli --stat 
+
+# 扫描大key
+# 它会分析数据库中5种基本类型的key的情况，返回各自最大的key，并各自给出平均大小
+./redis-cli --bigkeys
+
+# 基本的延迟检查工具是--latency选项，它会一直运行发送PING来计算延迟，单位ms
+[root@k8s-master clusterTestDir]# ./redis-cli --latency
+min: 0, max: 1, avg: 0.31 (1932 samples)
+
+# --latency-history可以查看每15s内延迟变化
+[root@k8s-master clusterTestDir]# ./redis-cli --latency-history
+min: 0, max: 1, avg: 0.32 (1441 samples) -- 15.00 seconds range
+min: 0, max: 1, avg: 0.31 (1440 samples) -- 15.00 seconds range
+min: 0, max: 1, avg: 0.30 (360 samples)^C
+
+# CLI 的副本模式是对 Redis 开发人员和调试操作有用的高级功能。它允许检查主节点在复制流中发送到其副本的内容，以便将写入传播到其副本
+[root@k8s-master clusterTestDir]# ./redis-cli -a '!MyRedis123456' --replica
+sending REPLCONF capa eof
+sending REPLCONF rdb-filter-only 
+REPLCONF rdb-filter-only error: ERR Unrecognized REPLCONF option: rdb-filter-only
+SYNC with master, discarding 25630 bytes of bulk transfer...
+SYNC done. Logging commands from master.
+"ping"
+"SELECT","0"
+"set","k2","v2"
+"ping"
+```
+
+### redis Key
+
+Redis 键命令用于管理 redis 的键。
+
+![image-20210901153120391](redis.assets/image-20210901153120391.png)
+
+![image-20210901153135162](redis.assets/image-20210901153135162.png)
+
+#### KEYS pattern
+
+>查找所有符合给定模式pattern（正则表达式）的 key 。
+>
+>时间复杂度为O(N)，N为数据库里面key的数量。
+>
+>例如，Redis在一个有1百万个key的数据库里面执行一次查询需要的时间是40毫秒 。
+
+**警告**: `KEYS` 的速度非常快，但在一个大的数据库中使用它仍然可能造成性能问题，如果你需要从一个数据集中查找特定的 `KEYS`， 你最好还是用 Redis 的集合结构 [SETS](http://www.redis.cn/commands/sets.html) 来代替。
+
+可以用来查询所有key：`keys *`；其它正则模式看文档：http://www.redis.cn/commands/keys.html
+
+#### MOVE key db
+
+时间复杂度：O(1)
+
+将当前数据库的 key 移动到给定的数据库 db 当中。
+
+成功返回1，失败(key不存在)返回0。
+
 ### redis Geo
 
 Redis 的 GEO 特性在 Redis 3.2 版本中推出， 这个功能可以将用户给定的地理位置信息储存起来， 并对这些信息进行操作。来实现诸如**附近位置、摇一摇**这类依赖于地理位置信息的功能。geo的数据类型为zset。
 
 > 可能需要的经纬度网站：https://jingweidu.bmcx.com/
 
-业界比较通用的地理位置距离排序算法是GeoHash算法，**将二维的经纬度数据映射到一维的整数**，距离近的二维坐标映射到一维后也很近。
+业界比较通用的地理位置距离排序算法是[GeoHash算法](https://en.wikipedia.org/wiki/Geohash)，**将二维的经纬度数据映射到一维的整数**，距离近的二维坐标映射到一维后也很近。
 
-Redis中经纬度用52位整数进行编码，以GeoHash算法得到的52位整数值作为score放入zset中，即**存储数据结构为zset**。
+Redis中经纬度用52位整数进行编码，**以GeoHash算法得到的52位整数值作为score放入zset中**，即**存储数据结构为zset**。
 
-1、GEOADD：添加地理位置的坐标
+1、`GEOADD key longitude latitude member [longitude latitude member ...]`：添加地理位置的坐标
 
-> GEOADD key longitude latitude member [longitude latitude member ...]
-
-**时间复杂度：**每一个元素添加是O(logN)，N是zset的元素数量。
-
-将指定的地理空间位置（纬度、经度、名称）添加到指定的`key`中。这些数据将会存储到`zset`，目的是为了方便使用[GEORADIUS](http://www.redis.cn/commands/georadius.html)或者[GEORADIUSBYMEMBER](http://www.redis.cn/commands/georadiusbymember.html)命令对数据进行半径查询等操作。
+时间复杂度：O(logN)，N是zset的元素数量。
 
 - 有效的经度从-180度到180度。
 - 有效的纬度从-85.05112878度到85.05112878度。
 
-2、GEOPOS：获取地理位置的坐标
+2、`GEOPOS key member [member...] `：获取地理位置的坐标
 
-> geopos key member [member...] 
->
-
-3、GEODIST：计算两个位置之间的距离
-
-> **GEODIST key member1 member2 [unit]**
+3、`GEODIST key member1 member2 [unit]`：计算两个位置之间的距离
 
 **时间复杂度：**O(logN)
+
 指定单位的参数 unit 必须是以下单位的其中一个：
 
 - m 米[默认]
@@ -1111,41 +769,26 @@ Redis中经纬度用52位整数进行编码，以GeoHash算法得到的52位整�
 - mi 英里
 - ft 英尺
 
-`GEODIST` 命令在计算距离时会假设地球为完美的球形，在极限情况下，这一假设最大会造成 0.5% 的误差
+`GEODIST` 命令在计算距离时会假设地球为完美的球形，在极限情况下，这一假设最大会造成 0.5% 的误差。
 
-```shell
-127.0.0.1:6379> geoadd china:sichuan 104.10194 30.65984 chengdu
-(integer) 1
-127.0.0.1:6379> geoadd china:sichuan 106.64188 30.47392 guangan 106.54041 29.40268 chongqing
-(integer) 2
-127.0.0.1:6379> geopos china:sichuan chengdu
-1) 1) "104.10194188356399536"
-   2) "30.65983886217613019"
-127.0.0.1:6379> geodist china:sichuan chengdu guangan
-"244121.6926"
-```
-
-4、GEORADIUS：根据用户给定的经纬度坐标来获取指定范围内的地理位置集合
+4、`GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]`：根据用户给定的经纬度坐标来获取指定范围内的地理位置集合
 
 如根据用户定位计算“附近的车”、“附近的餐馆”等。
-
-> GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]
 
 以给定的经纬度为中心， 返回键包含的位置元素当中， 与中心的距离不超过给定最大距离radius的所有位置元素。范围同GEODIST命令。
 
 在给定以下可选项时， 命令会返回额外的信息：
 
-> - `WITHDIST`: 在返回位置元素的同时， 将位置元素与中心之间的距离也一并返回。 距离的单位和用户给定的范围单位保持一致。
->- `WITHCOORD`: 将位置元素的经度和维度也一并返回。
-> - `WITHHASH`: 以 52 位有符号整数的形式， 返回位置元素经过原始 geohash 编码的有序集合分值。 这个选项主要用于底层应用或者调试， 实际中的作用并不大。
-> 
-> 命令默认返回未排序的位置元素。 通过以下两个参数， 用户可以指定被返回位置元素的排序方式：
->
-> - `ASC`: 根据中心的位置， 按照从近到远的方式返回位置元素。
-> - `DESC`: 根据中心的位置， 按照从远到近的方式返回位置元素。
->
+- `WITHDIST`: 在返回位置元素的同时， 将位置元素与中心之间的距离也一并返回。 距离的单位和用户给定的范围单位保持一致。
+- `WITHCOORD`: 将位置元素的经度和维度也一并返回。
+- `WITHHASH`: 以 52 位有符号整数的形式， 返回位置元素经过原始 geohash 编码的有序集合分值。 这个选项主要用于底层应用或者调试， 实际中的作用并不大。
 
-在默认情况下， GEORADIUS 命令会返回所有匹配的位置元素。 虽然用户可以使用 **COUNT `<count>`** 选项去获取前 N 个匹配元素， 但是因为命令在内部可能会需要对所有被匹配的元素进行处理， 所以在对一个非常大的区域进行搜索时， 即使只使用 `COUNT` 选项去获取少量元素， 命令的执行速度也可能会非常慢。 但是从另一方面来说， 使用 `COUNT` 选项去减少需要返回的元素数量， 对于减少带宽来说仍然是非常有用的。
+命令默认返回未排序的位置元素。 通过以下两个参数， 用户可以指定被返回位置元素的排序方式：
+
+- `ASC`: 根据中心的位置， 按照从近到远的方式返回位置元素。
+- `DESC`: 根据中心的位置， 按照从远到近的方式返回位置元素。
+
+> 注意：在默认情况下，GEORADIUS 命令会返回所有匹配的位置元素。 虽然可用 `COUNT <count>` 选项去获取前 N 个匹配元素， 但是因为命令在内部可能会需要对所有被匹配的元素进行处理， 所以在对一个非常大的区域进行搜索时， 即使只使用 `COUNT` 选项去获取少量元素， **命令的执行速度也可能会非常慢**。 但是从另一方面来说， 使用 `COUNT` 选项去减少需要返回的元素数量， 对于减少带宽来说仍然是非常有用的。
 
 ```shell
 127.0.0.1:6379>  georadius china:sichuan 108.93425 34.23053 1000 km withcoord withdist COUNT 2 ASC
@@ -1162,85 +805,67 @@ Redis中经纬度用52位整数进行编码，以GeoHash算法得到的52位整�
 2) "chongqing"
 ```
 
-5、GEORADIUSBYMEMBER：查询元素附近的其它元素
+5、`GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]`：查询元素附近的其它元素
 
-> **GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count]**
+同上一个命令几乎一致，区别在于，上一个是自己输入经度纬度，这个是从key中选择一个元素做中心点。
 
-同上一个命令几乎一致，区别在于，上一个是自己输入经度纬度，这个是从key中选择一个元素做中心点
+6、zset命令
 
-```shell
-redis:6379> GEORADIUSBYMEMBER company baidu 7000 km COUNT 3
-1) "baidu"
-2) "juejin"
-3) "jingdong"
-```
-
-6、GEOHASH：返回一个或多个位置对象的 geohash 值
-
-> GEOHASH key member [member ...]
-
-返回一个或多个位置元素的 [Geohash](https://en.wikipedia.org/wiki/Geohash) 值。
-该命令将返回11个字符的Geohash字符串；两个字符串越相似 表示距离越近。
-可以用这个编码去http://geohash.org上查看定位是否正确。
+GEO没有提供删除成员的命令，但是因为GEO的底层实现是zset，所以可以借用zrem命令实现对地理位置信息的删除。其他的**z系列命令对geo操作都是有效的哦**。
 
 ```shell
-127.0.0.1:6379> geohash china:sichuan chengdu guangan
-1) "wm6n2vkwx00"
-2) "wm7v6ew5ry0"
+127.0.0.1:6379> zrange geo1 0 10 withscores
+三亚
+3974547044446752
+重庆
+4026046519194590
 ```
 
-7、zset命令
-
-GEO没有提供删除成员的命令，但是因为GEO的底层实现是zset，所以可以借用zrem命令实现对地理位置信息的删除。其他的z系列命令都是有效的哦。
-
-> 注意：GEO数据用zset存储，在一个地图应用中，车、餐馆、人的数据可能会有几百万条，全部存入一个zset集合中，在Redis集群环境下，zset可能会迁移到另一个节点，单个key过大会对集群迁移造成影响，集群环境中单个key不要超过1MB。
+> 注意：GEO数据用zset存储，在一个地图应用中，车、餐馆、人的数据可能会有几百万条，全部存入一个zset集合中，在Redis集群环境下，zset可能会迁移到另一个节点，单个key过大会对集群迁移造成影响，集群环境中**单个key不要超过1MB**。
 >
-> 建议Geo的数据单独用一个Redis实例部署，不用集群环境。而且数据量过大的情况要进行拆分，如按城市拆、区域拆等。
+> **建议Geo的数据单独用一个Redis实例部署**，不用集群环境。而且数据量过大的情况要进行拆分，如按城市拆、区域拆等。
 
 ### redis HyperLogLog
 
-Redis 在 2.8.9 版本添加了 HyperLogLog 结构。
-
-Redis HyperLogLog 是用来做基数统计的算法，HyperLogLog 的优点是，在输入元素的数量或者体积非常非常大时，计算基数所需的空间总是固定 的、并且是很小的。
+Redis HyperLogLog 是一种**概率数据结构**，用来做**基数统计的算法**，HyperLogLog 的优点是，在输入元素的数量或者体积非常非常大时，计算基数所需的空间**总是固定12KB**的。
 
 在 Redis 里面，每个 HyperLogLog 键只需要花费 12 KB 内存，就可以计算接近 2^64^ 个不同元素的基数。这和计算基数时，元素越多耗费内存就越多的集合形成鲜明对比。
 
-但是，因为 HyperLogLog 只会根据输入元素来计算基数，而不会储存输入元素本身，所以 HyperLogLog 不能像集合那样，返回输入的各个元素。
+但是，因为 HyperLogLog 只会根据输入元素来计算基数，而**不会储存输入元素本身**，所以 HyperLogLog 不能像集合那样，返回输入的各个元素。
 
 > HyperLogLog则是一种算法，它提供了不精确的去重计数方案。
 >
 > **举个栗子**：假如我要统计网页的UV（**浏览用户数量**，一天内同一个用户多次访问只能算一次），传统的解决方案是使用Set来保存用户id，然后统计Set中的元素数量来获取页面UV。但这种方案只能承载少量用户，一旦用户数量大起来就需要消耗大量的空间来存储用户id。我的目的是统计用户数量而不是保存用户，这简直是个吃力不讨好的方案！而使用Redis的HyperLogLog最多需要12k就可以统计大量的用户数，尽管它大概有0.81%的错误率，但对于统计UV这种不需要很精确的数据是可以忽略不计的。
 
-**基数**
-
-> 比如数据集 {1, 3, 5, 7, 5, 7, 8}， 那么这个数据集的基数集为 {1, 3, 5 ,7, 8}, 基数(不重复元素)为5。 基数估计就是在误差可接受的范围内，快速计算基数。
+**基数**：比如数据集 {1, 3, 5, 7, 5, 7, 8}， 那么这个数据集的基数集为 {1, 3, 5 ,7, 8}, 基数(不重复元素)为5。 基数估计就是在误差可接受的范围内，快速计算基数。
 
 **命令：**
 
-| 序号 | 命令及描述                                                   |
-| :--- | :----------------------------------------------------------- |
-| 1    | [PFADD key element [element ...\]](https://www.runoob.com/redis/hyperloglog-pfadd.html) 添加指定元素到 HyperLogLog 中。 |
-| 2    | [PFCOUNT key [key ...\]](https://www.runoob.com/redis/hyperloglog-pfcount.html) 返回给定 HyperLogLog 的基数估算值。 |
-| 3    | [PFMERGE destkey sourcekey [sourcekey ...\]](https://www.runoob.com/redis/hyperloglog-pfmerge.html) 将多个 HyperLogLog 合并为一个 HyperLogLog |
+| 命令                                        | 描述                                      |
+| :------------------------------------------ | :---------------------------------------- |
+| `PFADD key element [element ...]`           | 添加指定元素到 HyperLogLog 中             |
+| `PFCOUNT key [key ...]`                     | 返回给定 HyperLogLog 的基数估算值         |
+| `PFMERGE destkey sourcekey [sourcekey ...]` | 将多个 HyperLogLog 合并为一个 HyperLogLog |
 
-```shell
-127.0.0.1:6379> pfadd hyperloglog 1 2 3 4 5 5 4
-(integer) 1
-127.0.0.1:6379> pfcount hyperloglog
-(integer) 5
-127.0.0.1:6379> pfadd hyperloglog 2 7 
-(integer) 1
-127.0.0.1:6379> pfcount hyperloglog
-(integer) 6
-127.0.0.1:6379> pfadd hyperloglog2 1 2 3 a b c
-(integer) 1
-127.0.0.1:6379> pfmerge hyperloglog hyperloglog2
-OK
-127.0.0.1:6379> pfcount hyperloglog
-(integer) 9
+例子：以Jedis库的流水线执行100w次操作如下：
+
+```java
+    Pipeline pipeline = jedis.pipelined();
+    for (int i = 0; i < 1000000; i++) {
+        pipeline.pfadd("pf1", "user:" + i);
+    }
+    pipeline.sync();// 刷管道命令
+    System.out.println(jedis.pfcount("pf1"));// 统计基数------>999674
+
+    for (int i = 0; i < 1000000; i++) {
+        pipeline.pfadd("pf1", "user:1" + i);
+    }
+    pipeline.sync();// 刷管道命令
+    pipeline.close();// 关闭管道
+    System.out.println(jedis.pfcount("pf1"));// 统计基数------>1907267
 ```
 
-
+> 注意：这个统计啊，经过测试，可能会统计多，也可能统计少。
 
 ### redis BitMap
 
@@ -1254,66 +879,18 @@ Bitmap 就是通过操作二进制位来进行记录，即为 0 和 1；如果�
 
 #### 位操作
 
-| 命令：单个位操作                     | 操作                                                     | 返回值            |
+| 命令：单个位操作                     | 描述                                                  | 返回值            |
 | ------------------------------------ | -------------------------------------------------------- | ----------------- |
-| Setbit KEY_NAME OFFSET value(1 or 0) | 对 key 所储存的字符串值，设置或清除指定偏移量上的位(bit) | 0                 |
-| GETBIT KEY_NAME OFFSET               | 对 key 所储存的字符串值，获取指定偏移量上的位(bit)       | 对应位的值 1 or 0 |
-| bitcount key [start, end]            | 统计 key 上位为1的个数                                   | 1的个数           |
-`SETBIT`命令将位编号作为其第一个参数，并将该位设置为 1 或 0 的值作为其第二个参数。如果寻址位超出当前字符串长度，该命令会自动放大字符串。
-
-`GETBIT`只返回指定索引处的位值。超出范围的位（寻址存储在目标键中的字符串长度之外的位）总是被认为是零。
-
-```shell
-# 使用 bitmap 来记录上述事例中一周的打卡记录如下所示： 
-# 周一：1，周二：0，周三：1，周四：1，周五：1，周六：1，周天：0 （1 为打卡，0 为不打卡）
-127.0.0.1:6379> setbit week_sign 0 1
-(integer) 0
-127.0.0.1:6379> setbit week_sign 1 0
-(integer) 0
-127.0.0.1:6379> setbit week_sign 2 1
-(integer) 0
-127.0.0.1:6379> setbit week_sign 3 1
-(integer) 0
-127.0.0.1:6379> setbit week_sign 4 1
-(integer) 0
-127.0.0.1:6379> setbit week_sign 5 1
-(integer) 0
-127.0.0.1:6379> setbit week_sign 6 0
-(integer) 0
-127.0.0.1:6379> getbit week_sign 1		# 查看周二是否打卡
-(integer) 0
-127.0.0.1:6379> bitcount week_sign 		# 统计打卡次数
-(integer) 5
-127.0.0.1:6379> bitcount week_sign 0 -1
-(integer) 5
-```
+| `SETBIT key offset value(1 or 0)` | 设置或清除指定偏移量上的位(bit) | offset旧值    |
+| `GETBIT key offset`   | 获取指定偏移量上的位(bit)       | offset处的值 |
+| `BITCOUNT key [start end]` | 统计位为1的个数，**注意start和end是字节偏移量**             | 1的个数           |
 
 #### 位组操作
 
-| 命令：位组操作            | 操作                                                         | 返回值 |
-| ------------------------- | ------------------------------------------------------------ | ------ |
-| BITOP                     | 在不同的字符串之间执行按位操作。提供的操作是 AND、OR、XOR 和 NOT |        |
-| BITCOUNT key [start, end] | 计数1的个数                                                  |        |
-| BITPOS                    | 查找指定值为 0 或 1 的第一位。                               |        |
-
-```shell
-127.0.0.1:6379> setbit year_sign 0 1
-(integer) 0
-127.0.0.1:6379> setbit year_sign 365 1
-(integer) 0
-127.0.0.1:6379> bitcount year_sign 
-(integer) 2
-127.0.0.1:6379> bitpos year_sign 1
-(integer) 0
-127.0.0.1:6379> bitpos year_sign 0
-(integer) 1
-127.0.0.1:6379> bitop and destkey week_sign year_sign
-(integer) 46
-127.0.0.1:6379> bitcount destkey
-(integer) 1
-```
-
-
+| 命令：位组操作                          | 操作                                                         | 返回值                                                       |
+| --------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| `BITOP operation destkey key [key ...]` | 字符串之间执行按位操作并保存到destkey。操作有AND、OR、XOR 和 NOT | 保存到 destkey 的字符串的长度，和输入 key 中最长的字符串长度相等 |
+| `BITPOS key bit [start] [end]`          | 查找指定值为 0 或 1 的第1个bit位。**注意start和end是字节偏移量** | 有点麻烦，看[BITPOS命令文档](http://www.redis.cn/commands/bitpos.html) |
 
 ## redis配置
 
