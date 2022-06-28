@@ -709,6 +709,15 @@ SYNC done. Logging commands from master.
 "SELECT","0"
 "set","k2","v2"
 "ping"
+
+
+# 远程备份工具允许将 RDB 文件从远程Redis传输到本地redis-cli。和主从复制的全量复制一样
+# 远程Redis灾难恢复 RDB 备份保存的简单方法。定时发送请求即可保存。
+[root@k8s-master clusterTestDir]# ./redis-cli --rdb ./hh.rdb
+sending REPLCONF capa eof
+sending REPLCONF rdb-only 1
+SYNC sent to master, writing 25641 bytes to './hh.rdb'
+Transfer finished with success.
 ```
 
 ### redis Key
@@ -1367,11 +1376,43 @@ Reading messages... (press Ctrl-C to quit)
 
 应用：构建实时的消息系统
 
+## stream
 
+[Stream](https://redis.io/docs/manual/data-types/streams/) 是 Redis 5.0 引入的一种新数据类型。Redis Streams 主要是一种**仅附加数据结构**。
 
+Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简单，它实现了额外的非强制性的特性：提供了一组允许消费者以阻塞的方式等待生产者向Stream中发送的新消息，此外还有一个名为**消费者组Consumer Group**的概念。
 
+消费者组最初由消息传递系统 Kafka 引入的。Redis 用完全不同的术语重新实现了类似的概念，但目标是相同的：允许一组客户端相互配合来消费同一个Stream的不同部分的消息。
 
+### 消息id
 
+消息id或entry id形式是`<timestampInMillis>-<sequenceNumber>`，表示什么时候的第几条消息。消息id可由服务端自动生成，也可以手动指定，**注意后加入的消息id必须大于之前的**。
+
+### 常用命令
+
+1、`XADD key ID field string [field string ...]`：向Stream中添加映射Entry
+
+时间复杂度：O(lgN)
+
+参数说明：
+
+- ID：`*`则由XADD命令自动生成，手动指定格式为：`<timestampInMillis>-<sequenceNumber>`；也可指定时间戳部分显式 ID，序列部分自动生成，如`100290-*`。
+- field string：这个键值对就是消息内容。
+
+2、`XDEL key ID [ID ...]`：删除消息，但是**仅标记为删除**，不影响消息总长度
+
+使用基数树来索引包含线性数十个Stream条目的宏节点。从Stream中删除一个条目的时候，条目并没有真正驱逐，只是被标记为删除。
+
+如果宏节点中的所有条目都被标记为删除，则会销毁整个节点，并回收内存。这意味着如果你从Stream里删除大量的条目，比如超过50%的条目，则每一个条目的内存占用可能会增加， 因为Stream将会开始变得碎片化。然而，流的表现将保持不变。
+
+3、`XRANGE key start end [COUNT count]`：返回流中满足给定ID范围的条目，闭区间。
+
+`XREVRANGE key end start [COUNT count]`同上，不过是倒序。
+
+- 特殊ID：`-`和`+`，分别表最小和最大。
+- 没有`XGET`命令以获取单个消息，可以用`XRANGE`限定start和end相等来查询单条消息。
+
+- start和end可前置字符`(`表示开区间。
 
 ## 缓存问题
 
