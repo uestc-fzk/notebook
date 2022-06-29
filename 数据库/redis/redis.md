@@ -1378,7 +1378,7 @@ Reading messages... (press Ctrl-C to quit)
 
 ## stream
 
-[Stream](https://redis.io/docs/manual/data-types/streams/) 是 Redis 5.0 引入的一种新数据类型。Redis Streams 主要是一种**仅附加数据结构**。
+[Stream](https://redis.io/docs/manual/data-types/streams/) 是 Redis 5.0 引入的一种新数据类型。Redis Streams 主要是一种**仅附加数据结构**。支持多播的可持久化消息队列。
 
 Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简单，它实现了额外的非强制性的特性：提供了一组允许消费者以阻塞的方式等待生产者向Stream中发送的新消息，此外还有一个名为**消费者组Consumer Group**的概念。
 
@@ -1413,6 +1413,54 @@ Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简
 - 没有`XGET`命令以获取单个消息，可以用`XRANGE`限定start和end相等来查询单条消息。
 
 - start和end可前置字符`(`表示开区间。
+
+### 独立消费
+
+可以在不定义消费者组情况下进行Stream消息的独立消费，类似于Pub/Sub或普通的list，不同的是Stream有消息持久化功能，可以提供给多个客户端订阅消费。
+
+单独消费命令：
+
+`XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] ID [ID ...]`
+
+- COUNT：最多查询count条消息，若没有消息，且传入了BLOCK选项则阻塞。
+
+- BLOCK：若没有消息则阻塞监听的任何1个key新消息到来，单位ms。特殊值`0`表示一直阻塞直至消息到来。
+- ID：查询比此id大的消息，一般用于顺序消费时传入上次消费的最后一个消息id。特殊字符`$`表示只查询新消息，而不是历史消息，这和消息队列的初始消费位移策略相似。
+
+与XRANGE命令的区别：
+
+1、**XREAD命令可以监听多个key**，若指定阻塞选项，可以实现在给定时间内通过单个连接监听多个key，类似多路复用。
+
+2、XREAD适合顺序消费消息，而XRANGE适合查询给定id范围消息。
+
+### 消费组
+
+即Kafka那种消费者组，组内的消费者客户端是竞争关系，共同处理监听的stream key。这里和Kafka消费者组功能相似，也有一个消费位移的概念：`last_delivered_id`
+
+1、`XGROUP [CREATE key groupname id-or-$ [MKSTREAM]] [SETID key id-or-$] [DESTROY key groupname] [DELCONSUMER key groupname consumername]`
+
+该命令管理消费者组：
+
+- 创建与流关联的新消费者组。`$`表示新创建消费者组的初始消费位移是新消息，不消费任何历史消息。MKSTREAM表示流不存在时自动创建。
+- 销毁一个消费者组。
+- 从消费者组中移除指定的消费者。
+- 设置消费者组的*最后交付ID*。
+
+2、`XREADGROUP GROUP <group-name> <consumer-name> [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] ID [ID ...]`
+
+消费者组消费命令：
+
+- `GROUP <group-name> <consumer-name>`：消费者名称是消费者组内表示自己的字符串。消费者会在第一次出现在消费者组内时被自动创建。**不同的消费者应该选择不同的消费者名称**。
+
+当使用`XREADGROUP`读取时，服务器将会记住某个给定的消息已经传递给你：消息会被存储在消费者组内的**待处理条目列表(PEL)**中，即已送达但尚未确认的消息ID列表。
+
+客户端必须使用`XACK`确认消息处理，以便从待处理条目列表PEL中删除待处理条目。可以使用`XPENDING`命令检查待处理条目列表。
+
+- ID：特殊值`>`，表是从`last_delivered_id`后面获取新消息；其他值则将让我们访问*待处理消息的历史记录*。也就是说，传递给此指定使用者（由提供的名称标识）的消息集，到目前为止从未使用[`XACK`](https://redis.io/commands/xack).
+
+消费者端首先要通过给`XREADGROUP`初始ID为0查询之前的PEL是否处理完成(因为消费者端可能重启了导致部分消费未消费完成)。 一旦提供的ID为0并且回复是一组空的消息，我们就知道我们已经处理并确认完了所有的PEL： 我们可以开始使用`>`作为ID，以便获取新消息并重新加入正在处理新消息的消费者。
+
+> 注意：**xgroup是写命令**，即使它从流中读取，消费者组也会被修改为读取的副作用，因此只能在master上调用。
 
 ## 缓存问题
 
