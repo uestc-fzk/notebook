@@ -1397,7 +1397,7 @@ Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简
 
 ### 常用命令
 
-1、`XADD key ID field string [field string ...]`：向Stream中添加映射Entry
+1、`XADD key [NOMKSTREAM] [MAXLEN|MINID [=|~] threshold [LIMIT count]] *|id field value [field value ...]`：向Stream中添加映射Entry
 
 时间复杂度：O(lgN)
 
@@ -1405,12 +1405,16 @@ Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简
 
 - ID：`*`则由XADD命令自动生成，手动指定格式为：`<timestampInMillis>-<sequenceNumber>`；也可指定时间戳部分显式 ID，序列部分自动生成，如`100290-*`。
 - field string：这个键值对就是消息内容。
+- MAXLEN：当达到指定的长度时，旧的条目会被自动驱逐，因此流的大小保持不变。但是限制死长度在每次删除的时候会很昂贵：流由宏节点表示为基数树，以便非常节省内存。改变由几十个元素组成的单个宏节点并不是最优的。
+  在指定为`MAXLEN ~n`时，流的长度不会限制为n，仅当可以删除整个节点时才执行修剪，这使它更有效率。
 
 2、`XDEL key ID [ID ...]`：删除消息，但是**仅标记为删除**，不影响消息总长度
 
 使用基数树来索引包含线性数十个Stream条目的宏节点。从Stream中删除一个条目的时候，条目并没有真正驱逐，只是被标记为删除。
 
 如果宏节点中的所有条目都被标记为删除，则会销毁整个节点，并回收内存。这意味着如果你从Stream里删除大量的条目，比如超过50%的条目，则每一个条目的内存占用可能会增加， 因为Stream将会开始变得碎片化。然而，流的表现将保持不变。
+
+> 注意：其它数据结构在没有元素时会自动删除，而stream不会删除，这是需要注意的地方。
 
 3、`XRANGE key start end [COUNT count]`：返回流中满足给定ID范围的条目，闭区间。
 
@@ -1542,7 +1546,7 @@ static void handleMsg(List<StreamEntry> streamEntries, Jedis jedis) {
 
 在上面的XREADGROUP命令中，Redis会为每个消费者维护一个PEL，消费者挂掉重启后要提前处理PEL后再去订阅消息。
 
-若此消费者永远或很长时间内无法重启了呢？若无其他措施，Redis会永远维护这个PEL，除非删除该stream或消费者组取消订阅此stream。
+若此消费者永远或很长时间内无法重启了呢？若无其他措施，Redis会永远维护这个PEL，除非删除该stream或消费者组取消订阅此stream。**需要注意经过测试发现即使通过xdel命令删除该消息也不会去删除该消息所在PEL的数据，**毕竟xdel前期只是逻辑删除。
 
 Redis提供了2个命令解决此问题：`XPENDING`和`XCLAIM`
 
@@ -1651,75 +1655,18 @@ while (true) {
 
 所有需要提前检查该消息的重试次数，若超过某个阈值则将其放入某个特定的stream，实现类似的死信队列。
 
-> 注意：下面代码未验证，晚上验证一下。
+> 注意：下面是我自己实现的多次消费失败的消息自动进入死信队列
 
 ```java
-/**
- * @author fzk
- * @date 2022-06-28 15:17
- */
-public class RedisTest {
-    private static final String StreamKey = "stream1";// stream的key
-    private static final String GroupName = "test_group";// 消费者组名
-    private static final String ConsumerName = "consumer1";// 消费者名
+private static final String StreamKey = "stream1";// stream的key
+private static final String GroupName = "test_group";// 消费者组名
+private static final String ConsumerName = "consumer1";// 消费者名
 
-    public static void main(String[] args) throws InterruptedException {
-        JedisDemo jedisDemo = new JedisDemo("!MyRedis123456", "124.223.192.8", 6379, 0);
-
-        Jedis jedis = jedisDemo.jedis;
-
-        testStream(jedis);
-        jedisDemo.close();
-
-    }
-
-    static void testStream(Jedis jedis) throws InterruptedException {
-//        jedis.del(StreamKey);
-//        // 1.新增消息
-        Pipeline pipeline = jedis.pipelined();
-        for (int i = 0; i < 5; i++) {
-            pipeline.xadd(StreamKey, StreamEntryID.NEW_ENTRY, Map.of("username", "fzk" + i, "sex", "boy"));
-        }
-        pipeline.sync();
-        pipeline.close();
-//        // 2.查询消息
-//        StreamInfo streamInfo = jedis.xinfoStream(StreamKey);
-//        // 查询所有消息
-//        for (StreamEntry streamEntry : jedis.xrange(StreamKey, new StreamEntryID("0-0"), streamInfo.getLastGeneratedId())) {
-//            System.out.printf("查询所有消息：消息ID：%s, 消息属性：%s\n", streamEntry.getID(), streamEntry.getFields());
-//        }
-//
-//        // 3.独立消费：订阅key，消费历史消息，最多阻塞10s
-//        List<Map.Entry<String, List<StreamEntry>>> newEntry = jedis.xread(new XReadParams().block(1000 * 10), Map.of(StreamKey, new StreamEntryID("0-0")));
-//        // 有消息的话
-//        if (newEntry.size() > 0) {
-//            for (StreamEntry streamEntry : newEntry.get(0).getValue()) {
-//                System.out.printf("独立订阅到%s的消息ID：%s, 消息属性：%s\n", StreamKey, streamEntry.getID(), streamEntry.getFields());
-//            }
-//        }
-//
-//        // 4.消费者组订阅
-//        // 4.1 新建消费者组：设置初始消费位移为StreamEntryID.LAST_ENTRY，即$，即只消费新消息
-//        jedis.xgroupCreate(StreamKey, GroupName, StreamEntryID.LAST_ENTRY, true);
-//        // 4.2 首先要查询Redis端是否保存有此消费者的待处理消息列表PEL，即已发送给此消费者尚未ACK的消息
-//        List<Map.Entry<String, List<StreamEntry>>> lastStreamEntries =
-//                jedis.xreadGroup(GroupName, ConsumerName, XReadGroupParams.xReadGroupParams(),
-//                        Map.of(StreamKey, new StreamEntryID("0-0")));
-//        // 如果有之前尚未ACK的消息，则先处理完成
-//        if (lastStreamEntries != null && lastStreamEntries.size() > 0) {
-//            System.out.printf("消费者组%s处理之前尚未ACK的消息\n", GroupName);
-//            handleMsg(lastStreamEntries.get(0).getValue(), jedis);
-//            System.out.println();
-//        }
-//        // 4.3 以消费者组形式订阅消息： StreamEntryID.UNRECEIVED_ENTRY就是">"，即未消费的消息
-//        List<Map.Entry<String, List<StreamEntry>>> newStreamEntries =
-//                jedis.xreadGroup(GroupName, ConsumerName, new XReadGroupParams().block(1000 * 10),
-//                        Map.of(StreamKey, StreamEntryID.UNRECEIVED_ENTRY));
-//        if (newStreamEntries != null && newStreamEntries.size() > 0) {
-//            System.out.printf("消费者组%s处理新消息\n", GroupName);
-//            handleMsg(newStreamEntries.get(0).getValue(), jedis);
-//        }
-
+@Test
+void testStream() throws InterruptedException {
+    try (JedisClient jedisClient = new JedisClient(ip, port, password, database)) {
+        Jedis jedis = jedisClient.getJedis();
+        
         StreamEntryID preId = new StreamEntryID("0-0");
         while (true) {
             Thread.sleep(1000);
@@ -1728,26 +1675,30 @@ public class RedisTest {
             if (xpendings != null && xpendings.size() > 0) {
                 for (StreamPendingEntry xpend : xpendings) {
                     // 2.若消息传递次数超过某个阈值，则将其放入某个特殊stream，即死信队列
-                    if (xpend.getDeliveredTimes() > 3) {
+                    // 如果是自己的消息先不管
+                    if (xpend.getDeliveredTimes() > 1 && !ConsumerName.equals(xpend.getConsumerName())) {
                         // 2.1 先上锁，纯事务好像做不了
-                        if (jedis.setnx("lock" + xpend.getID(), "1") > 0) {
+                        if (jedis.setnx("lock:" + xpend.getID(), "1") > 0) {
+                            jedis.expire("lock:" + xpend.getID(), 10);// 锁持有时间10s
                             Transaction transaction = null;
                             try {
                                 // 2.2 根据id查询消息
-                                // 注意：在PEL中的消息无法通过xrange或xread命令查询到，那只有xclaim申领其所有权了
-                                //StreamEntry msg = jedis.xrange(StreamKey, xpend.getID(), xpend.getID()).get(0);
-                                if (ConsumerName.equals(xpend.getConsumerName())) continue;// 如果是自己的消息先不管
-                                // 2.2 根据id抢消息所有权
-                                List<StreamEntry> xclaims = jedis.xclaim(StreamKey, GroupName, ConsumerName, xpend.getIdleTime() - 1, XClaimParams.xClaimParams(), xpend.getID());
-                                if (xclaims == null || xclaims.size() == 0) continue;
-                                StreamEntry msg = xclaims.get(0);
+                                List<StreamEntry> streamEntries = jedis.xrange(StreamKey, xpend.getID(), xpend.getID());
+                                if (streamEntries == null || streamEntries.size() == 0) {
+                                    // 可能被删除了，则xack将PEL中消息记录删除
+                                    jedis.xack(StreamKey, GroupName, xpend.getID());
+                                    continue;
+                                }
+                                StreamEntry msg = streamEntries.get(0);
                                 // 2.3 开事务，保证删除和新增操作挨着执行而不被打扰
                                 transaction = jedis.multi();
-                                transaction.xdel(StreamKey, msg.getID());
-                                transaction.xadd("dead_stream", xpend.getID(), msg.getFields());
+                                // 必须ack此消息，因为xdel并不会将PEL中此消息移除，毕竟xdel只是逻辑删除
+                                transaction.xack(StreamKey, GroupName, msg.getID());
+                                transaction.xdel(StreamKey, msg.getID());// 逻辑删除消息
+                                transaction.xadd("dead_stream", msg.getID(), msg.getFields());// 加入死信队列
                                 transaction.exec();
                             } finally {
-                                if (transaction != null) transaction.discard();
+                                if (transaction != null) transaction.clear();
                                 jedis.del("lock" + xpend.getID());// 解锁
                             }
                         }
@@ -1756,7 +1707,7 @@ public class RedisTest {
             }
             // 3.抢夺超过10s还未ACK的消息所有权
             Map.Entry<StreamEntryID, List<StreamEntry>> xautoclaim =
-                    jedis.xautoclaim(StreamKey, GroupName, ConsumerName, 1000 * 10, preId, XAutoClaimParams.xAutoClaimParams());
+                jedis.xautoclaim(StreamKey, GroupName, ConsumerName, 1000 * 10, preId, XAutoClaimParams.xAutoClaimParams());
             for (StreamEntry streamEntry : xautoclaim.getValue()) {
                 // 处理消息并发送ack
                 System.out.printf("消息ID: %s, 消息属性：%s\n", streamEntry.getID(), streamEntry.getFields());
@@ -1765,28 +1716,6 @@ public class RedisTest {
             // 4.指定游标
             preId = xautoclaim.getKey();
         }
-    }
-
-    static void handleMsg(List<StreamEntry> streamEntries, Jedis jedis) {
-        if (streamEntries.size() == 0) return;
-        for (StreamEntry streamEntry : streamEntries) {
-            System.out.printf("处理%s的消息ID：%s, 消息属性：%s\n", StreamKey, streamEntry.getID(), streamEntry.getFields());
-            // 消费消息并提交ACK
-            jedis.xack(StreamKey, GroupName, streamEntry.getID());
-        }
-    }
-
-    static void testBitmap(Jedis jedis) {
-        Pipeline pipeline = jedis.pipelined();
-
-        for (int i = 0; i < 365; i++) {
-            pipeline.setbit("bitmap1", i, true);
-        }
-        Response<Long> bitmap1 = pipeline.bitcount("bitmap1", 1, 10);
-        pipeline.sync();// 刷管道命令
-        pipeline.close();// 关闭管道
-        System.out.println(bitmap1.get());
-
     }
 }
 ```
