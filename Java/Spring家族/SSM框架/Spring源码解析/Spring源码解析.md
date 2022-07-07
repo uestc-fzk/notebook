@@ -2,6 +2,149 @@
 
 一位大佬的博客：https://www.cnblogs.com/java-chen-hao
 
+# 前言
+
+entity:
+
+```java
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class Person {
+    private String name;
+    private Integer age;
+}
+```
+
+service:
+
+```java
+public interface PersonService {
+    Person getPerson(String name);
+
+    void insertPerson(Person person);
+}
+
+@Data
+//@Service(value = "personService")
+@Indexed
+public class PersonServiceImpl implements PersonService, InitializingBean, BeanNameAware {
+    private Map<String, Person> map;
+    private String beanName;
+
+    @Override
+    public Person getPerson(String name) {
+        return map.get(name);
+    }
+
+    @Override
+    public void insertPerson(Person person) {
+        Person old = map.get(person.getName());
+        if (old != null) {
+            System.out.println("存在旧值：" + old);
+        }
+        map.put(person.getName(), person);
+        System.out.println("插入成功");
+    }
+
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        System.out.println("初始化");
+        this.map = new HashMap<>();
+    }
+}
+```
+
+controller:
+
+```java
+@Data
+public class PersonController implements ApplicationContextAware {
+    private PersonService personService;
+    private ApplicationContext application;
+
+    public Person getPerson(String name) {
+        return personService.getPerson(name);
+    }
+
+    @Override
+    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
+        this.application = applicationContext;
+    }
+}
+```
+
+config:
+
+```java
+@Configuration
+public class BeanConfiguration {
+    @Bean(value = "personService")
+    @Primary // 多个PersonService的bean时这个是首选
+    public PersonService getPersonService() {
+        return new PersonServiceImpl();
+    }
+
+    @Bean
+    public PersonService getPersonService2() {
+        return new PersonServiceImpl();
+    }
+
+    @Bean
+    public PersonController getPersonController(@Autowired PersonService personService) {
+        PersonController personController = new PersonController();
+        personController.setPersonService(personService);
+        return personController;
+    }
+}
+```
+
+main:
+
+```java
+public class Main {
+    public static void main(String[] args) {
+        // 这个创建方式也是可以的
+//        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(new DefaultListableBeanFactory());
+////        context.scan("./");
+//        context.register(BeanConfiguration.class);
+//        context.refresh();
+//        System.out.println(context.getBean(PersonController.class));
+
+
+        try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext(BeanConfiguration.class)) {
+            // 1.依赖查找
+            // 1.1 根据beanName找bean
+            PersonService personService = application.getBean("personService", PersonService.class);
+            personService.insertPerson(new Person("fzk", 21));
+            System.out.println(personService.getPerson("fzk"));
+            // 1.2 根据类型找bean
+            PersonService personService1 = application.getBean(PersonService.class);
+            System.out.println(personService1.getPerson("fzk"));
+            // 1.3 根据类型找多个bean对象
+            Map<String, PersonService> beansOfType = application.getBeansOfType(PersonService.class);// beanName-->bean
+            System.out.println(beansOfType);
+
+            // 1.4 根据注解找bean，需要注意注解的作用范围必须是RUNTIME级别哦
+            System.out.println(application.getBeansWithAnnotation(Indexed.class));
+
+            // 2.依赖注入
+            PersonController personController = application.getBean(PersonController.class);
+            System.out.println(personController.getPerson("fzk"));
+            System.out.println(personController.getApplication());
+
+            // 3.获取容器内建bean
+            Environment environment = application.getBean(Environment.class);
+            System.out.println(Arrays.toString(environment.getDefaultProfiles()));
+
+            // 4.application和beanFactory不是同一个对象, ApplicationContext不仅继承了BeanFactory接口，还组合了BeanFactory对象！
+            ConfigurableListableBeanFactory beanFactory = application.getBeanFactory();
+            System.out.println(beanFactory == application);// 永远为false
+        }
+    }
+}
+```
+
 # ClassPathXmlApplicationContext
 
 引入依赖
