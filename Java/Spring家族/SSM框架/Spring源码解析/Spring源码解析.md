@@ -4,146 +4,770 @@
 
 # 前言
 
-entity:
+## Spring核心特性
+
+直接看SpringFramework有哪些包模块就知道有哪些功能特性了。
+
+- IoC 容器（IoC Container） 
+
+- Spring 事件（Events） 
+
+- 资源管理（Resources） 
+
+- 国际化（i18n） 
+
+- 校验（Validation） 
+
+- 数据绑定（Data Binding） 
+
+- 类型装换（Type Conversion） 
+
+- Spring 表达式（Spring Express Language） 
+
+- 面向切面编程（AOP）
+- Web技术
+  - Web Servlet技术(SpringWebMVC+WebSocket+SockJS)
+  - Web Reactive技术(SpringWebFlux+WebClient+WebSocket)
+
+最核心的5个模块：
+
+- spring-core：Spring 基础 API 模块，如资源管理，泛型处理 
+
+- spring-beans：Spring Bean 相关，如依赖查找，依赖注入 
+
+- spring-aop : Spring AOP 处理，如动态代理，AOP 字节码提升 
+
+- spring-context : 事件驱动、注解驱动，模块驱动等 
+
+- spring-expression：Spring 表达式语言模块
+
+## IOC
+
+控制反转，好莱坞原则。**Hollywood Principle: Don't call us, we'll call you".**
+
+职责：依赖处理(依赖查找+依赖注入) 、生命周期管理、配置
+
+**主要实现** :
+
+- Java SE 
+  - Java Beans 
+  - Java ServiceLoader SPI
+  - JNDI（Java Naming and Directory Interface） 
+
+- Java EE 
+  - EJB（Enterprise Java Beans） 
+  - Servlet 
+
+- 开源
+  - Apache Avalon（http://avalon.apache.org/closed.html） 
+  - PicoContainer（http://picocontainer.com/） 
+  - Google Guice（https://github.com/google/guice） 
+  - Spring Framework（https://spring.io/projects/spring-framework）
+
+### ApplicationContext和BeanFactory
+
+**BeanFactory是IOC容器**，ApplicationContext在IOC基础上扩展了AOP、配置元信息(注解)、资源管理(Resource)、事件、国际化、Environment抽象，即**ApplicationContext是具有应用特性功能的IOC容器超集**。
 
 ```java
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class Person {
-    private String name;
-    private Integer age;
+public class GenericApplicationContext extends AbstractApplicationContext implements BeanDefinitionRegistry {
+	private final DefaultListableBeanFactory beanFactory;
 }
 ```
 
-service:
+其实ApplicationContext接口还继承了BeanFactory接口。
+
+通过这种**继承+组合**的方式，GenericApplicationContext以内置DefaultListableBeanFactory实现了BeanFactory所有方法。
+
+所有就有下面这种情况：
 
 ```java
-public interface PersonService {
-    Person getPerson(String name);
+// 3.application和beanFactory不是同一个对象, ApplicationContext不仅继承了BeanFactory接口，还组合了BeanFactory对象！
+ConfigurableListableBeanFactory beanFactory = application.getBeanFactory();
+System.out.println(beanFactory == application);// 永远为false
+```
 
-    void insertPerson(Person person);
+## Bean
+
+### BeanDefinition
+
+BeanDefinition 是 Spring Framework 中定义 Bean 的配置元信息接口，包含：
+
+- 类名
+
+- 配置元素，如作用域、自动绑定的模式，生命周期回调等 
+
+- 其他 Bean 引用，又可称作合作者（collaborators）或者依赖（dependencies） 
+
+- 配置设置，比如 Bean 属性（Properties）
+
+比较重要的是：
+
+| 属性                  | 描述                                                 |
+| --------------------- | ---------------------------------------------------- |
+| Class                 | Bean的全类名                                         |
+| Name                  | BeanName，容器内唯一                                 |
+| Scope                 | Bean作用域，如Singleton、Prototype                   |
+| Primary               | 是否为首选bean，当以类型注入时发现多个候选bean则优先 |
+| Constructor Arguments | 构造器参数，用于依赖注入                             |
+| Properties            | Bean属性，用于依赖注入                               |
+| AutowireMode          | Bean 自动绑定模式(如：通过名称 byName)               |
+| LazyInit              | Bean延迟初始化模式                                   |
+| initMethodName        | Bean初始化回调方法名称                               |
+| destroyMethodName     | Bean销毁回调方法名称                                 |
+
+**手动构建BeanDefinition**: `BeanDefinitionBuilder`
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-07-09 1:45
+ */
+public class BeanDefinitionDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext()) {
+            // 1.手动构建BeanDefinition
+            BeanDefinitionBuilder builder = BeanDefinitionBuilder.genericBeanDefinition(TestBean.class);
+            builder.addPropertyValue("testField", "testValue");// 在BeanDefinition中设置属性初始值
+            builder.setPrimary(true); // 设置为primary
+            System.out.println(builder.getBeanDefinition());
+
+            // 2.beanName生成, 默认通过 DefaultBeanNameGenerator 实现: className + '#' + 数字(从0开始)
+            String beanName = new DefaultBeanNameGenerator().generateBeanName(builder.getBeanDefinition(), application);
+            System.out.println(beanName);// BeanDefinitionDemo$TestBean#0
+            System.out.println(new AnnotationBeanNameGenerator().generateBeanName(builder.getBeanDefinition(), application));//beanDefinitionDemo.TestBean
+
+            // 3.手动注册BeanDefinition方式来注册Bean
+            application.registerBeanDefinition(beanName, builder.getBeanDefinition());
+            application.refresh();// 需要刷新容器
+            System.out.println(application.getBean(TestBean.class));
+
+            // 4.注册BeanDefinition和Bean方式有以下几种：
+            // 4.1 XML配置
+            // 4.2 注解：@Bean; @Component; @Import
+            // 4.3 Java API方式: AnnotatedBeanDefinitionReader#register()或BeanDefinitionRegistry#registerBeanDefinition(String,BeanDefinition)
+            application.register(PersonController.class);
+
+            // 5.直接注册实例作为单例Bean，比如注册线程池啥的
+            ConfigurableListableBeanFactory beanFactory = application.getBeanFactory();
+            beanFactory.registerSingleton("myThreadPool", new ThreadPoolExecutor(5, 10, 5, TimeUnit.SECONDS, new LinkedBlockingQueue<>()));
+
+            ThreadPoolExecutor myThreadPool = application.getBean("myThreadPool", ThreadPoolExecutor.class);
+            myThreadPool.execute(() -> System.out.println("从ioc容器取出线程池成功"));
+            myThreadPool.shutdown();
+        }
+    }
+
+    @Data
+    static class TestBean implements BeanNameAware {
+        private String beanName;
+        private String testField;
+    }
+}
+```
+
+> 注意：在上面案例中，第5步以直接注册某个实例作为单例bean加入IOC容器，这个在**注册线程池作为bean**的时候比较有用。
+
+### beanName
+
+IOC容器内每个Bean可以有1个beanName和多个别名Alias，这些标识符都必须唯一。beanName就类似于Bean在容器内的Id。
+
+Bean 名称生成器(BeanNameGenerator)：
+
+- `DefaultBeanNameGenerator`：默认通用 BeanNameGenerator 实现 
+
+- `AnnotationBeanNameGenerator`：基于注解扫描的 BeanNameGenerator 实现
+
+案例可以看上一节BeanDefinition中的案例。
+
+> @Bean注解在未指定beanName时默认用方法名作为beanName。
+
+### 初始化和销毁
+
+指定**Bean初始化**方法有3种方式：
+
+1、@PostConstruct 标注方法 
+
+2、实现 InitializingBean 接口的 afterPropertiesSet() 方法 
+
+3、自定义初始化方法 
+
+- XML 配置：`<bean init-method=”init” ... /> `
+
+- Java 注解：`@Bean(initMethod=”methodName”) `
+
+- Java API：`BeanDefinition#setInitMethodName(String)`
+
+**延迟初始化**：
+
+- XML配置：`<bean lazy-init=”true” ... />`
+
+- 在@Bean标注方法上同时标注@Lazy
+- Java API：`BeanDefinition#setLazyInit(boolean)`
+
+指定**Bean销毁方法**有3种方式：
+
+1、@PreDestroy 标注方法 
+
+2、实现 DisposableBean 接口的 destroy() 方法 
+
+3、自定义销毁方法 ：
+
+- XML 配置：<bean destroy=”destroy” ... /> 
+
+- Java 注解：@Bean(destroy=”destroy”) 
+
+- Java API：`BeanDefinition#setDestroyMethodName(String)`
+
+案例如下：
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-07-09 23:45
+ */
+public class BeanInitAndDestroyDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext()) {
+            application.register(BeanInitAndDestroyDemo.class);
+            application.refresh();
+            System.out.println(application.getBeansOfType(TestBean.class));
+        }
+    }
+
+    @Bean(initMethod = "initMethod", destroyMethod = "destroyMethod")
+    @Lazy   // 延迟初始化
+    public TestBean getTestBean() {
+        return new TestBean();
+    }
 }
 
 @Data
-//@Service(value = "personService")
-@Indexed
-public class PersonServiceImpl implements PersonService, InitializingBean, BeanNameAware {
-    private Map<String, Person> map;
+class TestBean implements InitializingBean, DisposableBean, BeanNameAware {
     private String beanName;
 
-    @Override
-    public Person getPerson(String name) {
-        return map.get(name);
+    @PostConstruct
+    // 此注解来自于javax包，需要引入
+    public void init() {
+        System.out.println("@PostConstruct注解指定的初始化方法执行了...");
     }
 
-    @Override
-    public void insertPerson(Person person) {
-        Person old = map.get(person.getName());
-        if (old != null) {
-            System.out.println("存在旧值：" + old);
-        }
-        map.put(person.getName(), person);
-        System.out.println("插入成功");
+    @PreDestroy
+    // 此注解来自于javax包，需要引入
+    public void preDestroy() {
+        System.out.println("@PreDestroy注解指定的销毁方法执行了...");
     }
 
     @Override
     public void afterPropertiesSet() throws Exception {
-        System.out.println("初始化");
-        this.map = new HashMap<>();
-    }
-}
-```
-
-controller:
-
-```java
-@Data
-public class PersonController implements ApplicationContextAware {
-    private PersonService personService;
-    private ApplicationContext application;
-
-    public Person getPerson(String name) {
-        return personService.getPerson(name);
+        System.out.println("InitializingBean接口指定的初始化方法执行了...");
     }
 
     @Override
-    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
-        this.application = applicationContext;
+    public void destroy() throws Exception {
+        System.out.println("DisposableBean接口指定的销毁方法执行了...");
+    }
+
+    public void initMethod() {
+        System.out.println("@Bean注解指定的初始化方法指定了...");
+    }
+
+    public void destroyMethod() {
+        System.out.println("@Bean注解指定的销毁方法指定了...");
     }
 }
 ```
 
-config:
+执行结果：
+
+```shell
+@PostConstruct注解指定的初始化方法执行了...
+InitializingBean接口指定的初始化方法执行了...
+@Bean注解指定的初始化方法指定了...
+{getTestBean=TestBean(beanName=getTestBean)}
+@PreDestroy注解指定的销毁方法执行了...
+DisposableBean接口指定的销毁方法执行了...
+@Bean注解指定的销毁方法指定了...
+```
+
+Bean初始化方法执行顺序是: 
+
+> `@PostConstruct --> InitializingBean --> @Bean(initMethod="methodName")`
+
+Bean销毁方法执行顺序是：
+
+> `@Bean(destroyMethod="methodName") --> @PreDestroy --> DisposableBean`
+
+
+
+## 依赖查找
+
+### jdk提供的依赖查找
+
+1、单一类型依赖查找 
+
+- JNDI - javax.naming.Context#lookup(javax.naming.Name) 
+
+- JavaBeans - java.beans.beancontext.BeanContext 
+
+2、集合类型依赖查找 
+
+- java.beans.beancontext.BeanContext 
+
+3、层次性依赖查找 
+
+- java.beans.beancontext.BeanContext
+
+### 依赖查找类型
+
+1、根据beanName查找
+
+2、根据bean类型查找
+
+3、Bean延迟查找
+
+- getBeanProvider(Class) 
+
+- getBeanProvider(ResolvableType) 
+
+4、根据注解查找
+
+```java
+public static void main(String[] args) {
+    try (AnnotationConfigApplicationContext application = 
+         new AnnotationConfigApplicationContext(MyBeanConfig.class)) {
+        // 1.依赖查找
+        // 1.1 根据beanName找bean
+        System.out.println(application.getBean("personService", PersonService.class));
+        // 1.2 根据类型找bean
+        System.out.println(application.getBean(PersonService.class));
+        // 1.3 根据类型找多个bean对象
+        Map<String, PersonService> beansOfType = application.getBeansOfType(PersonService.class);// beanName-->bean
+        System.out.println(beansOfType);
+
+        // 1.4 根据注解找bean，需要注意注解的作用范围必须是RUNTIME级别哦
+        System.out.println(application.getBeansWithAnnotation(Indexed.class));// 查找标注有@Indexed注解的所有bean
+        System.out.println(application.findAnnotationOnBean("personService", Indexed.class));// 获取指定名称 + 标注类型 Bean 实例
+
+        // 1.5 获取BeanProvider
+        ObjectProvider<PersonService> beanProvider = application.getBeanProvider(PersonService.class);
+        System.out.println("beanProvider: " + beanProvider.getObject());
+
+        // 2.获取容器内建bean
+        Environment environment = application.getBean(Environment.class);
+        System.out.println(Arrays.toString(environment.getDefaultProfiles()));
+
+        // 3.application和beanFactory不是同一个对象, ApplicationContext不仅继承了BeanFactory接口，还组合了BeanFactory对象！
+        ConfigurableListableBeanFactory beanFactory = application.getBeanFactory();
+        System.out.println(beanFactory == application);// 永远为false
+    }
+}
+```
+
+**延迟查找的作用：**
+
+> 通过BeanProvider查找bean是安全的，而通过名称或类型查找是不安全的，不存在或存在多个匹配bean都会报错。
+
+### 内建可查找bean
+
+```java
+// 4.查出所有单例beanName及其类型
+for (String singletonName : application.getBeanFactory().getSingletonNames())
+    System.out.println(singletonName + ": " + application.getBean(singletonName).getClass());
+```
+
+内建bean有如下：
+
+| beanName                    | 类型                        | 使用场景                |
+| --------------------------- | --------------------------- | ----------------------- |
+| enviroment                  | Environment                 | 外部化配置以及 Profiles |
+| systemProperties            | java.util.Properties        | java系统属性，如jdk版本 |
+| systemEnvironment           | java.util.Map               | 操作系统环境变量        |
+| messageSource               | MessageSource               | 国际化文案              |
+| lifecycleProcessor          | LifecycleProcessor          | LifeCycle Bean处理器    |
+| applicationEventMulticaster | ApplicationEventMulticaster | Spring 事件广播器       |
+
+![内建bean](Spring源码解析.assets/内建bean.png)
+
+## 依赖注入DI
+
+依赖注入有手动模式：比如XML配置、注解配置、Java API。
+
+依赖注入更多是用自动模式：Autowiring（自动绑定）。
+
+### DI类型
+
+| 注入类型      | 例子                                                         |
+| ------------- | ------------------------------------------------------------ |
+| 方法参数      | `@Autowired public void setUser(User user) { this.user= user; }` |
+| 构造器参数    | `@Autowired public TestBean(User user) { this.user= user; }` |
+| 字段          | `@Autowired User user;`<br />或`@Resource User user;`        |
+| Aware接口回调 | `class MyBean implements BeanFactoryAware { ... }`           |
+
+> 注意：方法参数是创建完bean填充属性时，`AutowiredAnnotationBeanPostProcessor`以**参数名查找IOC容器内的bean**，然后调用方法。
+>
+> 构造器参数的注入则是在bean实例化的时候传入。
+>
+> **方法参数是根据名称查找bean，属性字段根据类型查找bean。**
+
+Setter方法注入也可以在BeanDefinition中添加属性：JavaAPI
+
+```java
+User user=application.getBean("user",User.class);
+BeanDefinitionBuilder builder=BeanDefinitionBuilder.genericBeanDefinition(TestBean.class);
+builder.addPropertyValue("user", user);
+application.registerBeanDefinition("testBean", builder.getBeanDefinition());
+```
+
+构造器参数注入也可以在BeanDefinition中添加参数：JavaAPI
+
+```java
+BeanDefinitionBuilder builder = BeanDefinitionBuilder.genericBeanDefinition(TestBean.class);
+builder.addConstructorArgValue(application.getBean("testField"));
+application.registerBeanDefinition("testBean", builder.getBeanDefinition());
+```
+
+### Qualifier
+
+作用：用于给bean标记分组。在用@Autowired注解时可以同时标注此注解用于限定候选bean范围。
 
 ```java
 @Configuration
-public class BeanConfiguration {
-    @Bean(value = "personService")
-    @Primary // 多个PersonService的bean时这个是首选
-    public PersonService getPersonService() {
-        return new PersonServiceImpl();
-    }
-
-    @Bean
-    public PersonService getPersonService2() {
-        return new PersonServiceImpl();
-    }
-
-    @Bean
-    public PersonController getPersonController(@Autowired PersonService personService) {
-        PersonController personController = new PersonController();
-        personController.setPersonService(personService);
-        return personController;
-    }
-}
-```
-
-main:
-
-```java
-public class Main {
+@Data
+public class DependencyInjectDemo {
     public static void main(String[] args) {
-        // 这个创建方式也是可以的
-//        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(new DefaultListableBeanFactory());
-////        context.scan("./");
-//        context.register(BeanConfiguration.class);
-//        context.refresh();
-//        System.out.println(context.getBean(PersonController.class));
-
-
-        try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext(BeanConfiguration.class)) {
-            // 1.依赖查找
-            // 1.1 根据beanName找bean
-            PersonService personService = application.getBean("personService", PersonService.class);
-            personService.insertPerson(new Person("fzk", 21));
-            System.out.println(personService.getPerson("fzk"));
-            // 1.2 根据类型找bean
-            PersonService personService1 = application.getBean(PersonService.class);
-            System.out.println(personService1.getPerson("fzk"));
-            // 1.3 根据类型找多个bean对象
-            Map<String, PersonService> beansOfType = application.getBeansOfType(PersonService.class);// beanName-->bean
-            System.out.println(beansOfType);
-
-            // 1.4 根据注解找bean，需要注意注解的作用范围必须是RUNTIME级别哦
-            System.out.println(application.getBeansWithAnnotation(Indexed.class));
-
-            // 2.依赖注入
-            PersonController personController = application.getBean(PersonController.class);
-            System.out.println(personController.getPerson("fzk"));
-            System.out.println(personController.getApplication());
-
-            // 3.获取容器内建bean
-            Environment environment = application.getBean(Environment.class);
-            System.out.println(Arrays.toString(environment.getDefaultProfiles()));
-
-            // 4.application和beanFactory不是同一个对象, ApplicationContext不仅继承了BeanFactory接口，还组合了BeanFactory对象！
-            ConfigurableListableBeanFactory beanFactory = application.getBeanFactory();
-            System.out.println(beanFactory == application);// 永远为false
+        try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext()) {
+            application.register(DependencyInjectDemo.class);
+            application.refresh();
+            System.out.println(application.getBean(DependencyInjectDemo.class).testBean.name);// v1
         }
     }
+
+    @Autowired
+    @Qualifier("group1")
+    private TestBean testBean;
+
+    @Bean
+    @Qualifier("group1")
+    public TestBean getTestBean1() {
+        return new TestBean("v1");
+    }
+
+    @Bean
+    @Qualifier("group2")
+    public TestBean getTestBean2() {
+        return new TestBean("v2");
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    static class TestBean {
+        private String name;
+    }
 }
 ```
+
+可以看到在有多个候选bean的时候，根据`@Qualifier`成功定位到了需要的bean。
+
+### 延迟注入
+
+所谓延迟注入，就是在调用getObject()方法的时候才去ioc容器里查bean。
+
+有两个方式：ObjectFactory和ObjectProvider.
+## 依赖处理过程
+
+- 入口 - `DefaultListableBeanFactory#resolveDependency`
+
+- 依赖描述符 - `DependencyDescriptor`
+
+- 自定绑定候选对象处理器 - `AutowireCandidateResolver`
+
+首先先看这个依赖描述符：
+
+```java
+// 描述一个依赖，包装构造函数参数、方法参数或字段，允许统一访问它们的元数据
+public class DependencyDescriptor extends InjectionPoint implements Serializable {
+
+	private final Class<?> declaringClass;
+
+	@Nullable
+	private String methodName;// 若方法注入，则此处为注入方法名
+	@Nullable
+	private Class<?>[] parameterTypes;// 方法或构造器参数类型
+	private int parameterIndex;
+
+	@Nullable
+	private String fieldName;// 若字段注入，则此处为字段名
+	private final boolean required;// 是否必须，对应于@Autowired(required=true)
+	private final boolean eager;// 是否急切，对应@Lazy
+	private int nestingLevel = 1;// 嵌入层次，因为@Autowired可以被放入的是嵌套类
+
+	@Nullable
+	private Class<?> containingClass;
+	@Nullable
+	private transient volatile ResolvableType resolvableType;
+	@Nullable
+	private transient volatile TypeDescriptor typeDescriptor;
+}
+
+// 注入点的简单描述符，指向方法/构造函数参数或字段
+public class InjectionPoint {
+	@Nullable
+	protected MethodParameter methodParameter;
+	@Nullable
+	protected Field field;
+	@Nullable
+	private volatile Annotation[] fieldAnnotations;// 字段上标注的所有注解
+}
+```
+
+接下来就看依赖处理过程了，案例如下：在`DefaultListableBeanFactory#resolveDependency()`打断点调试
+
+```java
+@Configuration
+@Data
+public class DependencyProgressDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application =
+             new AnnotationConfigApplicationContext()) {
+            application.register(DependencyProgressDemo.class);
+            application.refresh();
+            System.out.println(application.getBean(DependencyProgressDemo.class).userMap);
+        }
+    }
+
+    @Autowired
+    private User user;// 注入最合适User对象bean
+    @Autowired
+    private List<User> userList;// 注入所有User对象bean
+    @Autowired
+    private Map<String, User> userMap;// 会自动将beanName-->bean
+    @Autowired
+    @Lazy
+    private User lazyUser;// 延迟注入
+
+    @Bean
+    public User getUser1() {
+        return new User("fzk", 21);
+    }
+
+    @Bean
+    @Primary
+    public User getUser2() {
+        return new User("fzk", 21);
+    }
+}
+```
+
+来到依赖处理入口处：`DefaultListableBeanFactory#resolveDependency()`
+
+```java
+public Object resolveDependency(DependencyDescriptor descriptor, 
+                                @Nullable String requestingBeanName,
+                                @Nullable Set<String> autowiredBeanNames,
+                                @Nullable TypeConverter typeConverter) throws BeansException {
+	// 一些特殊情况处理：如ObjectFactory与ObjectProvider延迟bean
+    descriptor.initParameterNameDiscovery(getParameterNameDiscoverer());
+    if (Optional.class == descriptor.getDependencyType())
+        return createOptionalDependency(descriptor, requestingBeanName);
+    else if (ObjectFactory.class == descriptor.getDependencyType() ||
+             ObjectProvider.class == descriptor.getDependencyType())
+        return new DependencyObjectProvider(descriptor, requestingBeanName);
+    else if (javaxInjectProviderClass == descriptor.getDependencyType())
+        return new Jsr330Factory().createDependencyProvider(descriptor, requestingBeanName);
+    else {
+        // @Lazy延迟注入入口在这：
+        // 这里会用cglib库生成一个bean的代理对象，在第1次使用的时候才去ioc容器获取该bean
+        Object result = getAutowireCandidateResolver().getLazyResolutionProxyIfNecessary(
+            descriptor, requestingBeanName);
+        if (result == null) 
+            // 默认入口：
+            result = doResolveDependency(
+                descriptor, requestingBeanName, autowiredBeanNames, typeConverter);
+        return result;
+    }
+}
+
+public Object doResolveDependency(DependencyDescriptor descriptor, 
+                                  @Nullable String beanName,
+                                  @Nullable Set<String> autowiredBeanNames, 
+                                  @Nullable TypeConverter typeConverter) 
+throws BeansException {
+    // 省略try/finally和部分代码
+    // 1.集合或map类型bean注入处理
+    Object multipleBeans = resolveMultipleBeans(
+        descriptor, beanName, autowiredBeanNames, typeConverter);
+    if (multipleBeans != null) return multipleBeans;
+
+    // 2.单bean字段bean注入处理
+    // 2.1 查询类型匹配的bean
+    Map<String, Object> matchingBeans = findAutowireCandidates(beanName, type, descriptor);
+    if (matchingBeans.isEmpty()) {/* 省略*/}
+
+    String autowiredBeanName;
+    Object instanceCandidate;
+	// 2.2 多个bean匹配
+    if (matchingBeans.size() > 1) {
+        // 根据@Primary和@Priority查找最匹配bean
+        autowiredBeanName = determineAutowireCandidate(matchingBeans, descriptor);
+        if (autowiredBeanName == null) {/*省略*/}
+        instanceCandidate = matchingBeans.get(autowiredBeanName);
+    }
+    else {// 2.3 只有1个bean匹配
+        Map.Entry<String, Object> entry = matchingBeans.entrySet().iterator().next();
+        autowiredBeanName = entry.getKey();
+        instanceCandidate = entry.getValue();
+    }
+
+    if (autowiredBeanNames != null)
+        autowiredBeanNames.add(autowiredBeanName);
+    // 2.4 这里就是调用beanFactory.getBean()根据beanName获取bean对象
+    if (instanceCandidate instanceof Class)
+        instanceCandidate = descriptor.resolveCandidate(autowiredBeanName, type, this);
+    
+    Object result = instanceCandidate;
+ 	// 2.5 判断是否符合类型要求
+    if (!ClassUtils.isAssignableValue(type, result))
+        throw new BeanNotOfRequiredTypeException(
+        autowiredBeanName, type, instanceCandidate.getClass());
+    return result;
+}
+
+
+/** 查找与所需类型匹配的 bean 实例。在指定 bean 的自动装配期间调用
+ * @param beanName 那个bean现在需要注入属性
+ * @param requiredType 要查找的 bean 的实际类型(可能是数组组件类型或集合元素类型)
+ * @param descriptor 要解析的依赖的描述符
+ * @see #autowireByType
+ * @see #autowireConstructor
+ */
+protected Map<String, Object> findAutowireCandidates(
+    @Nullable String beanName, Class<?> requiredType, 
+    DependencyDescriptor descriptor) {
+	// 根据类型获取所有beanName
+    String[] candidateNames = BeanFactoryUtils.beanNamesForTypeIncludingAncestors(
+        this, requiredType, true, descriptor.isEager());
+    Map<String, Object> result = CollectionUtils.newLinkedHashMap(candidateNames.length);
+    // 省略部分代码
+    if (result.isEmpty()) {
+        // 判断需要的类型是否为数组、集合、map
+        boolean multiple = indicatesMultipleBeans(requiredType);
+        // 省略部分代码
+        if (result.isEmpty() && !multiple) {
+            for (String candidate : candidateNames) 
+                if (isSelfReference(beanName, candidate) &&
+                    (!(descriptor instanceof MultiElementDescriptor) || 
+                     !beanName.equals(candidate)) &&
+                    isAutowireCandidate(candidate, fallbackDescriptor)) 
+                    addCandidateEntry(result, candidate, descriptor, requiredType);             
+        }
+    }
+    return result;
+}
+
+
+/**
+ * 确定给定 bean 集中的自动装配候选者。
+ * 顺序规则如下：@Primary-->@Priority-->DependencyDescriptor中的字段名或参数名
+ */
+protected String determineAutowireCandidate(Map<String, Object> candidates, DependencyDescriptor descriptor) {
+    Class<?> requiredType = descriptor.getDependencyType();
+    // 1.先找有无标记为@Primary的bean，有则返回(只会有1个同类型bean可以标为Primary)
+    // 即根据beanName找到BeanDefinition来判断是否为Primary
+    String primaryCandidate = determinePrimaryCandidate(candidates, requiredType);
+    if (primaryCandidate != null) return primaryCandidate;
+         
+    // 2.再找最高优先级的候选者
+    String priorityCandidate = determineHighestPriorityCandidate(candidates, requiredType);
+    if (priorityCandidate != null) return priorityCandidate;
+    
+    // 3.冗余处理：根据要注入的字段名或参数名匹配候选者
+    for (Map.Entry<String, Object> entry : candidates.entrySet()) {
+        String candidateName = entry.getKey();
+        Object beanInstance = entry.getValue();
+        if ((beanInstance != null && 
+             this.resolvableDependencies.containsValue(beanInstance)) ||
+            matchesBeanName(candidateName, descriptor.getDependencyName())) {
+            return candidateName;
+        }
+    }
+    return null;
+}
+
+
+// 数组、集合或map类型bean注入解析
+private Object resolveMultipleBeans(
+    DependencyDescriptor descriptor, 
+    @Nullable String beanName,
+    @Nullable Set<String> autowiredBeanNames, 
+    @Nullable TypeConverter typeConverter) {
+	// 1.取出要注入字段或参数的类型
+    Class<?> type = descriptor.getDependencyType();
+	// 2.数组、集合、map类型注入解析、
+    // 2.1 stream流类型
+    if (descriptor instanceof StreamDependencyDescriptor) { /*省略*/ }
+    // 2.2 数组类型
+    else if (type.isArray()) {
+        // 处理逻辑和2.3差不多，省略
+    }
+    // 2.3 集合类型
+    else if (Collection.class.isAssignableFrom(type) && type.isInterface()) {
+        // 2.3.1 获取集合元素类型
+        Class<?> elementType = descriptor.getResolvableType().asCollection().resolveGeneric();
+        if (elementType == null) return null;
+        // 2.3.2 找到集合元素类型的匹配的bean
+        Map<String, Object> matchingBeans =findAutowireCandidates(
+            beanName, elementType, 
+            new MultiElementDescriptor(descriptor));
+        if (matchingBeans.isEmpty()) return null;
+        
+        if (autowiredBeanNames != null) 
+            autowiredBeanNames.addAll(matchingBeans.keySet());
+        // 2.3.3 转换为需要的集合类型
+        TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());
+        Object result = converter.convertIfNecessary(matchingBeans.values(), type);
+		// 2.3.4 根据PriorityOrdered和Ordered接口给定的顺序排序
+        if (result instanceof List) 
+            if (((List<?>) result).size() > 1) {
+                Comparator<Object> comparator = adaptDependencyComparator(matchingBeans);
+                if (comparator != null) {
+                    ((List<?>) result).sort(comparator);
+                }
+            }
+        return result;
+    }
+    // 2.4 map类型
+    else if (Map.class == type) {
+        // 2.4.1 获取map的key和value类型
+        ResolvableType mapType = descriptor.getResolvableType().asMap();
+        Class<?> keyType = mapType.resolveGeneric(0);
+        if (String.class != keyType) return null;
+        Class<?> valueType = mapType.resolveGeneric(1);
+        if (valueType == null) return null;
+        // 2.4.2 找到value元素类型的匹配的bean
+        Map<String, Object> matchingBeans = findAutowireCandidates(
+            beanName, valueType,
+            new MultiElementDescriptor(descriptor));
+        if (matchingBeans.isEmpty()) return null; 
+        if (autowiredBeanNames != null) 
+            autowiredBeanNames.addAll(matchingBeans.keySet());
+        return matchingBeans;
+    }
+    else return null;// 其它类型不在这里解析
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ClassPathXmlApplicationContext
 
