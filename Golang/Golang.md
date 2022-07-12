@@ -101,6 +101,454 @@ go-build-to-linux:  # 交叉编译，GOOS=linux这里必须挨着&&，不能出�
 	go build main.go
 ```
 
+# goroutine
+
+Go在语言层面支持应用程序在用户层的并发。routine是例程。
+
+创建goroutine方式非常简单：
+
+```go
+go func() {
+    fmt.Println("我是新协程")
+}()
+```
+
+- goroutine**没有父子概念**，Go在执行时为main函数创建一个goroutine，遇到其它go关键字时再去创建其它goroutine。
+
+- goroutine**没有暴露id**给用户操作，因此不能再其它goroutine里操作另外的goroutine。
+
+runtime包下有一些函数可查询当前goroutine信息：
+```go
+// 1.获取os可以并发执行的goroutine数量，默认是CPU支持并行的线程数，如 i7-10700 该值为16
+fmt.Println("GOMAXPROCS=", runtime.GOMAXPROCS(0)) // 参数0表示获取，大于1的参数表示设置该值
+// 2.放弃当前调度机会
+runtime.Gosched()
+// 3.当前运行协程数
+println(runtime.NumGoroutine())
+// 4.结束当前协程运行，结束之前会调用defer注册的函数
+runtime.Goexit()
+```
+
+## chan
+
+chan是go中关键字，意为通道，是goroutine之间通信和同步的工具。
+
+> Go官方建议：**应通过通信来共享内存，而不通过共享内存实现通信**。
+
+chan的创建：
+
+> 注意：向未初始化的chan写数据或读数据会导致goroutine永久阻塞
+
+```go
+// 无缓冲通道, 一般用于 同步 ,生产者放入消息会一直阻塞至消费者获取消息
+noBufChan := make(chan int)
+// 10个缓冲元素的通道, 一般用于通信
+bufChan := make(chan struct{}, 10)
+println(len(bufChan)) // 0, 返回通道中未读取消息的数量
+println(cap(bufChan)) // 10, 通道容量
+```
+
+只读/只写通道：
+
+```go
+bufChan := make(chan int, 10)
+// 只读通道
+readChan := (<-chan int)(bufChan)
+// 只写通道
+var writeChan chan<- int
+writeChan = bufChan
+```
+
+chan关闭：
+
+```go
+bufChan := make(chan int, 10)
+go func() {
+    for i := 0; i < 10; i++ {
+        bufChan <- i
+    }
+    close(bufChan) // 此处若不关闭通道，对chan的遍历会一直阻塞
+}()
+for i := range bufChan {
+    println(i)
+}
+// 读取关闭的通道会立刻返回零值
+println(<-bufChan) // 0
+```
+
+- 通道关闭后再写入数据会panic
+- 重复关闭会panic
+- 读取关闭的chan不会panic也不会阻塞，而是立刻返回零值
+
+可以用comma,ok语法判断chan是否关闭：
+
+```go
+	val, ok := <-bufChan
+	if !ok {
+		println("chan已经关闭")
+	} else {
+		println(val)
+	}
+```
+
+> 注意：chan的comma,ok语法仅在通道关闭时ok为false，通道未关闭时，消费者会阻塞直至获取消息。
+>
+> 即该comma,ok语法**无法实现非阻塞式获取**，若要非阻塞式获取，需使用select关键字。
+
+## select
+
+`select`是类UNIX系统提供的多路复用系统API，Go提供`select关键字`以goroutine实现了一套多路复用，用于**监听多个通道**。
+
+监听的所有通道都不可达时就阻塞，有任何1个可达则进入该分支流程。同时多个可达会随机进入某个分支流程。
+
+```go
+	bufChan := make(chan int, 10)
+	readChan := (<-chan int)(bufChan)
+	writeChan := (chan<- int)(bufChan)
+	closeSignal := make(chan int)
+	go func() {
+		time.Sleep(time.Millisecond)
+		close(closeSignal)
+		close(bufChan)
+	}()
+label:
+	for {
+		select {
+		case i, ok := <-readChan:
+			if !ok {
+				break label // 通道关闭了, 直接退出
+			}
+			println(i)
+			break
+		case writeChan <- 1: // 这里可能会因为通道关闭而panic
+			break
+		case <-closeSignal:
+			break label // 接收到关闭通知
+        // 默认分支，不建议，它会使得监听的多个分支总有可达的，从而使得轮询协程一直运行
+		default: 
+			time.Sleep(time.Millisecond)
+			break
+		}
+	}
+```
+
+## 协程池
+
+```go
+// GoroutinePool 协程池
+type GoroutinePool struct {
+	taskChan        chan Task
+	closeSignal     chan int64    // 关闭信号通知通道
+	corePoolSize    int64         // 核心协程数量
+	maxPoolSize     int64         // 最大协程数量
+	aliveTime       time.Duration // 协程最大空闲时间
+	aliveCount      int64         // 活跃协程数量
+	maxTaskChanSize int64         // 任务通道最大缓冲
+}
+
+// NewGoroutinePool 创建协程池
+func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) *GoroutinePool {
+	taskChan := make(chan Task, maxTaskChanSize)
+	closeSignal := make(chan int64) // 无缓冲关闭信号通道
+	pool := &GoroutinePool{
+		taskChan:        taskChan,
+		closeSignal:     closeSignal,
+		corePoolSize:    corePoolSize,
+		maxPoolSize:     maxPoolSize,
+		aliveTime:       aliveTime,
+		aliveCount:      0,
+		maxTaskChanSize: maxTaskChanSize,
+	}
+	// 先创建核心协程
+	for i := int64(0); i < pool.corePoolSize; i++ {
+		go worker(pool)
+	}
+	return pool
+}
+
+func (pool *GoroutinePool) SubmitTask(task Task) {
+	// 先判断协程数量够不够
+	if int64(len(pool.taskChan)) > (pool.maxTaskChanSize>>1) &&
+		atomic.LoadInt64(&pool.aliveCount) < pool.maxPoolSize {
+		go worker(pool)
+	}
+	// 提交任务到通道
+	pool.taskChan <- task
+}
+
+func (pool *GoroutinePool) Close() {
+	close(pool.closeSignal) // 要先关这个
+	close(pool.taskChan)
+}
+
+// Task 任务函数
+type Task func()
+
+// worker 工作协程
+func worker(pool *GoroutinePool) {
+	atomic.AddInt64(&pool.aliveCount, 1) // 原子+1
+	fmt.Println("新协程启动")
+	defer func() { // 捕获异常并减少活跃协程数量
+		err := recover()
+		atomic.AddInt64(&pool.aliveCount, -1) // 原子-1
+		if err != nil {
+			fmt.Printf("协程退出，捕获异常:%+v\n", err)
+		} else {
+			fmt.Println("协程安全退出")
+		}
+	}()
+	sleepTime := time.Duration(0)
+label:
+	for {
+		select {
+		case task, ok := <-pool.taskChan: // 通道的comma,ok语法在通道关闭是ok为false
+			if !ok { // 说明taskChan已经关闭
+				fmt.Println("检测到taskChan已经关闭")
+				break
+			}
+			// 任务处理
+			task()
+			// 刷新休眠不活跃时间
+			sleepTime = time.Duration(0)
+		case <-pool.closeSignal: // 监听到关闭信号
+			break label
+		default: // 将多余空闲协程关闭
+			sleepTime += time.Millisecond * 100
+			time.Sleep(time.Millisecond * 100)
+			if sleepTime > pool.aliveTime &&
+				atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+				break label
+			}
+		}
+	}
+	runtime.Goexit() // 关闭协程
+}
+```
+
+测试：
+
+```go
+func main() {
+	pool := NewGoroutinePool(5, 10, time.Second, 10)
+	defer func() {
+		pool.Close()
+		time.Sleep(time.Second)
+	}()
+	for i := 0; i < 100; i++ {
+		pool.SubmitTask(run)
+	}
+	time.Sleep(time.Second * 5)
+}
+
+func run() {
+	for i := 0; i < 1; i++ {
+		s := int(rand.Int31n(100))
+		//println(task.Name + "休眠:" + strconv.Itoa(s))
+		time.Sleep(time.Millisecond * time.Duration(s))
+	}
+}
+```
+
+
+
+## Future模式协程池
+
+```go
+// GoroutinePoolFuture 协程池
+type GoroutinePoolFuture struct {
+	taskChan        chan Future
+	closeSignal     chan int64    // 关闭信号通知通道
+	corePoolSize    int64         // 核心协程数量
+	maxPoolSize     int64         // 最大协程数量
+	aliveTime       time.Duration // 协程最大空闲时间
+	aliveCount      int64         // 活跃协程数量
+	maxTaskChanSize int64         // 任务通道最大缓冲
+}
+
+// NewGoroutinePoolFuture 创建协程池
+func NewGoroutinePoolFuture(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) *GoroutinePoolFuture {
+	taskChan := make(chan Future, maxTaskChanSize)
+	closeSignal := make(chan int64) // 无缓冲关闭信号通道
+	pool := &GoroutinePoolFuture{
+		taskChan:        taskChan,
+		closeSignal:     closeSignal,
+		corePoolSize:    corePoolSize,
+		maxPoolSize:     maxPoolSize,
+		aliveTime:       aliveTime,
+		aliveCount:      0,
+		maxTaskChanSize: maxTaskChanSize,
+	}
+	// 先创建核心协程
+	for i := int64(0); i < pool.corePoolSize; i++ {
+		go worker(pool)
+	}
+	return pool
+}
+
+func (pool *GoroutinePoolFuture) SubmitTask(task Task) Future {
+	// 先判断协程数量够不够
+	if int64(len(pool.taskChan)) > (pool.maxTaskChanSize>>1) &&
+		atomic.LoadInt64(&pool.aliveCount) < pool.maxPoolSize {
+		go worker(pool)
+	}
+	// 提交任务到通道
+	future := &taskFuture{
+		task:       task,
+		errChan:    make(chan error, 1),
+		resultChan: make(chan interface{}, 1),
+	}
+	pool.taskChan <- future
+	return future
+}
+
+func (pool *GoroutinePoolFuture) Close() {
+	close(pool.closeSignal) // 要先关这个
+	close(pool.taskChan)
+}
+
+// Task 任务函数
+type Task func() (interface{}, error)
+
+type Future interface {
+	Get() (interface{}, error)
+}
+
+type taskFuture struct {
+	task       Task
+	errChan    chan error       // 放错误信息
+	resultChan chan interface{} // 放结果
+}
+
+func (f *taskFuture) Get() (interface{}, error) {
+	for {
+		select {
+		case r, ok := <-f.resultChan:
+			if !ok {
+				// result管道关闭了且无数据，说明有err
+				return nil, <-f.errChan
+			}
+			return r, nil
+		case err, ok := <-f.errChan:
+			if !ok { // err管道关闭了且无数据，说明有result
+				return <-f.resultChan, nil
+			}
+			return nil, err
+		}
+	}
+}
+
+func (f *taskFuture) execute() {
+	defer func() {
+		e := recover()
+		if e != nil {
+			// 将执行任务造成的panic转为error返给Future对象
+			f.errChan <- fmt.Errorf("%+v", e) // 这里必须这么转异常，因为e的类型可能是各种各样的
+			close(f.errChan)
+			close(f.resultChan)
+			panic(e) // 继续向上抛panic
+		}
+	}()
+	// 1.真正执行任务
+	result, err := f.task()
+	// 2.结果处理
+	if err != nil {
+		f.errChan <- err
+	} else {
+		f.resultChan <- result
+	}
+	// 3.关闭管道
+	close(f.errChan)
+	close(f.resultChan)
+}
+
+// worker 工作协程
+func worker(pool *GoroutinePoolFuture) {
+	atomic.AddInt64(&pool.aliveCount, 1) // 原子+1
+	fmt.Println("新协程启动")
+	defer func() { // 捕获异常并减少活跃协程数量
+		err := recover()
+		atomic.AddInt64(&pool.aliveCount, -1) // 原子-1
+		if err != nil {
+			fmt.Printf("协程退出，捕获异常:%+v\n", err)
+		} else {
+			fmt.Println("协程安全退出")
+		}
+	}()
+	sleepTime := time.Duration(0)
+label:
+	for {
+		select {
+		case task, ok := <-pool.taskChan: // 通道的comma,ok语法在通道关闭是ok为false
+			if !ok { // 说明taskChan已经关闭
+				fmt.Println("检测到taskChan已经关闭")
+				break
+			}
+			// 任务处理
+			task.(*taskFuture).execute()
+			// 刷新休眠不活跃时间
+			sleepTime = time.Duration(0)
+			break
+		case <-pool.closeSignal: // 监听到关闭信号
+			break label
+		default: // 将多余空闲协程关闭
+			sleepTime += time.Millisecond * 100
+			time.Sleep(time.Millisecond * 100)
+			if sleepTime > pool.aliveTime &&
+				atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+				break label
+			}
+		}
+	}
+	runtime.Goexit() // 关闭协程
+}
+```
+
+测试：
+
+```go
+func main() {
+	pool := future.NewGoroutinePoolFuture(5, 10, time.Second, 10)
+	defer func() {
+		pool.Close()
+		time.Sleep(time.Second)
+	}()
+	wg := &sync.WaitGroup{}
+	futures := make([]future.Future, 0, 10)
+	// 1.用线程池处理任务
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		f := pool.SubmitTask(func() (interface{}, error) {
+			sleepTime := rand.Int63n(3000)
+			time.Sleep(time.Millisecond * time.Duration(sleepTime))
+			if sleepTime < 1000 {
+				panic(fmt.Sprintf("sleepTime=%d", sleepTime))
+				//return nil, fmt.Errorf("sleepTime太小了:%d", sleepTime)
+			}
+			return sleepTime, nil
+		})
+		futures = append(futures, f)
+	}
+	// 2.甚至可以用线程池处理结果
+	for i := 0; i < len(futures); i++ {
+		j := i
+		f := futures[j]
+		pool.SubmitTask(func() (interface{}, error) {
+			result, err := f.Get()
+			if err != nil {
+				fmt.Printf("第%d个结果出现异常: %+v\n", j, err)
+			} else {
+				fmt.Printf("第%d个结果是: %+v\n", j, result)
+			}
+			wg.Done()
+			return nil, nil
+		})
+	}
+	wg.Wait()
+}
+```
+
+
+
 # 数据访问
 
 目前数据访问部分将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
