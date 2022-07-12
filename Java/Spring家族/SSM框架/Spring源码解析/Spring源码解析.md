@@ -183,9 +183,11 @@ Bean 名称生成器(BeanNameGenerator)：
 
 ### 初始化和销毁
 
+> @PostConstruct和@PreDestory来自于javax.annotation包，需额外引入
+
 指定**Bean初始化**方法有3种方式：
 
-1、@PostConstruct 标注方法 
+1、`@PostConstruct `标注方法 
 
 2、实现 InitializingBean 接口的 afterPropertiesSet() 方法 
 
@@ -206,15 +208,15 @@ Bean 名称生成器(BeanNameGenerator)：
 
 指定**Bean销毁方法**有3种方式：
 
-1、@PreDestroy 标注方法 
+1、`@PreDestroy `标注方法 
 
 2、实现 DisposableBean 接口的 destroy() 方法 
 
 3、自定义销毁方法 ：
 
-- XML 配置：<bean destroy=”destroy” ... /> 
+- XML 配置：`<bean destroy="destroy" ... /> `
 
-- Java 注解：@Bean(destroy=”destroy”) 
+- Java 注解：`@Bean(destroy="destroy") `
 
 - Java API：`BeanDefinition#setDestroyMethodName(String)`
 
@@ -296,8 +298,6 @@ Bean初始化方法执行顺序是:
 Bean销毁方法执行顺序是：
 
 > `@Bean(destroyMethod="methodName") --> @PreDestroy --> DisposableBean`
-
-
 
 ## 依赖查找
 
@@ -474,7 +474,7 @@ public class DependencyInjectDemo {
 所谓延迟注入，就是在调用getObject()方法的时候才去ioc容器里查bean。
 
 有两个方式：ObjectFactory和ObjectProvider.
-## 依赖处理过程
+## 依赖解析过程
 
 - 入口 - `DefaultListableBeanFactory#resolveDependency`
 
@@ -756,6 +756,298 @@ private Object resolveMultipleBeans(
     else return null;// 其它类型不在这里解析
 }
 ```
+
+## @Autowired和@Value注入
+
+@Autowired注入处理的入口方法是`AutowiredAnnotationBeanPostProcessor#postProcessProperties()`。此类实现了`InstantiationAwareBeanPostProcessor`接口。
+
+bean的生命周期中**属性填充阶段(populateBean)**会调用所有`InstantiationAwareBeanPostProcessor`接口实现bean的`postProcessProperties()`方法。
+
+首先看`AutowiredAnnotationBeanPostProcessor`类的构造器：
+
+```java
+// 这是一个有序set, 说明优先级@Autowired>@Value>@Inject
+private final Set<Class<? extends Annotation>> autowiredAnnotationTypes = 
+    					new LinkedHashSet<>(4);
+/**
+ * 为 Spring 的标准@Autowired和@Value注解提供支持
+ * 如果JSR-330存在于 ClassPath 中，还支持JSR-330的@Inject注释。
+ */
+@SuppressWarnings("unchecked")
+public AutowiredAnnotationBeanPostProcessor() {
+    this.autowiredAnnotationTypes.add(Autowired.class);
+    this.autowiredAnnotationTypes.add(Value.class);
+    // 这里会尝试加载@Inject注解，若没有则忽略
+    try {
+        this.autowiredAnnotationTypes.add((Class<? extends Annotation>)
+                                          ClassUtils.forName("javax.inject.Inject", AutowiredAnnotationBeanPostProcessor.class.getClassLoader()));
+        logger.trace("JSR-330 'javax.inject.Inject' annotation found and supported for autowiring");
+    }
+    catch (ClassNotFoundException ex) {
+        // JSR-330 API not available - simply skip.
+    }
+}
+
+// 此方法就是判断方法或字段上是否标记有@Autowired或@Value或@Inject注解的
+private MergedAnnotation<?> findAutowiredAnnotation(AccessibleObject ao) {
+    MergedAnnotations annotations = MergedAnnotations.from(ao);
+    for (Class<? extends Annotation> type : this.autowiredAnnotationTypes) {
+        MergedAnnotation<?> annotation = annotations.get(type);
+        if (annotation.isPresent()) {
+            return annotation;
+        }
+    }
+    return null;
+}
+```
+
+也就是说此BeanPostProcessor实现类默认支持@Autowired注入和@Value注入，若@Inject注入在类路劲中则也提供支持。@Inject由javax.inject包提供，需要额外引入。
+
+@Autowired处理入口：
+
+```java
+// AutowiredAnnotationBeanPostProcessor#postProcessProperties()
+public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName){
+    // 1.先找到这个bean内需要注入的元数据，即标注了@Autowired注解的地方
+    InjectionMetadata metadata = findAutowiringMetadata(
+        beanName, bean.getClass(), pvs);
+    // 省略try/catch
+    // 2.将bean内所有需要注入的字段都注入，此处会进入一个依赖解析过程
+    metadata.inject(bean, beanName, pvs);
+    return pvs;
+}
+
+
+private InjectionMetadata findAutowiringMetadata(String beanName, Class<?> clazz, @Nullable PropertyValues pvs) {
+    // 省略一大堆缓存查找
+    metadata = buildAutowiringMetadata(clazz);
+    // 省略一大堆缓存处理
+}
+
+// 循环查找bean及其父类的需要注入的字段
+private InjectionMetadata buildAutowiringMetadata(Class<?> clazz) {
+ 	// 省略
+	// 循环查找bean及其父类的需要注入的字段
+    do {
+        final List<InjectionMetadata.InjectedElement> currElements = new ArrayList<>();
+        // 对此类的所有字段遍历，查找需要注入的字段
+        ReflectionUtils.doWithLocalFields(targetClass, field -> {
+            // 判断此字段是否标注有@Autowired或@Value或@Inject
+            MergedAnnotation<?> ann = findAutowiredAnnotation(field);
+            if (ann != null) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                   // 省略日志打印
+                    return;
+                }
+                // 解析@Autowired或@Value是否必须注入
+                boolean required = determineRequiredStatus(ann);
+                // 加入待注入字段集合
+                currElements.add(new AutowiredFieldElement(field, required));
+            }
+        });
+        // 省略部分代码
+        targetClass = targetClass.getSuperclass();
+    }while (targetClass != null && targetClass != Object.class);
+    // 省略
+}
+
+// InjectionMetadata#inject()
+public void inject(Object target, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+    // 省略部分代码
+    // 遍历所有需要注入的字段，解析依赖并注入
+    if (!elementsToIterate.isEmpty()) 
+        for (InjectedElement element : elementsToIterate) 
+            element.inject(target, beanName, pvs);
+}
+
+protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+    Field field = (Field) this.member;
+    Object value;
+   	// 省略部分代码
+    // 解析该字段依赖的bean或值
+    value = resolveFieldValue(field, bean, beanName);
+    // 直接反射将字段赋值!
+    if (value != null) {
+        ReflectionUtils.makeAccessible(field);
+        field.set(bean, value);
+    }
+}
+// 解析字段依赖的bean或值：此处会进入 依赖解析过程
+private Object resolveFieldValue(Field field, Object bean, @Nullable String beanName) {
+    // 将字段包装为 字段依赖描述符DependencyDescriptor
+    DependencyDescriptor desc = new DependencyDescriptor(field, this.required);
+    desc.setContainingClass(bean.getClass());
+    Set<String> autowiredBeanNames = new LinkedHashSet<>(1);
+    TypeConverter typeConverter = beanFactory.getTypeConverter();
+    Object value;
+	// 依赖解析处理，解析完成返回合适的
+    value = beanFactory.resolveDependency(
+        desc, beanName, autowiredBeanNames, typeConverter);
+    
+   	// 省略部分代码
+    return value;
+}
+
+```
+
+## Java通用注解处理
+
+Spring通过`CommonAnnotationBeanPostProcessor`支持javax.annotation包中对bean管理的注解：
+
+- 注入注解
+  - javax.xml.ws.WebServiceRef 
+  - javax.ejb.EJB 
+  - javax.annotation.Resource 
+
+- 生命周期注解 
+  - javax.annotation.PostConstruct 
+  - javax.annotation.PreDestroy
+
+```java
+public class CommonAnnotationBeanPostProcessor extends InitDestroyAnnotationBeanPostProcessor
+		implements InstantiationAwareBeanPostProcessor, BeanFactoryAware, Serializable {
+	private static final Set<Class<? extends Annotation>> resourceAnnotationTypes = 
+        new LinkedHashSet<>(4);
+
+	static {
+        // 提供对@Resource支持
+		resourceAnnotationTypes.add(Resource.class);
+		// 提供对@WebSrviceRef支持
+		webServiceRefClass = loadAnnotationType("javax.xml.ws.WebServiceRef");
+		if (webServiceRefClass != null) 
+			resourceAnnotationTypes.add(webServiceRefClass);
+		// 提供对@EJB支持
+		ejbClass = loadAnnotationType("javax.ejb.EJB");
+		if (ejbClass != null) 
+			resourceAnnotationTypes.add(ejbClass);
+    }
+
+    // 通过实现InstantiationAwareBeanPostProcessor接口的属性填充阶段的回调方法
+    // 实现了@Resource等注解的注入
+    public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
+        // 寻找标注有上诉3个注解的方法或字段进行注入
+        InjectionMetadata metadata = findResourceMetadata(beanName, bean.getClass(), pvs);
+        metadata.inject(bean, beanName, pvs);
+        // 省略部分代码
+        return pvs;
+    }
+}
+```
+
+可以很明显的看到此处对于@Resource的实现和@Autowired注解的实现几乎一样，所以不详细分析了。
+
+@PostConstruct和@PreDestroy的由其父类`InitDestroyAnnotationBeanPostProcessor`支持。
+
+```java
+// 此类实现了BeanPostProcessor接口的
+public class InitDestroyAnnotationBeanPostProcessor
+		implements DestructionAwareBeanPostProcessor, MergedBeanDefinitionPostProcessor, PriorityOrdered, Serializable {
+    // 通过实现BeanPostProcessor接口的初始化前回调
+    // 实现了@PostConstruct指定的初始化方法执行
+    public Object postProcessBeforeInitialization(Object bean, String beanName) 
+        throws BeansException {
+        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
+        try {
+            metadata.invokeInitMethods(bean, beanName);
+        }
+        // 省略部分代码
+        return bean;
+    }
+    
+	// 通过实现DestructionAwareBeanPostProcessor接口的销毁前回调
+    // 实现@PreDestroy指定的销毁方法执行
+    public void postProcessBeforeDestruction(Object bean, String beanName) 
+        throws BeansException {
+        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
+        try {
+            metadata.invokeDestroyMethods(bean, beanName);
+        }
+      	// 省略部分代码
+    }
+}
+```
+
+更多细节这里不列出了，可以直接看源码，比较简答。
+
+### @Resource和@Autowired处理顺序
+
+从上面得知@Resouce由`CommonAnnotationBeanPostProcessor`处理，而`@Autowired`由`AutowiredAnnotationBeanPostProcessor`处理，那么这两的优先级就决定了谁的处理顺序在前。
+
+```java
+public class CommonAnnotationBeanPostProcessor{// 此处忽略其实现接口
+	public CommonAnnotationBeanPostProcessor() {
+		setOrder(Ordered.LOWEST_PRECEDENCE - 3);// 优先级在这
+		setInitAnnotationType(PostConstruct.class);
+		setDestroyAnnotationType(PreDestroy.class);
+		// 省略部分代码
+	}
+}
+
+public class AutowiredAnnotationBeanPostProcessor {// 此处忽略其实现接口
+	private int order = Ordered.LOWEST_PRECEDENCE - 2;
+}
+```
+
+从这里看出`AutowiredAnnotationBeanPostProcessor`优先级更低，说明**@Resource先于@Autowired注解处理**，即后者会覆盖前者。
+
+## 自定义依赖注入注解
+
+要自定义的依赖注入注解生效，也得像`AutowiredAnnotationBeanPostProcessor`那样解析元数据，依赖查找，依赖注入。
+
+最简单的方式就是扩展`AutowiredAnnotationBeanPostProcessor`这个并注入到容器内。
+
+```java
+@Target({ElementType.CONSTRUCTOR, ElementType.METHOD, ElementType.PARAMETER, ElementType.FIELD, ElementType.ANNOTATION_TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+public @interface MyAutowired {
+}
+
+
+@Configuration
+@Data
+public class DependencyProgressDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application = 
+             new AnnotationConfigApplicationContext()) {
+            application.register(DependencyProgressDemo.class);
+            application.refresh();
+            System.out.println(application.getBean(DependencyProgressDemo.class));
+        }
+    }
+
+    @MyAutowired
+    private User user;
+    @Autowired
+    private List<User> userList;
+
+    // 用这个内部的beanName目的是覆盖默认的注入处理BeanPostProcessor
+    @Bean(org.springframework.context.annotation.AnnotationConfigUtils.
+          AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME)
+    // 此处必须是static静态方法，这样这个bean才能尽早注册，从而覆盖掉默认的
+    public static AutowiredAnnotationBeanPostProcessor getMy() {
+        AutowiredAnnotationBeanPostProcessor postProcessor = 
+            new AutowiredAnnotationBeanPostProcessor();
+        // 这里其实就是非常简单的把默认要解析的@Autowired和@Value注解
+        // 换成了自己的注解
+        postProcessor.setAutowiredAnnotationTypes(Set.of(MyAutowired.class));
+        return postProcessor;
+    }
+
+    @Bean
+    public User getUser1() {
+        return new User("fzk", 21);
+    }
+
+    @Bean
+    @Primary
+    public User getUser2() {
+        return new User("fzk", 21);
+    }
+}
+```
+
+在上面的例子中，扩展的处理器覆盖了默认的注入处理器，因此user字段可以成功注入，而userList字段将为null，因为`@Autowired`注解已经不再支持了。
 
 
 
