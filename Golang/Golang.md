@@ -101,9 +101,17 @@ go-build-to-linux:  # 交叉编译，GOOS=linux这里必须挨着&&，不能出�
 	go build main.go
 ```
 
-# goroutine
+# 并发
+
+## goroutine
 
 Go在语言层面支持应用程序在用户层的并发。routine是例程。
+
+现有术语thread(线程)、coroutine(协程)、process(进程)的定义都与goroutine不完全匹配。goroutine是同一地址空间与其它goroutine并发执行的函数，轻量级的，仅比堆栈空间的分配多一点。
+
+OS线程一般有固定的栈内存(通常为2MB)，goroutine栈在生命周期开始时很小(典型情况下2KB)，goroutine栈可以按需增大和缩小，goroutine的栈大小限制可以达到1GB。
+
+goroutine被多路复用到多个OS线程上，隐藏了线程创建和管理的复杂性。
 
 创建goroutine方式非常简单：
 
@@ -195,6 +203,96 @@ println(<-bufChan) // 0
 >
 > 即该comma,ok语法**无法实现非阻塞式获取**，若要非阻塞式获取，需使用select关键字。
 
+### 通知退出机制
+
+可以用无缓冲通道实现通知退出机制。
+
+```go
+// 通知退出机制的关键在于 无缓冲通道 + 通道关闭后select分支可达
+signalChan := make(chan int)
+bufChan := make(chan int, 10)
+defer func() {
+   close(signalChan) // 关闭信号通道即可完成通知退出
+   close(bufChan)
+   time.Sleep(time.Second)
+}()
+
+go func() {
+label:
+   for {
+      select {
+      case i, ok := <-bufChan:
+         if !ok { // 说明bufChan关闭了
+            break
+         }
+         fmt.Print(i, " ")
+         break
+      case <-signalChan: // 信号通道关闭时此分支可达
+         break label
+      }
+   }
+   println("goroutine end")
+   runtime.Goexit()
+}()
+
+for i := 0; i < 100; i++ {
+   bufChan <- i
+}
+```
+
+### 通信实现内存共享
+
+Go中推崇的是**以通信实现内存共享**，而不是像Java那样通过对共享内存加锁来实现通信。其实说白了就是想让我们都去用它提供的chan实现互斥访问。
+
+```go
+func main() {
+	muxChan := make(chan int, 1) // 互斥锁，同时也是数据传递通道
+	muxChan <- 0
+	wg := &sync.WaitGroup{}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(j int) {
+			// 1.加锁，获取信号量
+			t := <-muxChan
+			// 2.注册解锁
+			defer func() {
+				e := recover()
+				// 对t的闭包引用将会直接用其指针地址，所以此处t会是最新值
+				muxChan <- t
+				if e != nil {
+					panic(e)
+				}
+			}()
+			// 3.函数调用
+			t = run(t)
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+	println("at last total is ", <-muxChan)
+}
+func run(i int) int {
+	n := rand.Intn(53)
+	fmt.Printf("total is %d + %d = %d \n", i, n, i+n)
+	return i + n
+}
+
+// 测试结果如下
+total is 0 + 42 = 42 
+total is 42 + 18 = 60   
+total is 60 + 52 = 112  
+total is 112 + 15 = 127 
+total is 127 + 34 = 161 
+total is 161 + 25 = 186 
+total is 186 + 24 = 210 
+total is 210 + 38 = 248 
+total is 248 + 11 = 259 
+total is 259 + 5 = 264  
+at last total is  264  
+```
+
+上诉例子通过1个缓冲区的chan实现了互斥，又以通道传递值实现了非共享内存式数据访问。这个chan通信和锁或者CAS原子操作谁性能高应该要具体看chan的底层实现了。 
+
 ## select
 
 `select`是类UNIX系统提供的多路复用系统API，Go提供`select关键字`以goroutine实现了一套多路复用，用于**监听多个通道**。
@@ -247,7 +345,12 @@ type GoroutinePool struct {
 }
 
 // NewGoroutinePool 创建协程池
-func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) *GoroutinePool {
+func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) (*GoroutinePool, error) {
+	// 1.检查参数
+	if corePoolSize < 1 || maxPoolSize > 100 || aliveTime < time.Millisecond || maxTaskChanSize < 1 || maxTaskChanSize > 100 {
+		return nil, errors.New("param error")
+	}
+	// 2.构建协程池
 	taskChan := make(chan Task, maxTaskChanSize)
 	closeSignal := make(chan int64) // 无缓冲关闭信号通道
 	pool := &GoroutinePool{
@@ -259,11 +362,11 @@ func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Dura
 		aliveCount:      0,
 		maxTaskChanSize: maxTaskChanSize,
 	}
-	// 先创建核心协程
+	// 3.创建核心协程
 	for i := int64(0); i < pool.corePoolSize; i++ {
 		go worker(pool)
 	}
-	return pool
+	return pool, nil
 }
 
 func (pool *GoroutinePool) SubmitTask(task Task) {
@@ -286,39 +389,45 @@ type Task func()
 
 // worker 工作协程
 func worker(pool *GoroutinePool) {
-	atomic.AddInt64(&pool.aliveCount, 1) // 原子+1
-	fmt.Println("新协程启动")
-	defer func() { // 捕获异常并减少活跃协程数量
+	// 1.活跃协程数+1
+	atomic.AddInt64(&pool.aliveCount, 1)
+	fmt.Println("new goroutine start")
+	defer func() {
+		// 2.捕获异常并减少活跃协程数量
 		err := recover()
-		atomic.AddInt64(&pool.aliveCount, -1) // 原子-1
+		// 活跃协程数-1
+		if atomic.AddInt64(&pool.aliveCount, -1) == 0 {
+			// 防止因panic导致协程池无活跃协程
+			go worker(pool)
+		}
 		if err != nil {
-			fmt.Printf("协程退出，捕获异常:%+v\n", err)
-		} else {
-			fmt.Println("协程安全退出")
+			fmt.Printf("协程异常退出: %+v\n", err)
 		}
 	}()
-	sleepTime := time.Duration(0)
+	// 3.监听任务管道
+	sleepChan := time.After(pool.aliveTime)
 label:
 	for {
 		select {
 		case task, ok := <-pool.taskChan: // 通道的comma,ok语法在通道关闭是ok为false
-			if !ok { // 说明taskChan已经关闭
+			if !ok {
 				fmt.Println("检测到taskChan已经关闭")
 				break
 			}
 			// 任务处理
 			task()
-			// 刷新休眠不活跃时间
-			sleepTime = time.Duration(0)
+			// 刷新空闲时间
+			sleepChan = time.After(pool.aliveTime)
+			break
 		case <-pool.closeSignal: // 监听到关闭信号
+			fmt.Println("receive close signal, close the goroutine")
 			break label
-		default: // 将多余空闲协程关闭
-			sleepTime += time.Millisecond * 100
-			time.Sleep(time.Millisecond * 100)
-			if sleepTime > pool.aliveTime &&
-				atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+		case <-sleepChan: // 空闲时间超时
+			if atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+				fmt.Println("close of too free")
 				break label
 			}
+			sleepChan = time.After(pool.aliveTime >> 1)
 		}
 	}
 	runtime.Goexit() // 关闭协程
@@ -349,9 +458,7 @@ func run() {
 }
 ```
 
-
-
-## Future模式协程池
+### Future模式协程池
 
 ```go
 // GoroutinePoolFuture 协程池
@@ -547,7 +654,53 @@ func main() {
 }
 ```
 
+## 并发模型
 
+并发模型有3中：
+
+- 多进程模型
+- 多线程模型
+- 用户级多线程模型(M个用户线程 : N个内核线程)
+
+程序并发不能无限制增加系统线程数，因为线程数过多会导致操作系统调度开销过大，单线程的运行时间片减少。
+
+协程作为用户态轻量级线程调度完全由用户态程序控制，协程拥有自己的寄存器上下文和栈。
+
+协程好处：
+
+1、控制系统线程数，保证线程运行时间片充足。
+
+2、调度层进行用户态切换，减少上下文切换。
+
+### CSP
+
+ Go 的并发方法起源于 Hoare 的《Communication Sequential Processes》(CSP)论文，但它也可以看作是 Unix 管道的类型安全泛化。
+
+论文思想是：将并发系统抽象为Channel和Process，Channel传递消息，Process用于执行。Go则借鉴了其Channel和Process的概念。
+
+### GPM
+
+Go中goroutine使用的是GMP调度模型。
+
+- G(Goroutine)：**对goroutine的描述的数据结构**，存放并发执行的代码入口地址、上下文、运行环境(关联的P和M)、运行栈等元信息；
+- M(Machine)：**代表OS内核线程**，M仅负责执行。M启动时进入的是**运行时管理代码**，拿到可用的P后才执行调度。
+- P(Processor)：代表M运行G时所需要的资源，对资源的抽象管理。P不是代码实体，而是一个**管理的数据结构**。**P持有G的队列**。
+
+> Work Strealing算法：M和P一起构成一个运行时环境，每个P有一个本地可调度G队列，队内G将被M依次调度。若本地队列空了，则去全局队列偷取一部分G，若全局队列也空，则去其它P那偷。
+
+P的数量默认的CPU核心数量，可通过runtime.GOMAXPROCS()函数查询和设置。
+
+M和P数量差不多，但和P不是一一对应，运行时会按需分配、动态变化，M其实就是线程。
+
+**m0和g0**
+
+m0是启动程序的主线程，m0负责执行初始化操纵和启动第1个g，之后m0就和其它m一样了。
+
+每个M都有1个管理堆栈g0，g0不指向任何可执行函数，在调度或系统调用时会切换到g0的栈空间。
+
+更多细节：https://mp.weixin.qq.com/s/NFfhKQgcM3qrwAD5yYy-XQ
+
+源码分析：https://juejin.cn/post/6976839612241018888
 
 # 数据访问
 

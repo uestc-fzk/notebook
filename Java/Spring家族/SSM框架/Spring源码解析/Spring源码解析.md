@@ -1003,7 +1003,6 @@ public class AutowiredAnnotationBeanPostProcessor {// 此处忽略其实现接�
 public @interface MyAutowired {
 }
 
-
 @Configuration
 @Data
 public class DependencyProgressDemo {

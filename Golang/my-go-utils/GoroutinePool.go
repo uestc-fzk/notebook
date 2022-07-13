@@ -1,6 +1,7 @@
 package future
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync/atomic"
@@ -19,7 +20,12 @@ type GoroutinePool struct {
 }
 
 // NewGoroutinePool 创建协程池
-func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) *GoroutinePool {
+func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Duration, maxTaskChanSize int64) (*GoroutinePool, error) {
+	// 1.检查参数
+	if corePoolSize < 1 || maxPoolSize > 100 || aliveTime < time.Millisecond || maxTaskChanSize < 1 || maxTaskChanSize > 100 {
+		return nil, errors.New("param error")
+	}
+	// 2.构建协程池
 	taskChan := make(chan Task, maxTaskChanSize)
 	closeSignal := make(chan int64) // 无缓冲关闭信号通道
 	pool := &GoroutinePool{
@@ -31,11 +37,11 @@ func NewGoroutinePool(corePoolSize int64, maxPoolSize int64, aliveTime time.Dura
 		aliveCount:      0,
 		maxTaskChanSize: maxTaskChanSize,
 	}
-	// 先创建核心协程
+	// 3.创建核心协程
 	for i := int64(0); i < pool.corePoolSize; i++ {
 		go worker(pool)
 	}
-	return pool
+	return pool, nil
 }
 
 func (pool *GoroutinePool) SubmitTask(task Task) {
@@ -58,39 +64,45 @@ type Task func()
 
 // worker 工作协程
 func worker(pool *GoroutinePool) {
-	atomic.AddInt64(&pool.aliveCount, 1) // 原子+1
-	fmt.Println("新协程启动")
-	defer func() { // 捕获异常并减少活跃协程数量
+	// 1.活跃协程数+1
+	atomic.AddInt64(&pool.aliveCount, 1)
+	fmt.Println("new goroutine start")
+	defer func() {
+		// 2.捕获异常并减少活跃协程数量
 		err := recover()
-		atomic.AddInt64(&pool.aliveCount, -1) // 原子-1
+		// 活跃协程数-1
+		if atomic.AddInt64(&pool.aliveCount, -1) == 0 {
+			// 防止因panic导致协程池无活跃协程
+			go worker(pool)
+		}
 		if err != nil {
-			fmt.Printf("协程退出，捕获异常:%+v\n", err)
-		} else {
-			fmt.Println("协程安全退出")
+			fmt.Printf("协程异常退出: %+v\n", err)
 		}
 	}()
-	sleepTime := time.Duration(0)
+	// 3.监听任务管道
+	sleepChan := time.After(pool.aliveTime)
 label:
 	for {
 		select {
 		case task, ok := <-pool.taskChan: // 通道的comma,ok语法在通道关闭是ok为false
-			if !ok { // 说明taskChan已经关闭
+			if !ok {
 				fmt.Println("检测到taskChan已经关闭")
 				break
 			}
 			// 任务处理
 			task()
-			// 刷新休眠不活跃时间
-			sleepTime = time.Duration(0)
+			// 刷新空闲时间
+			sleepChan = time.After(pool.aliveTime)
+			break
 		case <-pool.closeSignal: // 监听到关闭信号
+			fmt.Println("receive close signal, close the goroutine")
 			break label
-		default: // 将多余空闲协程关闭
-			sleepTime += time.Millisecond * 100
-			time.Sleep(time.Millisecond * 100)
-			if sleepTime > pool.aliveTime &&
-				atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+		case <-sleepChan: // 空闲时间超时
+			if atomic.LoadInt64(&pool.aliveCount) > pool.corePoolSize {
+				fmt.Println("close of too free")
 				break label
 			}
+			sleepChan = time.After(pool.aliveTime >> 1)
 		}
 	}
 	runtime.Goexit() // 关闭协程
