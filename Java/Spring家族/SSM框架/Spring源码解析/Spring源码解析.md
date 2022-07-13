@@ -469,6 +469,8 @@ public class DependencyInjectDemo {
 
 可以看到在有多个候选bean的时候，根据`@Qualifier`成功定位到了需要的bean。
 
+> 注意：默认情况下，每个bean都自己单独一个组，组名为beanName。所以在有多个候选bean的时候，可以用@Qualifier("beanName")筛选需要的bean。
+
 ### 延迟注入
 
 所谓延迟注入，就是在调用getObject()方法的时候才去ioc容器里查bean。
@@ -1048,17 +1050,42 @@ public class DependencyProgressDemo {
 
 在上面的例子中，扩展的处理器覆盖了默认的注入处理器，因此user字段可以成功注入，而userList字段将为null，因为`@Autowired`注解已经不再支持了。
 
+## 依赖查找和依赖注入来源
 
+| 来源                  | SpringBean对象 | 生命周期管理 | 配置元信息 | 使用场景           |
+| --------------------- | -------------- | ------------ | ---------- | ------------------ |
+| BeanDefinition        | √              | √            | √          | 依赖查找、依赖注入 |
+| 直接注册单例bean      | √              | ×            | ×          | 依赖查找、依赖注入 |
+| Resolvable Dependency | ×              | ×            | ×          | 依赖注入           |
 
+依赖查找指通过这种方式：`application.getBean("beanName")`获取IOC容器内bean对象，其实就是bean查找。
 
+依赖注入是指将bean对象、BeanFactory或Application、外部化配置注入到指定对象中，如@Autowired、@Value。
 
+- BeanDefinition就是Spring正常启动流程扫描到的bean定义或者通过Java API手动注册的bean定义。
 
+- 直接注册的单例bean指的是直接将某个对象put到ioc容器的单例容器map中：
 
+```java
+// 直接注入一个单例对象到ioc的单例容器map中
+application.getBeanFactory().registerSingleton("username", "fzk");
+```
 
+- ResolvableDependency其实指的就是Application和BeanFactory，这两个并没有注入IOC容器，不能通过依赖查找从容器内获得。
 
+## Bean作用域
 
+| 作用域      | 描述                                                       |
+| ----------- | ---------------------------------------------------------- |
+| singleton   | 默认 Spring Bean 作用域，一个 BeanFactory 有且仅有一个实例 |
+| prototype   | 原型作用域，每次依赖查找和依赖注入生成新 Bean 对象         |
+| request     | Bean 存储在 ServletRequest 上下文中                        |
+| session     | Bean 存储在 HttpSession 中                                 |
+| application | Bean 存储在 ServletContext 中                              |
 
+随着模板引擎的边缘化，只需要关注前两种作用域即可。
 
+> 注意：singletonBean有完整生命周期，而prototypeBean只能执行指定的初始化方法回调，不会执行销毁方法。
 
 # ClassPathXmlApplicationContext
 
