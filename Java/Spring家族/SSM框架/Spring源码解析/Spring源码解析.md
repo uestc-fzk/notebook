@@ -1298,6 +1298,298 @@ application.getBeanFactory().registerSingleton("username", "fzk");
 
 > 注意：singletonBean有完整生命周期，而prototypeBean只能执行指定的初始化方法回调，不会执行销毁方法。
 
+# Bean生命周期
+
+1、Spring Bean 元信息配置阶段 
+
+- 基于XML配置
+- 基于注解配置
+- 基于JavaAPI配置
+
+2、Spring Bean 元信息解析阶段 
+
+- XML解析器 - BeanDefinitionParser
+- 注解 BeanDefinition 解析 AnnotatedBeanDefinitionReader
+
+3、Spring Bean 注册阶段：BeanDefinition 注册接口 BeanDefinitionRegistry
+
+```java
+try (AnnotationConfigApplicationContext application = new AnnotationConfigApplicationContext()) {
+    // application.register(BeanLifeCycleDemo.class); // 其实这里的注册就是调用的下面这个reader.register()
+    AnnotatedBeanDefinitionReader reader = new AnnotatedBeanDefinitionReader(application);
+    // 其实这个也是调用的DefaultListableBeanFactory#registerBeanDefinition()
+    reader.register(BeanLifeCycleDemo.class);
+    application.refresh();
+}
+```
+
+所以注册得看DefaultListableBeanFactory怎么实现的：
+
+```java
+public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition)
+    throws BeanDefinitionStoreException {
+	// 省略检查
+    BeanDefinition existingDefinition = this.beanDefinitionMap.get(beanName);
+    if (existingDefinition != null) {
+        // 是否运行覆盖BeanDefinition
+        if (!isAllowBeanDefinitionOverriding()) {/*省略抛异常*/}
+       	// 省略覆盖提示的日志
+        // 覆盖BeanDefinition定义
+        this.beanDefinitionMap.put(beanName, beanDefinition);
+    }
+    else {
+        if (hasBeanCreationStarted()) {/*省略*/}
+        else {
+            // Still in startup registration phase
+            this.beanDefinitionMap.put(beanName, beanDefinition);
+            this.beanDefinitionNames.add(beanName);
+            removeManualSingletonName(beanName);
+        }
+        this.frozenBeanDefinitionNames = null;
+    }
+	// 省略部分代码
+}
+```
+
+4、Spring BeanDefinition 合并阶段 
+
+父子 BeanDefinition 合并，没有父类bean的class可以用RootBeanDefinition表示，有父类bean的可用GenericBeanDefinition。
+
+现在默认是GenericBeanDefinition，其中有个parent属性用来表示父类bean定义。
+
+BeanDefinition合并没搞懂：https://time.geekbang.org/course/detail/100042601-209704
+
+5、Spring Bean Class 加载阶段 
+
+如果BeanDefinition中的属性beanClass是String类型，即类路径时，则去加载这个Class对象，并赋给beanClass属性。
+
+按理说BeanDefinition中肯定有bean的Class对象啊？为什么要加载一下呢？
+
+因为XML定义的是bean的类路劲，需要加载为Class对象；
+
+JavaAPI方式直接生成的BeanDefinition也可能没有加载。
+
+注解方式的BeanDefinition一般都有Class对象。
+
+## createBean
+
+```java
+protected Object createBean(String beanName, RootBeanDefinition mbd, @Nullable Object[] args)
+    throws BeanCreationException {
+
+    RootBeanDefinition mbdToUse = mbd;
+	// 确保已经加载Class对象
+    Class<?> resolvedClass = resolveBeanClass(mbd, beanName);
+    if (resolvedClass != null && !mbd.hasBeanClass() && mbd.getBeanClassName() != null) {
+        mbdToUse = new RootBeanDefinition(mbd);
+        mbdToUse.setBeanClass(resolvedClass);
+    }
+	// 实例化前回调执行
+    // 这里要注意，如果返回的bean不能null，将被视为代理对象，后面的生命周期回调都不再执行
+    Object bean = resolveBeforeInstantiation(beanName, mbdToUse);
+    if (bean != null) {return bean;}
+    
+	// 省略了所有异常处理和日志
+    Object beanInstance = doCreateBean(beanName, mbdToUse, args);
+    return beanInstance;   
+}
+```
+
+6、Spring Bean 实例化前回调`InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation()`
+
+```java
+//AbstractAutowireCapableBeanFactory.java
+protected Object resolveBeforeInstantiation(String beanName, RootBeanDefinition mbd) {
+    Object bean = null;
+   	// 省略无关紧要的代码后：
+    bean = applyBeanPostProcessorsBeforeInstantiation(targetType, beanName);
+    if (bean != null) {
+        bean = applyBeanPostProcessorsAfterInitialization(bean, beanName);
+    }     
+    return bean;
+}
+
+protected Object applyBeanPostProcessorsBeforeInstantiation(Class<?> beanClass, String beanName) {
+    // 将容器内的InstantiationAwareBeanPostProcessor接口实现bean
+    // 的实例化前回调都执行一次
+    for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {
+        Object result = bp.postProcessBeforeInstantiation(beanClass, beanName);
+        if (result != null)
+            return result;
+    }
+    return null;
+}
+```
+
+从这能看出，实例化前回调返回的代理对象会执行实例化后回调，但是不会执行之后的初始化回调和属性填充了。
+
+7、Spring Bean 实例化阶段 
+
+实例化前回调执行完成后，若无代理对象产生，将进入doCreateBean()方法，开始实例化：
+
+```java
+// AbstractAutowireCapableBeanFactory.java
+protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable Object[] args)
+    throws BeanCreationException {
+    // bean包装器
+    BeanWrapper instanceWrapper = null;
+    if (mbd.isSingleton()) {
+        instanceWrapper = this.factoryBeanInstanceCache.remove(beanName);
+    }
+    if (instanceWrapper == null) {
+        // 创建实例
+        instanceWrapper = createBeanInstance(beanName, mbd, args);
+    }
+    
+    Object bean = instanceWrapper.getWrappedInstance();
+    Class<?> beanType = instanceWrapper.getWrappedClass();
+    if (beanType != NullBean.class) {
+        mbd.resolvedTargetType = beanType;
+    }
+
+    // Allow post-processors to modify the merged bean definition.
+    synchronized (mbd.postProcessingLock) {
+        if (!mbd.postProcessed) {
+            try {
+                applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName);
+            }
+            catch (Throwable ex) {
+                throw new BeanCreationException(mbd.getResourceDescription(), beanName,
+                                                "Post-processing of merged bean definition failed", ex);
+            }
+            mbd.postProcessed = true;
+        }
+    }
+
+    // Eagerly cache singletons to be able to resolve circular references
+    // even when triggered by lifecycle interfaces like BeanFactoryAware.
+    boolean earlySingletonExposure = (mbd.isSingleton() && this.allowCircularReferences &&
+                                      isSingletonCurrentlyInCreation(beanName));
+    if (earlySingletonExposure) {
+        if (logger.isTraceEnabled()) {
+            logger.trace("Eagerly caching bean '" + beanName +
+                         "' to allow for resolving potential circular references");
+        }
+        addSingletonFactory(beanName, () -> getEarlyBeanReference(beanName, mbd, bean));
+    }
+
+    // Initialize the bean instance.
+    Object exposedObject = bean;
+    try {
+        populateBean(beanName, mbd, instanceWrapper);
+        exposedObject = initializeBean(beanName, exposedObject, mbd);
+    }
+    catch (Throwable ex) {
+        if (ex instanceof BeanCreationException && beanName.equals(((BeanCreationException) ex).getBeanName())) {
+            throw (BeanCreationException) ex;
+        }
+        else {
+            throw new BeanCreationException(
+                mbd.getResourceDescription(), beanName, "Initialization of bean failed", ex);
+        }
+    }
+
+    if (earlySingletonExposure) {
+        Object earlySingletonReference = getSingleton(beanName, false);
+        if (earlySingletonReference != null) {
+            if (exposedObject == bean) {
+                exposedObject = earlySingletonReference;
+            }
+            else if (!this.allowRawInjectionDespiteWrapping && hasDependentBean(beanName)) {
+                String[] dependentBeans = getDependentBeans(beanName);
+                Set<String> actualDependentBeans = new LinkedHashSet<>(dependentBeans.length);
+                for (String dependentBean : dependentBeans) {
+                    if (!removeSingletonIfCreatedForTypeCheckOnly(dependentBean)) {
+                        actualDependentBeans.add(dependentBean);
+                    }
+                }
+                if (!actualDependentBeans.isEmpty()) {
+                    throw new BeanCurrentlyInCreationException(beanName,
+                                                               "Bean with name '" + beanName + "' has been injected into other beans [" +
+                                                               StringUtils.collectionToCommaDelimitedString(actualDependentBeans) +
+                                                               "] in its raw version as part of a circular reference, but has eventually been " +
+                                                               "wrapped. This means that said other beans do not use the final version of the " +
+                                                               "bean. This is often the result of over-eager type matching - consider using " +
+                                                               "'getBeanNamesForType' with the 'allowEagerInit' flag turned off, for example.");
+                }
+            }
+        }
+    }
+
+    // Register bean as disposable.
+    try {
+        registerDisposableBeanIfNecessary(beanName, bean, mbd);
+    }
+    catch (BeanDefinitionValidationException ex) {
+        throw new BeanCreationException(
+            mbd.getResourceDescription(), beanName, "Invalid destruction signature", ex);
+    }
+
+    return exposedObject;
+}
+```
+
+创建bean实例：
+
+```java
+// 使用适当的实例化策略为指定的 bean 创建一个新实例：工厂方法、构造函数自动装配或简单实例化。
+protected BeanWrapper createBeanInstance(String beanName, RootBeanDefinition mbd, @Nullable Object[] args) {
+	// 省略部分代码
+    // 根据@Autowired确定构造器
+    Constructor<?>[] ctors = determineConstructorsFromBeanPostProcessors(beanClass, beanName);
+    if (ctors != null || mbd.getResolvedAutowireMode() == AUTOWIRE_CONSTRUCTOR ||
+        mbd.hasConstructorArgumentValues() || !ObjectUtils.isEmpty(args)) {
+        return autowireConstructor(beanName, mbd, ctors, args);
+    }
+
+    // 从BeanDefinition中获取是否设置有偏好的构造器? 
+    // Spring5.1 新增，可以自己手动设置到BeanDefinition
+    ctors = mbd.getPreferredConstructors();
+    if (ctors != null) {
+        return autowireConstructor(beanName, mbd, ctors, null);
+    }
+
+    // 简单无参构造器直接创建实例
+    return instantiateBean(beanName, mbd);
+}
+
+// 简单无参构造器创建实例如下：
+public Object instantiate(RootBeanDefinition bd, @Nullable String beanName, BeanFactory owner) {
+    // Don't override the class with CGLIB if no overrides.
+    if (!bd.hasMethodOverrides()) {
+		// 省略缓存代码
+        bd.resolvedConstructorOrFactoryMethod = constructorToUse;
+        // 直接无参构造器的newInstance()方法就创建实例了
+        return BeanUtils.instantiateClass(constructorToUse);
+    }
+    // 如果需要覆盖方法，则需要CGLIB增强此类，生成一个代理对象
+    // 如@configuration标记的类且其中有@Bean标记的方法(这个方法需要被覆盖)
+    else {
+        // Must generate CGLIB subclass.
+        return instantiateWithMethodInjection(bd, beanName, owner);
+    }
+}
+```
+
+
+
+8、Spring Bean 实例化后阶段 
+9、Spring Bean 属性赋值前阶段 
+10、Spring Bean Aware接口回调阶段
+11、Spring Bean 初始化前阶段 
+12、Spring Bean 初始化阶段 
+13、Spring Bean 初始化后阶段 
+14、Spring Bean 初始化完成阶段 
+15、Spring Bean 销毁前阶段 
+16、Spring Bean 销毁阶段 
+17、Spring Bean 垃圾收集 
+
+
+
+
+
+
+
 # ClassPathXmlApplicationContext
 
 引入依赖
