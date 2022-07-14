@@ -702,6 +702,164 @@ m0是启动程序的主线程，m0负责执行初始化操纵和启动第1个g�
 
 源码分析：https://juejin.cn/post/6976839612241018888
 
+# sync
+
+此部分分析Golang中sync包下的同步实现，如mutex、rwmutex、waitgroup、once和cond、map、pool、poolqueue等。
+
+> Go官方：sync包提供了基本的同步基元，如互斥锁。除了Once和WaitGroup类型，大部分都是适用于低水平程序线程，高水平的同步使用channel通信更好一些。
+
+## mutex
+
+相关资料：https://mp.weixin.qq.com/s?__biz=MzUzNTY5MzU2MA==&mid=2247484379&idx=1&sn=1a2abc6f639a34e62f3a5a0fcd774a71&chksm=fa80d24ccdf75b5a70d45168ad9e3a55dd258c1dd57147166a86062ee70d909ff1e5b0ba2bcb&token=183756123&lang=zh_CN#rd
+
+```go
+type Mutex struct {
+   state int32	// 表示当前互斥锁状态
+   sema  uint32	// 真正控制锁状态的信号量
+}
+```
+
+状态state并不是互斥的，可以同时表示多个状态，**低3位用于表示状态，高位表示等待的goroutine数量**。
+
+```go
+const (
+	mutexLocked = 1 << iota // 最低位表示锁定
+	mutexWoken				// 第2位表示唤醒
+	mutexStarving			// 第3位表示饥饿
+	mutexWaiterShift = iota	// 值为3，表示低3位为状态，高位为等待者数量
+
+	// Mutex有两种模式的操作：正常和饥饿
+    // 
+    // 正常模式：等待者以FIFO顺序等待于队列中，但醒来的等待者与新到来的goroutine争夺锁
+	// 新来的goroutine有1个优势——它们正在cpu上运行，所以醒来的goroutine很可能抢夺失败。此时它会放在等待队列前面。
+    // 如果等待者超过1ms内未获取锁，它会将锁切换到饥饿模式
+	//
+	// 饥饿模式：锁的所有权直接从解锁的goroutine传递给队列前面的等待者
+    // 新到goroutine不会尝试获取锁，而是直接加入队列末尾
+	// 如果队列最后1个等待者获取锁，并且它等待不超过1ms则将锁切换回正常模式
+	starvationThresholdNs = 1e6 // 表示1e6 纳秒，即1ms
+)
+```
+
+其实正常和饥饿就是1个非公平与公平的关系。显然正常模式(非公平锁)性能更好。
+
+### Lock()
+
+```go
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		if race.Enabled {
+			race.Acquire(unsafe.Pointer(m))
+		}
+		return
+	}
+	// Slow path (outlined so that the fast path can be inlined)
+	m.lockSlow()
+}
+```
+
+如果锁状态为0则直接获取锁。否则则进入加锁自旋或等待环节：
+
+```go
+// 协程将一直阻塞于此函数直至获取锁
+func (m *Mutex) lockSlow() {
+	var waitStartTime int64
+	starving := false
+	awoke := false
+	iter := 0
+	old := m.state
+	for {
+		// 1.自旋逻辑处理：在 锁被占有 且 正常模式 且 允许自旋 情况下进行自旋
+		if old&(mutexLocked|mutexStarving) == mutexLocked && runtime_canSpin(iter) {
+			// Active spinning makes sense.
+			// Try to set mutexWoken flag to inform Unlock
+			// to not wake other blocked goroutines.
+			if !awoke && old&mutexWoken == 0 && old>>mutexWaiterShift != 0 &&
+				atomic.CompareAndSwapInt32(&m.state, old, old|mutexWoken) {
+				awoke = true
+			}
+			runtime_doSpin()	// 自旋等待，会执行30次PAUSE指令
+			iter++
+			old = m.state
+			continue
+		}
+		new := old
+		// 只有正常模式下才尝试直接获取锁
+		if old&mutexStarving == 0 {
+			new |= mutexLocked
+		}
+        // 处于锁定状态或饥饿模式，则等待者数量+1，协程准备进入等待队列
+		if old&(mutexLocked|mutexStarving) != 0 {
+			new += 1 << mutexWaiterShift
+		}
+		// The current goroutine switches mutex to starvation mode.
+		// But if the mutex is currently unlocked, don't do the switch.
+		// Unlock expects that starving mutex has waiters, which will not
+		// be true in this case.
+		if starving && old&mutexLocked != 0 {
+			new |= mutexStarving
+		}
+		if awoke {
+			// The goroutine has been woken from sleep,
+			// so we need to reset the flag in either case.
+			if new&mutexWoken == 0 {
+				throw("sync: inconsistent mutex state")
+			}
+			new &^= mutexWoken
+		}
+		if atomic.CompareAndSwapInt32(&m.state, old, new) {
+			if old&(mutexLocked|mutexStarving) == 0 {
+				break // 成功抢到锁则退出
+			}
+			// If we were already waiting before, queue at the front of the queue.
+			queueLifo := waitStartTime != 0
+			if waitStartTime == 0 {
+				waitStartTime = runtime_nanotime()
+			}
+            // 等待信号量
+			runtime_SemacquireMutex(&m.sema, queueLifo, 1)
+			starving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs
+			old = m.state
+			if old&mutexStarving != 0 {
+				// 此协程醒着且处于饥饿模式If this goroutine was woken and mutex is in starvation mode,
+				// ownership was handed off to us but mutex is in somewhat
+				// inconsistent state: mutexLocked is not set and we are still
+				// accounted as waiter. Fix that.
+				if old&(mutexLocked|mutexWoken) != 0 || old>>mutexWaiterShift == 0 {
+					throw("sync: inconsistent mutex state")
+				}
+				delta := int32(mutexLocked - 1<<mutexWaiterShift)
+				if !starving || old>>mutexWaiterShift == 1 {
+					// Exit starvation mode.
+					// Critical to do it here and consider wait time.
+					// Starvation mode is so inefficient, that two goroutines
+					// can go lock-step infinitely once they switch mutex
+					// to starvation mode.
+					delta -= mutexStarving
+				}
+				atomic.AddInt32(&m.state, delta)
+				break
+			}
+			awoke = true
+			iter = 0
+		} else {
+			old = m.state
+		}
+	}
+
+	if race.Enabled {
+		race.Acquire(unsafe.Pointer(m))
+	}
+}
+```
+
+
+
+
+
+
+
 # 数据访问
 
 目前数据访问部分将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
