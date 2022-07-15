@@ -180,11 +180,11 @@ Bean名称生成器(BeanNameGenerator)：
 
 指定**Bean初始化**方法有3种方式：
 
-1、`@PostConstruct `标注方法 
+1、javax插件式：`@PostConstruct `标注方法 
 
-2、实现 InitializingBean 接口的 afterPropertiesSet() 方法 
+2、Spring 接口：实现 InitializingBean 接口的 afterPropertiesSet() 方法 
 
-3、自定义初始化方法 
+3、Spring BeanDefinition：
 
 - XML 配置：`<bean init-method=”init” ... /> `
 
@@ -201,11 +201,11 @@ Bean名称生成器(BeanNameGenerator)：
 
 指定**Bean销毁方法**有3种方式：
 
-1、`@PreDestroy `标注方法 
+1、javax插件式方式：`@PreDestroy `标注方法 
 
-2、实现 DisposableBean 接口的 destroy() 方法 
+2、Spring 接口：实现 DisposableBean 接口的 destroy() 方法 
 
-3、自定义销毁方法 ：
+3、Spring BeanDefinition：
 
 - XML 配置：`<bean destroy="destroy" ... /> `
 
@@ -1184,7 +1184,7 @@ public class InitDestroyAnnotationBeanPostProcessor
 
 ### @Resource和@Autowired处理顺序
 
-从上面得知@Resouce由`CommonAnnotationBeanPostProcessor`处理，而`@Autowired`由`AutowiredAnnotationBeanPostProcessor`处理，那么这两的优先级就决定了谁的处理顺序在前。
+从上面得知@Resouce由`CommonAnnotationBeanPostProcessor`处理，而`@Autowired`由`AutowiredAnnotationBeanPostProcessor`处理，它们都实现了`InstantiationAwareBeanPostProcessors#postProcessProperties()`回调，那么这两的优先级就决定了谁的处理顺序在前：order越小优先级越高。
 
 ```java
 public class CommonAnnotationBeanPostProcessor{// 此处忽略其实现接口
@@ -1202,6 +1202,12 @@ public class AutowiredAnnotationBeanPostProcessor {// 此处忽略其实现接�
 ```
 
 从这里看出`AutowiredAnnotationBeanPostProcessor`优先级更低，说明**@Resource先于@Autowired注解处理**，即后者会覆盖前者。
+
+### @Resource和@Autowired区别(待续)
+
+在注入上没有任何区别，因为都是**调用的同一个依赖解析方法**，都会先通过类型查出所有bean，再根据优先级选择bean，选不出来再根据名称选择。
+
+在注解的属性上有区别。
 
 ## 自定义依赖注入注解
 
@@ -1395,7 +1401,9 @@ protected Object createBean(String beanName, RootBeanDefinition mbd, @Nullable O
 }
 ```
 
-6、Spring Bean 实例化前回调`InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation()`
+### 6.Bean实例化前回调
+
+`InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation()`
 
 ```java
 //AbstractAutowireCapableBeanFactory.java
@@ -1404,6 +1412,7 @@ protected Object resolveBeforeInstantiation(String beanName, RootBeanDefinition 
    	// 省略无关紧要的代码后：
     bean = applyBeanPostProcessorsBeforeInstantiation(targetType, beanName);
     if (bean != null) {
+        // 若实例化前回调返回代理bean，则只执行实例化后回调
         bean = applyBeanPostProcessorsAfterInitialization(bean, beanName);
     }     
     return bean;
@@ -1423,7 +1432,9 @@ protected Object applyBeanPostProcessorsBeforeInstantiation(Class<?> beanClass, 
 
 从这能看出，实例化前回调返回的代理对象会执行实例化后回调，但是不会执行之后的初始化回调和属性填充了。
 
-7、Spring Bean 实例化阶段 
+## doCreateBean
+
+### 7.Bean实例化
 
 实例化前回调执行完成后，若无代理对象产生，将进入doCreateBean()方法，开始实例化：
 
@@ -1529,66 +1540,459 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
 }
 ```
 
-创建bean实例：
+#### 选择构造器
 
 ```java
 // 使用适当的实例化策略为指定的 bean 创建一个新实例：工厂方法、构造函数自动装配或简单实例化。
 protected BeanWrapper createBeanInstance(String beanName, RootBeanDefinition mbd, @Nullable Object[] args) {
 	// 省略部分代码
-    // 根据@Autowired确定构造器
+    // 1.根据@Autowired确定构造器，有则调用该构造器
     Constructor<?>[] ctors = determineConstructorsFromBeanPostProcessors(beanClass, beanName);
     if (ctors != null || mbd.getResolvedAutowireMode() == AUTOWIRE_CONSTRUCTOR ||
         mbd.hasConstructorArgumentValues() || !ObjectUtils.isEmpty(args)) {
         return autowireConstructor(beanName, mbd, ctors, args);
     }
 
-    // 从BeanDefinition中获取是否设置有偏好的构造器? 
+    // 2.从BeanDefinition中获取是否设置有偏好的构造器? 
     // Spring5.1 新增，可以自己手动设置到BeanDefinition
     ctors = mbd.getPreferredConstructors();
     if (ctors != null) {
         return autowireConstructor(beanName, mbd, ctors, null);
     }
 
-    // 简单无参构造器直接创建实例
+    // 3.直接用默认无参构造器创建实例
     return instantiateBean(beanName, mbd);
 }
+```
 
-// 简单无参构造器创建实例如下：
-public Object instantiate(RootBeanDefinition bd, @Nullable String beanName, BeanFactory owner) {
-    // Don't override the class with CGLIB if no overrides.
+构造器的挑选是执行SmartInstantiationAwareBeanPostProcessor#determineCandidateConstructors()回调方法，目前容器和@Autowired注入有关的只有AutowiredAnnotationBeanPostProcessor：
+
+它确定构造器规则为
+
+> 1、判断构造器是否标记有@Autowired，有则直接用(只有1个构造方法能被标记@Autowired)
+>
+> 2、只有1个构造器且为有参构造器也直接用
+>
+> 3、返回null，即最后会进行默认无参构造器构造
+
+```java
+protected Constructor<?>[] determineConstructorsFromBeanPostProcessors(@Nullable Class<?> beanClass, String beanName)
+    throws BeansException {
+    if (beanClass != null && hasInstantiationAwareBeanPostProcessors())
+        for (SmartInstantiationAwareBeanPostProcessor bp : 
+             getBeanPostProcessorCache().smartInstantiationAware) {
+            Constructor<?>[] ctors = bp.determineCandidateConstructors(beanClass, beanName);
+            if (ctors != null) return ctors;
+        }
+    return null;
+}
+```
+
+#### autowire参数注入
+
+若挑选出的构造器带参数，则需要进行参数注入。
+
+从下面代码看，构造器参数注入的逻辑是将所有参数类型都进行依赖解析处理，然后反射调用构造器即可。
+
+依赖解析的具体实现看@Autowired分析环节里的依赖解析。
+
+```java
+// ConstructorResolver.java
+// autowire构造函数，从容器内找bean注入参数
+public BeanWrapper autowireConstructor(String beanName, RootBeanDefinition mbd,
+                                       @Nullable Constructor<?>[] chosenCtors, 
+                                       @Nullable Object[] explicitArgs) {
+    // 省略部分代码
+    if (constructorToUse == null || argsToUse == null) {
+        // 省略部分代码
+        // 解析@Autowired是否必须注入
+        boolean autowiring = (chosenCtors != null ||
+                              mbd.getResolvedAutowireMode() 
+                              == AutowireCapableBeanFactory.AUTOWIRE_CONSTRUCTOR);
+        // 省略部分代码
+        for (Constructor<?> candidate : candidates) {
+            int parameterCount = candidate.getParameterCount();
+            // 省略部分代码
+            argsHolder = createArgumentArray(
+                beanName, mbd, resolvedValues, bw, 
+                paramTypes, paramNames,getUserDeclaredConstructor(candidate), 
+                autowiring, candidates.length == 1);
+            // 省略部分代码
+        }
+        // 省略部分代码
+    }
+    // 构造器反射调用创建实例
+    bw.setBeanInstance(instantiate(beanName, mbd, constructorToUse, argsToUse));
+    return bw;
+}
+
+// 找到构造器参数bean，它的核心逻辑其实就是根据参数类型进行 依赖解析
+private ArgumentsHolder createArgumentArray(
+    String beanName, RootBeanDefinition mbd, 
+    @Nullable ConstructorArgumentValues resolvedValues,
+    BeanWrapper bw, Class<?>[] paramTypes, 
+    @Nullable String[] paramNames, Executable executable,
+    boolean autowiring, boolean fallback) {
+	// 省略部分代码
+	// 遍历参数挨着找bean
+    for (int paramIndex = 0; paramIndex < paramTypes.length; paramIndex++) {
+        // 参数类型
+        Class<?> paramType = paramTypes[paramIndex];
+        String paramName = (paramNames != null ? paramNames[paramIndex] : "");
+ 		// 省略部分代码
+        MethodParameter methodParam = MethodParameter.forExecutable(executable, paramIndex);
+     	// 解析自动注入参数：这个就是 依赖解析
+        // 它会调用 beanFactory.resolveDependency()根据类型查找需要的bean
+        // 具体实现看@Autowired注解详解的 依赖解析部分
+        Object autowiredArgument = resolveAutowiredArgument(
+            methodParam, beanName, autowiredBeanNames, converter, fallback);
+        args.rawArguments[paramIndex] = autowiredArgument;
+        args.arguments[paramIndex] = autowiredArgument;
+        args.preparedArguments[paramIndex] = autowiredArgumentMarker;
+        args.resolveNecessary = true;
+        // 省略部分代码           
+    }
+	// 注册依赖关系
+    for (String autowiredBeanName : autowiredBeanNames) {
+        this.beanFactory.registerDependentBean(autowiredBeanName, beanName);
+    }
+    return args;
+}
+```
+
+#### 实例化
+
+不管是参数注入构造，还是无参构造，都调用了SimpleInstantiationStrategy#instantiate()进行实例化：
+
+```java
+public Object instantiate(RootBeanDefinition bd, @Nullable String beanName, BeanFactory owner,
+                          final Constructor<?> ctor, Object... args) {
     if (!bd.hasMethodOverrides()) {
-		// 省略缓存代码
-        bd.resolvedConstructorOrFactoryMethod = constructorToUse;
-        // 直接无参构造器的newInstance()方法就创建实例了
-        return BeanUtils.instantiateClass(constructorToUse);
+       	// 省略安全检查
+        // 无方法覆盖需求则直接反射调用构造器即可创建实例
+        return BeanUtils.instantiateClass(ctor, args);
     }
-    // 如果需要覆盖方法，则需要CGLIB增强此类，生成一个代理对象
-    // 如@configuration标记的类且其中有@Bean标记的方法(这个方法需要被覆盖)
-    else {
-        // Must generate CGLIB subclass.
-        return instantiateWithMethodInjection(bd, beanName, owner);
+    // 需要方法覆盖情况：@Configuration标记的类中有@Bean方法时需要覆盖
+    // 此时必须CGLIB生成子类
+    else return instantiateWithMethodInjection(bd, beanName, owner, ctor, args);
+}
+```
+
+### populate
+
+#### 8.Bean实例化后回调
+
+这个bean实例化后回调居然是在AbstractAutowireCapableBeanFactory#populateBean()方法中执行?
+
+实例化后回调为：`InstantiationAwareBeanPostProcessors#postProcessBeforeInstantiation()`
+
+```java
+// 使用来自BeanDefinition属性值填充bean实例
+protected void populateBean(String beanName, RootBeanDefinition mbd, @Nullable BeanWrapper bw) {
+    // 遍历所有InstantiationAwareBeanPostProcessors执行实例化后回调
+    if (!mbd.isSynthetic() && hasInstantiationAwareBeanPostProcessors()) {
+        for (InstantiationAwareBeanPostProcessor bp : 
+             getBeanPostProcessorCache().instantiationAware) {
+            if (!bp.postProcessAfterInstantiation(bw.getWrappedInstance(), beanName)) {
+                return;
+            }
+        }
     }
+  	// 省略部分代码
+}
+```
+
+#### 9.postProcessProperties回调
+
+在populate()方法执行完实例化后回调后，将执行`InstantiationAwareBeanPostProcessors#postProcessProperties()`回调。
+
+这里最典型的是`AutowiredAnnotationBeanPostProcessor`对标记有@Autowired或@Value的属性和set方法进行注入。
+
+```java
+// 使用来自BeanDefinition属性值填充bean实例
+protected void populateBean(String beanName, RootBeanDefinition mbd, @Nullable BeanWrapper bw) {
+  	// 省略
+    if (hasInstAwareBpps) {
+        if (pvs == null) { pvs = mbd.getPropertyValues(); }
+        // postProcessProperties回调执行
+        // 此处典型的就是AutowiredAnnotationBeanPostProcessor进行属性和set方法的注入
+        for (InstantiationAwareBeanPostProcessor bp : 
+             getBeanPostProcessorCache().instantiationAware) {
+            PropertyValues pvsToUse = bp.postProcessProperties(
+                pvs, bw.getWrappedInstance(), beanName);
+            pvs = pvsToUse;
+        }
+    }
+  	// 省略部分代码
+}
+```
+
+### initializeBean
+
+doCreateBean()方法在执行完populate()方法会立刻执行initializeBean()方法，进行bean实例的初始化。
+
+```java
+protected Object initializeBean(String beanName, Object bean, @Nullable RootBeanDefinition mbd) {
+	// 省略安全检查
+    // aware接口回调执行
+    invokeAwareMethods(beanName, bean);
+   
+    Object wrappedBean = bean;
+    // 初始化前回调执行
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsBeforeInitialization(wrappedBean, beanName);
+    }
+
+    // 初始化方法执行
+    invokeInitMethods(beanName, wrappedBean, mbd);
+
+    // 初始化后回调执行
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsAfterInitialization(wrappedBean, beanName);
+    }
+    return wrappedBean;
+}
+```
+
+#### 10.Aware接口回调
+
+在初始化阶段，首先进行aware接口回调执行：
+
+可以看到这里仅有3个aware接口的回调会执行，那ApplicationContextAware接口的回调去哪了？它挪到了下面的初始化回调。
+
+```java
+private void invokeAwareMethods(String beanName, Object bean) {
+    if (bean instanceof Aware) {
+        if (bean instanceof BeanNameAware) 
+            ((BeanNameAware) bean).setBeanName(beanName);
+        if (bean instanceof BeanClassLoaderAware) {
+            ClassLoader bcl = getBeanClassLoader();
+            if (bcl != null) 
+                ((BeanClassLoaderAware) bean).setBeanClassLoader(bcl);
+        }
+        if (bean instanceof BeanFactoryAware) 
+            ((BeanFactoryAware) bean).setBeanFactory(
+            AbstractAutowireCapableBeanFactory.this);
+    }
+}
+```
+
+#### 11.Bean初始化前回调
+
+初始化阶段的第2步是回调`BeanPostProcessor#postProcessBeforeInitialization()`执行初始化前回调：
+
+```java
+public Object applyBeanPostProcessorsBeforeInitialization(Object existingBean, String beanName)
+    throws BeansException {
+    Object result = existingBean;
+    for (BeanPostProcessor processor : getBeanPostProcessors()) {
+        Object current = processor.postProcessBeforeInitialization(result, beanName);
+        if (current == null) {
+            return result;
+        }
+        result = current;
+    }
+    return result;
+}
+```
+
+在这需要注意有个`ApplicationContextAwareProcessor`的bean，它实现了BeanPostProcessor接口的初始化前回调，在这个回调中它会将ApplicationContext注入到bean内。
+
+还需要注意有个`CommonAnnotationBeanPostProcessor`在这里会处理生命周期中的`@PostConstruct`指定的初始化方法。这个算是javax方式指定的初始化方法，是Spring对javax的插件式支持。
+
+> 为什么不放到下一部分真正的初始化阶段执行呢？
+>
+> 因为对javax注解Spring是用CommonAnnotationBeanPostProcessor方式作为插件式bean提供的支持，这样可以不改动Spring构建bean的执行逻辑。在javax.annotation包在类路劲时才会去主动加载这个bean插件。
+>
+> 它支持@Resource、@PostConstruct、@PreDestory等注解。
+
+#### 12.Bean初始化
+
+初始化前回调执行完成后，就该执行Spring方式指定的初始化方法了：
+
+```java
+// AbstractAutowireCapableBeanFactory.java
+protected void invokeInitMethods(
+    String beanName,  Object bean, @Nullable RootBeanDefinition mbd)
+    throws Throwable {
+
+    boolean isInitializingBean = (bean instanceof InitializingBean);
+    if (isInitializingBean && (mbd == null || !mbd.hasAnyExternallyManagedInitMethod("afterPropertiesSet"))) {
+        // 省略部分代码
+		// InitializingBean接口指定的初始化方法执行
+        ((InitializingBean) bean).afterPropertiesSet();
+    }
+	// 执行BeanDefinition中设置的初始化方法
+    // 来源：1、XML配置, 2、@Bean指定, 3、Java API直接设置到BeanDefinition 
+    if (mbd != null && bean.getClass() != NullBean.class) {
+        String initMethodName = mbd.getInitMethodName();
+        if (StringUtils.hasLength(initMethodName) &&
+            !(isInitializingBean && "afterPropertiesSet".equals(initMethodName)) &&
+            !mbd.hasAnyExternallyManagedInitMethod(initMethodName)) {
+            invokeCustomInitMethod(beanName, bean, mbd);
+        }
+    }
+}
+```
+
+> 初始化方法的指定：
+> Spring方式：1.xml指定，2.@Bean指定，3.JavaAPI设置BeanDefinition，4.实现InitializingBean接口
+> javax方式：@PostConstruct指定
+
+这里仅会执行Spring方式指定的初始化方法，而javax方式是以插件式bean提供支持，在实例化前回调阶段执行。
+
+#### 13.Bean初始化后回调
+
+ 在初始化bean阶段的最后是初始化后回调执行：`BeanPostProcessor#postProcessAfterInitialization()`
+
+```java
+public Object applyBeanPostProcessorsAfterInitialization(Object existingBean, String beanName)
+      throws BeansException {
+
+   Object result = existingBean;
+   for (BeanPostProcessor processor : getBeanPostProcessors()) {
+      Object current = processor.postProcessAfterInitialization(result, beanName);
+      if (current == null) {
+         return result;
+      }
+      result = current;
+   }
+   return result;
+}
+```
+
+这里好像没什么熟悉的bean回调啊。
+
+#### 14.注册销毁回调
+
+在doCreateBean()方法创建好bean之后，会根据bean是否定义销毁回调方法将其注册到销毁回调集合中。
+
+```java
+protected void registerDisposableBeanIfNecessary(String beanName, Object bean, RootBeanDefinition mbd) {
+	// 省略部分代码
+    /* 	判断bean是否实现DisposableBean或BeanDefinition设置有销毁方法
+    	或者bean中有标记@PreDestory的方法*/
+    if (!mbd.isPrototype() && requiresDestruction(bean, mbd)) {
+        if (mbd.isSingleton()) {
+            // 将此bean包装到适配器DisposableBeanAdapter并注册到销毁集合
+            registerDisposableBean(beanName, new DisposableBeanAdapter(
+                bean, beanName, mbd, getBeanPostProcessorCache().destructionAware, acc));
+        }
+        // 省略其它scope处理
+    }
+}
+```
+
+从上面的条件可知只有原型bean没有销毁回调。这个适配器就不再这里分析了。
+
+## 单例bean预实例化完成回调
+
+在IOC容器refresh()的最后阶段，调用preInstantiateSingletons()预实例化所有单例bean完成后，会回调执行：`SmartInitializingSingleton#afterSingletonsInstantiated()`
+
+```java
+public void preInstantiateSingletons() throws BeansException {
+	// 省略部分代码
+    // 1、预实例化所有单例非懒加载bean
+    for (String beanName : beanNames) {
+		// 省略很多代码
+        getBean(beanName);
+    }
+
+    // SmartInitializingSingleton回调
+    for (String beanName : beanNames) {
+        Object singletonInstance = getSingleton(beanName);
+        if (singletonInstance instanceof SmartInitializingSingleton) {
+			// 省略无关代码后
+            smartSingleton.afterSingletonsInstantiated();
+        }
+    }
+}
+```
+
+在预实例化单例bean完成后，会把容器内所有实现了`SmartInitializingSingleton`接口的bean都进行回调通知。
+
+典型实现`EventListenerMethodProcessor`，还不清楚有什么用。
+
+## doClose
+
+当调用AbstractApplicationContext#close()方法结束Spring运行时，会进入到doClose()方法：
+
+```java
+// AbstractApplicationContext.java
+// 推送上下文关闭事件，销毁单例bean
+protected void doClose() {
+	// 省略一些前置检查
+    
+    // 推送关闭消息
+    publishEvent(new ContextClosedEvent(this));
+    
+    // 停止所有生命周期bean
+    if (this.lifecycleProcessor != null) {
+        this.lifecycleProcessor.onClose();
+    }
+
+    // 销毁所有单例bean
+    destroyBeans();
+
+    // Close the state of this context itself.
+    closeBeanFactory();
+
+    // Let subclasses do some final clean-up if they wish...
+    onClose();
+
+    // Reset local application listeners to pre-refresh state.
+    if (this.earlyApplicationListeners != null) {
+        this.applicationListeners.clear();
+        this.applicationListeners.addAll(this.earlyApplicationListeners);
+    }
+
+    // Switch to inactive.
+    this.active.set(false);
 }
 ```
 
 
 
-8、Spring Bean 实例化后阶段 
-9、Spring Bean 属性赋值前阶段 
-10、Spring Bean Aware接口回调阶段
-11、Spring Bean 初始化前阶段 
-12、Spring Bean 初始化阶段 
-13、Spring Bean 初始化后阶段 
-14、Spring Bean 初始化完成阶段 
-15、Spring Bean 销毁前阶段 
-16、Spring Bean 销毁阶段 
-17、Spring Bean 垃圾收集 
+### 15.Bean销毁前回调 
 
+在doClose()方法的销毁单例bean步骤，会对所有注册到销毁集合的单例bean进行销毁方法的回调：
 
+注册到销毁集合的是bean的适配器：`DisposableBeanAdapter`
 
+```java
+public void destroy() {
+    if (!CollectionUtils.isEmpty(this.beanPostProcessors)) {
+        // 1.调用DestructionAwareBeanPostProcessor#postProcessBeforeDestruction()回调
+        for (DestructionAwareBeanPostProcessor processor : this.beanPostProcessors) {
+            processor.postProcessBeforeDestruction(this.bean, this.beanName);
+        }
+    }
+	// 2.bean实现了DisposableBean接口则调用销毁bean.destory()方法
+    if (this.invokeDisposableBean) {
+        ((DisposableBean) this.bean).destroy();
+    }
+	// 3.bean实现了AutoCloseable接口，Spring会贴心的主动调用close()方法释放资源
+    if (this.invokeAutoCloseable) {
+        ((AutoCloseable) this.bean).close();
+    }
+    // 4.调用BeanDefinition指定的销毁方法
+    else if (this.destroyMethod != null) {
+        invokeCustomDestroyMethod(this.destroyMethod);
+    }
+    else if (this.destroyMethodName != null) {
+        Method destroyMethod = determineDestroyMethod(this.destroyMethodName);
+        if (destroyMethod != null) {
+            invokeCustomDestroyMethod(ClassUtils.getInterfaceMethodIfPossible(destroyMethod, this.bean.getClass()));
+        }
+    }
+}
+```
 
+在这里需要注意的是第1步对DestructionAwareBeanPostProcessor的回调执行，有一个典型的实现者`CommonAnnotationBeanPostProcessor`，它会对bean中标记`@PreDestory`的销毁方法进行回调。
 
+### 16.Bean销毁 
 
+在bean的销毁前回调方法都执行完成后，Spring会将该bean及其BeanDefinition从所有相关集合中移除，无指向它的引用后，JVM自动回收内存。
 
 # ClassPathXmlApplicationContext
 
