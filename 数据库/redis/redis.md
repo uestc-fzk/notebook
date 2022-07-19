@@ -1778,8 +1778,6 @@ void testStream() throws InterruptedException {
 }
 ```
 
-
-
 ## 缓存问题
 
 Redis缓存的使用，极大的提升了应用程序的性能和效率，特别是数据查询方面。但同时，它也带来了一些问题。其中，最要害的问题，就是数据的一致性问题，从严格意义上讲，这个问题无解。如果对数据的一致性要求很高，那么就不能使用缓存。
@@ -1901,7 +1899,7 @@ key可能会在某些时间点被超高并发地访问，是一种非常“热�
 
 ## 缓存读写策略
 
-### 旁路缓存模式
+### 旁路缓存模式(读多写少)
 
 **Cache Aside Pattern(旁路缓存模式) **是使用比较多的一个缓存读写模式，比较适合**读多写少**的场景。
 
@@ -1916,7 +1914,7 @@ key可能会在某些时间点被超高并发地访问，是一种非常“热�
 1. 更新DB
 2. 删除缓存
 
-延迟双删：缩短不一致时间，最终一致。
+**延迟双删**：缩短不一致时间，最终一致。
 
 ```java
 // 线程1
@@ -1924,6 +1922,12 @@ key可能会在某些时间点被超高并发地访问，是一种非常“热�
 					// 线程2
     				更新DB-->删cache------------------定时任务或延时消息-------->删cache
 ```
+
+### 异步缓存写入(读多写多)
+
+Write Behind Pattern异步缓存写入，只更新缓存，不直接更新DB，而是异步将缓存数据更新到DB中，有点类似于文件异步刷盘策略。
+
+应用场景：写超级多的情况，如浏览量、点赞量。再以后台线程以一定频率刷新到DB中即可。
 
 ## Jedis
 
@@ -3554,7 +3558,7 @@ SENTINEL announce-hostnames no
 
 - 每个 Sentinel 都订阅了被它监视的所有master和replica的 `sentinel:hello` 频道， 查找之前未出现过的 sentinel （looking for unknown sentinels）。 当一个 Sentinel 发现一个新的 Sentinel 时， 它会将新的 Sentinel 添加到一个列表中， 这个列表保存了 Sentinel 已知的， 监视同一个主服务器的所有其他 Sentinel 。
 
-- Sentinel 发送的信息中还包括完整的主服务器当前配置（configuration）。 如果一个 Sentinel 包含的主服务器配置比另一个 Sentinel 发送的配置要旧， 那么这个 Sentinel 会立即升级到新配置上。
+- Sentinel 发送的信息中还包括完整的**主服务器当前配置**（configuration）。 如果一个 Sentinel 包含的主服务器配置比另一个 Sentinel 发送的配置要旧， 那么这个 Sentinel 会**立即升级到新配置上**。
 
 - 添加新的 sentinel之前，如果列表中存在相同的id或者地址(ip+端口)的sentinel，则移除旧的，加新的。
 
@@ -4401,7 +4405,7 @@ not connected> exit
 2. master 节点将当前*replication offset* 回复给该slave节点
 3. 该slave节点在未应用至replication offset之前不做任何操作，以保证master传来的数据均被处理。
 4. 该slave 节点进行故障转移，从集群中大多数的master节点获取epoch，然后广播自己的最新配置
-5. 原master节点收到配置更新:解除客户端的访问阻塞，回复重定向信息，以便客户端可以和新master通信。
+5. 原master节点收到配置更新，解除客户端的访问阻塞，回复重定向信息，以便客户端可以和新master通信。
 
 当该slave节点(将切换为新master节点)处理完来自master的所有复制，客户端的访问将会自动由原master节点切换至新master节点
 
