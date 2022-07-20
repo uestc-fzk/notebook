@@ -651,6 +651,145 @@ producer.send(message);
 
 ## 事务消息
 
+### 使用
+
+事务消息有3种状态：
+
+```java
+public enum LocalTransactionState {
+    COMMIT_MESSAGE,		// 提交事务，表示运行消费者消费该消息
+    ROLLBACK_MESSAGE,	// 回滚事务，表示该消息被删除，不允许消费
+    UNKNOW,				// 中间状态，表示需要MQ回查才能确认
+}
+```
+
+发送事务消息示例：
+
+```java
+public static void main(String[] args) throws MQClientException, InterruptedException {
+    TransactionListener transactionListener = new TransactionListenerImpl();
+    TransactionMQProducer producer = new TransactionMQProducer("please_rename_unique_group_name");
+    ExecutorService executorService = new ThreadPoolExecutor(2, 5, 100, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(2000), new ThreadFactory() {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread thread = new Thread(r);
+            thread.setName("client-transaction-msg-check-thread");
+            return thread;
+        }
+    });
+
+    producer.setExecutorService(executorService);
+    producer.setTransactionListener(transactionListener);
+    producer.start();
+
+    String[] tags = new String[]{"TagA", "TagB", "TagC", "TagD", "TagE"};
+    for (int i = 0; i < 10; i++) {
+        try {
+            Message msg =
+                new Message("TopicTest1234", tags[i % tags.length], "KEY" + i,
+                            ("Hello RocketMQ " + i).getBytes(RemotingHelper.DEFAULT_CHARSET));
+            SendResult sendResult = producer.sendMessageInTransaction(msg, null);
+            System.out.printf("%s%n", sendResult);
+
+            Thread.sleep(10);
+        } catch (MQClientException | UnsupportedEncodingException e) {
+            e.printStackTrace();
+        }
+    }
+
+    for (int i = 0; i < 100000; i++) {
+        Thread.sleep(1000);
+    }
+    producer.shutdown();
+}
+
+static class TransactionListenerImpl implements TransactionListener {
+    private final ConcurrentHashMap<String, Integer> localTrans = new ConcurrentHashMap<>();
+
+    /**
+     * 当发送 事务prepare(half)消息成功后，此方法将被调用
+     *
+     * @param msg Half(prepare) message
+     * @param arg Custom business parameter
+     * @return Transaction state
+     */
+    public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+        try {
+            /*
+                 省略本地事务处理
+                 */
+
+            // 本地事务处理成功，则向broker发送commit
+            return LocalTransactionState.COMMIT_MESSAGE;
+        } catch (Exception e) {
+            // 本地事务处理失败，向broker发送rollback
+            localTrans.put(msg.getTransactionId(), 2);// 只需要记录处理失败的事务id即可
+            return LocalTransactionState.ROLLBACK_MESSAGE;
+        }
+    }
+
+    /**
+     * 当broker没收到生产者关于prepare消息返回的状态，broker会发送检查消息来检查事务状态
+     * 此方法将被调用用以检查事务状态
+     *
+     * @param msg Check message
+     * @return Transaction state
+     */
+    public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        Integer status = localTrans.get(msg.getTransactionId());
+        if (status != null) {
+            switch (status) {
+                case 0:
+                    return LocalTransactionState.UNKNOW;
+                case 1:
+                    return LocalTransactionState.COMMIT_MESSAGE;
+                case 2:
+                    return LocalTransactionState.ROLLBACK_MESSAGE;
+            }
+        }
+        return LocalTransactionState.COMMIT_MESSAGE; // 默认认为是成功的
+    }
+}
+```
+
+### 原理
+
+RocketMQ采用**2PC思想**实现事务消息提交，同时增加了一个**补偿逻辑**处理二阶段超时或失败的消息。
+
+如下图：(图来自官方)
+
+![RocketMQ事务消息](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_10.png)
+
+当第4步二阶段提交commit或回滚rollback发送失败时，broker会主动回查生产者检查事务执行状态。
+
+**事务消息在一阶段对消费者不可见：**
+
+就像延时消息那样，事务消息会被原topic和queueId会被保存到消息属性中，topic被修改为内部Half主题：`RMQ_SYS_TRANS_HALF_TOPIC`，进而存入CommitLog和转发到相应ConsumeQueue中。此时消费者是无法看见这条消息的。
+
+**Op消息的引入**：
+
+为了标记Half消息的状态，RocketMQ又引入了Op消息，内部特殊的Topic，存储内容为对应的Half消息的消费队列offset。
+
+用Op消息标识事务消息已经确定的状态（Commit或者Rollback）。如果一条事务消息没有对应的Op消息，说明这个事务的状态未知(可能是二阶段失败了)。
+
+![Op消息存储和对应关系](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_12.png)
+
+**二阶段提交或回滚**：
+
+若生产者对事务消息进行commit操作，broker将half消息取出，改回原本的topic和queueId，再一次将消息写入CommitLog文件，此时消息将被转发到正确的topic和queueId从而**消费者可见**。
+
+若生产者发送rollback操作，broker啥也不干，仅仅执行后面的添加Op消息标记此消息已经处理。此时**消息可认为被删除了，消费者不可见**。
+
+事务消息无论是Commit或者Rollback都会记录一个Op操作。
+
+**二阶段失败处理**：
+
+生产者在二阶段做Commit时出现网络问题而失败了，RocketMQ提供了补偿机制---回查。
+
+broker对未知状态half消息(即没有Op标记的)发起回查，生产者需返回commit或rollback，进而更新checkpoint。
+
+注意：rocketmq默认回查15次，否则默认回滚该消息。
+
 ## 批量消息
 
 生产者进行消息发送时可以一次发送多条消息，这可以大大提升Producer的发送效率。不过需要注意以下几点： 
@@ -674,6 +813,18 @@ Producer发送的消息结构如下：
 [RocketMQ整体架构原图](https://www.processon.com/view/link/62a1b35b7d9c08733ec26b38)
 
 ![RocketMQ整体架构图](rocketmq.assets/RocketMQ整体架构图.png)
+
+## 设计原因
+
+官方架构图：https://github.com/apache/rocketmq/blob/master/docs/cn/architecture.md
+
+官方消息存储设计：https://github.com/apache/rocketmq/blob/master/docs/cn/design.md
+
+下图来自官方：
+
+![消费队列](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_1.png)
+
+RocketMQ消费队列设计原因：https://rocketmq.apache.org/rocketmq/how-to-support-more-queues-in-rocketmq/
 
 # 消息发送分析
 
@@ -1314,7 +1465,7 @@ public class TransientStorePool {
         byteBuffer.limit(fileSize);
         this.availableBuffers.offerFirst(byteBuffer);
     }
-    // 向缓冲池申请内存
+    // 向缓冲池申请内存，一次申请1gb，因为CommitLog定长1gb
     public ByteBuffer borrowBuffer() {
         ByteBuffer buffer = availableBuffers.pollFirst();
         if (availableBuffers.size() < poolSize * 0.4) {
@@ -1329,7 +1480,9 @@ public class TransientStorePool {
 
 它会利用com.sun.jna.Library库锁定该批内存，避免被换到交换区，以此提高性能。
 
-瞬态缓冲池作用：实现内存级别读写分离，将写操作从CommitLog的内存映射缓存中剥离到缓冲池的堆外直接内存。
+瞬态缓冲池作用：实现**内存级别读写分离**，将写操作从CommitLog的内存映射缓存中剥离到缓冲池的堆外直接内存。在写非常多的时候可以使用以**降低commitlog文件虚拟内存映射的页面置换压力**。
+
+默认情况下最多可缓存5g消息，即5个CommitLog文件量。
 
 ## CommitLog
 
@@ -1373,6 +1526,7 @@ public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
     int mappedFileSize = this.mappedFileSize;
     long offset = startIndex * CQ_STORE_UNIT_SIZE;// 单个条目默认20B
     if (offset >= this.getMinLogicOffset()) {
+        // 根据offset定位MappedFile，具体实现可以看上面对MappedFile的分析
         MappedFile mappedFile = this.mappedFileQueue.findMappedFileByOffset(offset);
         if (mappedFile != null)
             // 这里会返回从给定位置到readPosition指针之间的缓冲区切片
@@ -1513,7 +1667,7 @@ public boolean putKey(final String key, final long phyOffset, final long storeTi
 
 从第2步和第5步可以推动出，该index文件解决哈希冲突用的链表法，在2000w索引条目500w哈希槽情况下，平均链表长度为4。这样要求我们要处理好消息的key，不然可能会导致查询消息时遍历超长链表。
 
-### seletePhyOffset
+### 以key查消息
 
 ```java
 /**
@@ -1588,6 +1742,22 @@ public void selectPhyOffset(final List<Long> phyOffsets, final String key, final
 大致步骤：`key-->定位哈希槽-->Index条目-->沿链表向上找`
 
 此方法仅仅只是将key的哈希码与开始时间戳和结束时间戳一起过滤后得到的消息物理偏移量集合。上层方法如果需要根据key查消息还得去CommitLog查询消息key进一步验证。
+
+## 页缓存和内存映射
+
+**页缓存（PageCache)是OS对文件的缓存**，用于加速对文件的读写。
+
+OS使用PageCache机制将一部分内存用作PageCache，程序对文件进行顺序读写的速度**几乎接近于内存的读写速度**。
+
+数据写入时OS先写Cache，随后通过异步的方式由pdflush内核线程将Cache内的数据刷盘至物理磁盘上。
+
+对于数据的读取，如果一次读取文件时出现未命中PageCache的情况，OS从物理磁盘上访问读取文件的同时，会顺序对其他相邻块的数据文件进行**预读取**。
+
+在RocketMQ中，ConsumeQueue逻辑消费队列存储的数据较少，并且是顺序读取，在page cache机制的预读取作用下，Consume Queue文件的读性能几乎接近读内存，即使在有消息堆积情况下也不会影响性能。
+
+而对于CommitLog消息存储的日志数据文件来说，读取消息内容时候会产生较多的随机访问读取，严重影响性能。如果选择合适的系统IO调度算法，比如设置调度算法为“Deadline”（此时块存储采用SSD的话），随机读的性能也会有所提升。
+
+另外，RocketMQ主要通过MappedByteBuffer对文件进行读写操作。其中，利用了NIO中的FileChannel模型将磁盘上的物理文件直接映射到用户态的内存地址中（这种Mmap的方式减少了传统IO将磁盘文件数据在操作系统内核地址空间的缓冲区和用户应用程序地址空间的缓冲区之间来回进行拷贝的性能开销），将对文件的操作转化为直接对内存地址进行操作，从而极大地提高了文件的读写效率（正因为需要使用内存映射机制，故RocketMQ的**文件存储都使用定长结构来存储，方便一次将整个文件映射至内存**）。
 
 ## 消息转发reput
 
@@ -1879,21 +2049,18 @@ public CompletableFuture<PutMessageStatus> submitFlushRequest(AppendMessageResul
     // Asynchronous flush
     // TODO 2.异步刷盘，默认
     else {
-        // 2.1 如果没开瞬态缓冲区，则缓存异步刷盘线程
-        if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
-            flushCommitLogService.wakeup();// 缓存异步刷盘线程
-        } else {
-            // 2.2 开启了瞬态缓冲区，则唤醒提交线程
-            commitLogService.wakeup();// 唤醒提交线程
-        }
+        // 2.1 如果没开瞬态缓冲区，则唤醒异步刷盘线程
+        if (!this.defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) 
+            flushCommitLogService.wakeup();
+        // 2.2 开启了瞬态缓冲区，则唤醒提交线程
+        else commitLogService.wakeup();
+
         return CompletableFuture.completedFuture(PutMessageStatus.PUT_OK);
     }
 }
 ```
 
 在同步刷盘且需要返回ACK情况下，则发送者线程会等待消息落盘才能返回。其他情况都是可以直接返回PUT_OK了。
-
-其实在异步刷盘情况下，
 
 ### 同步刷盘
 
@@ -2251,7 +2418,7 @@ CommitLog文件删除条件：`文件超过72h && (到凌晨4点了 || 磁盘空
 
 > 对于ConsumeQueue文件的定期删除这里就不分析了，有一点需要注意，Index定期删除在哪呢？
 >
-> 要删除Index文件，需要保证此消息索引不会被消费者使用，即它已经在ConsumeQueue上删除了，所以ConsumeQueue定时删除方法在最后会调用`indexService.deleteExpiredFile(minOffset);`去删除ConsumeQueue上消费者已经看不见的消息的索引文件。
+> 要删除Index文件，需要保证此消息索引不会被消费者使用，即它已经在ConsumeQueue上删除了，所以ConsumeQueue定时删除方法在最后会调用`indexService.deleteExpiredFile(minOffset);`去删除ConsumeQueue上消费者已经看不见的消息的索引文件，它删除时直接根据Index文件头中最大消息偏移量做判断就行了。
 
 有一个问题，CommitLog文件删除的时候会不会判断该文件是否写满？从这里看没写满也会删，再创新文件嘛，但是CommitLog文件名是`0000000000000000000000000`这种消息偏移量，没写满怎么搞？
 
@@ -2265,13 +2432,13 @@ CommitLog文件删除条件：`文件超过72h && (到凌晨4点了 || 磁盘空
 
 # 消息消费分析
 
-消费者组集群有两种消费模式：
+**消费者组集群有两种消费模式：**
 
 ![消费者模型](rocketmq.assets/消费者模型.png)
 
 广播模式则每个消费者都能消费每条消息，集群模式则是topic下某条消息只能被一个消费者消费。默认是集群模型。
 
-消费进度保存
+**消费进度保存：**
 
 广播模式：消费进度保存在consumer端。因为广播模式下consumer group中每个consumer都会消费所有消息，但它们的消费进度是不同。所以consumer各自保存各自的消费进度
 
@@ -4260,7 +4427,7 @@ RocketMQ的多master多slave模式有两种复制方式：同步双写和异步�
 
 # RocketMQ与Kafka比较
 
-Kafka性能强于RocketMQ
+Kafka吞吐量强于RocketMQ。
 
 RocketMQ功能性更好：
 
@@ -4273,3 +4440,5 @@ RocketMQ功能性更好：
 > 4.顺序消息
 
 再平衡不同。
+
+RocketMQ官方提供的比较：https://rocketmq.apache.org/docs/motivation/
