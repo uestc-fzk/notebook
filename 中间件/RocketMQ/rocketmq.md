@@ -758,7 +758,7 @@ RocketMQ采用**2PC思想**实现事务消息提交，同时增加了一个**补
 
 如下图：(图来自官方)
 
-![RocketMQ事务消息](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_10.png)
+![rocketmq_design_10](rocketmq.assets/rocketmq_design_10.png)
 
 当第4步二阶段提交commit或回滚rollback发送失败时，broker会主动回查生产者检查事务执行状态。
 
@@ -772,7 +772,7 @@ RocketMQ采用**2PC思想**实现事务消息提交，同时增加了一个**补
 
 用Op消息标识事务消息已经确定的状态（Commit或者Rollback）。如果一条事务消息没有对应的Op消息，说明这个事务的状态未知(可能是二阶段失败了)。
 
-![Op消息存储和对应关系](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_12.png)
+![rocketmq_design_12](rocketmq.assets/rocketmq_design_12.png)
 
 **二阶段提交或回滚**：
 
@@ -822,7 +822,7 @@ Producer发送的消息结构如下：
 
 下图来自官方：
 
-![消费队列](https://github.com/apache/rocketmq/raw/master/docs/cn/image/rocketmq_design_1.png)
+![rocketmq_design_1](rocketmq.assets/rocketmq_design_1.png)
 
 RocketMQ消费队列设计原因：https://rocketmq.apache.org/rocketmq/how-to-support-more-queues-in-rocketmq/
 
@@ -2696,12 +2696,12 @@ public class PullMessageService extends ServiceThread {
     private final LinkedBlockingQueue<PullRequest> pullRequestQueue = new LinkedBlockingQueue<PullRequest>();
     private final MQClientInstance mQClientFactory;
     private final ScheduledExecutorService scheduledExecutorService = Executors
-            .newSingleThreadScheduledExecutor(new ThreadFactory() {
-                @Override
-                public Thread newThread(Runnable r) {
-                    return new Thread(r, "PullMessageServiceScheduledThread");
-                }
-            });
+        .newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "PullMessageServiceScheduledThread");
+            }
+        });
 
     // 延迟执行拉取请求，即延迟将请求放入阻塞队列
     public void executePullRequestLater(final PullRequest pullRequest, final long timeDelay) {
@@ -2712,18 +2712,13 @@ public class PullMessageService extends ServiceThread {
                     PullMessageService.this.executePullRequestImmediately(pullRequest);
                 }
             }, timeDelay, TimeUnit.MILLISECONDS);
-        } else {
-            log.warn("PullMessageServiceScheduledThread has shutdown");
         }
     }
 
     // 立刻执行拉取请求，即立刻将请求放入阻塞队列
     public void executePullRequestImmediately(final PullRequest pullRequest) {
-        try {
-            this.pullRequestQueue.put(pullRequest);
-        } catch (InterruptedException e) {
-            log.error("executePullRequestImmediately pullRequestQueue.put", e);
-        }
+		// 省略try/catch
+        this.pullRequestQueue.put(pullRequest);
     }
     /** 根据拉取请求，执行拉取消息 */
     private void pullMessage(final PullRequest pullRequest) {
@@ -2733,8 +2728,6 @@ public class PullMessageService extends ServiceThread {
             DefaultMQPushConsumerImpl impl = (DefaultMQPushConsumerImpl) consumer;
             // 让消费者组自己去拉取消息
             impl.pullMessage(pullRequest);
-        } else {
-            log.warn("No matched consumer for the PullRequest {}, drop it", pullRequest);
         }
     }
 
@@ -3236,7 +3229,7 @@ RocketMQ并没有实现真正的推模式，而是以`拉模式+长轮询+拉请
 switch (response.getCode()) {
         // 5.1 成功则设置响应体，并调用Netty网络接口将响应发送到消费者端
     case ResponseCode.SUCCESS:
-		// 省略部分代码
+        // 省略部分代码
         break;
         // 5.2 消息没找到
     case ResponseCode.PULL_NOT_FOUND:
@@ -3257,7 +3250,7 @@ switch (response.getCode()) {
             response = null;
             break;
         }
-	// 省略其他情况
+        // 省略其他情况
 }
 
 // 6.如果有提交消费位移，且当前broker为master，则更新消费进度
@@ -3412,6 +3405,10 @@ dispatchRequest.getQueueId(), dispatchRequest.getConsumeQueueOffset() + 1,dispat
 
 ## 再平衡
 
+[再平衡流程图原图](https://www.processon.com/view/link/62a06054e401fd2930a8d141)
+
+![再平衡流程](rocketmq.assets/顺序消息流程.png)
+
 在上面拉取消息服务分析中，拉取消息请求`PullRequest`的来源还没有分析，它的来源正是再平衡过程中创建的，消费者组启动过程完成会主动调用1次再平衡。
 
 消息队列的再平衡由`RebalanceService`线程定时调度，它只是负责每20s调度1次，具体的实现是由每个消费者组`DefaultMQPushConsumerImpl`去实现的.
@@ -3443,28 +3440,20 @@ Collections.sort(cidAll);
 // 3.根据分配策略进行队列分配
 AllocateMessageQueueStrategy strategy = this.allocateMessageQueueStrategy;
 List<MessageQueue> allocateResult = null;
-try {
-    allocateResult = strategy.allocate(
-        this.consumerGroup,
-        this.mQClientFactory.getClientId(),
-        mqAll,
-        cidAll);
-} catch (Throwable e) {
-    log.error("AllocateMessageQueueStrategy.allocate Exception. allocateMessageQueueStrategyName={}", strategy.getName(),
-              e);
-    return;
-}
+allocateResult = strategy.allocate(
+    this.consumerGroup,
+    this.mQClientFactory.getClientId(),
+    mqAll,
+    cidAll);
+
 Set<MessageQueue> allocateResultSet = new HashSet<MessageQueue>();
-if (allocateResult != null) {
+if (allocateResult != null)
     allocateResultSet.addAll(allocateResult);
-}
 
 // 4.根据分配结果更新本地的ProcessQueue
 boolean changed = this.updateProcessQueueTableInRebalance(topic, allocateResultSet, isOrder);
-if (changed) {
-    // 省略日志打印
+if (changed)
     this.messageQueueChanged(topic, mqSet, allocateResultSet);
-}
 ```
 
 上面的第1步和第2步比较简单，下面就着重分析第3步根据分配策略分配队列和第4步更新本地处理队列。
@@ -3505,7 +3494,8 @@ if (changed) {
 private boolean updateProcessQueueTableInRebalance(final String topic, final Set<MessageQueue> mqSet,final boolean isOrder) {
     boolean changed = false;
     // 1.先遍历当前处理队列，与新分配的队列比较，不存在的则移除并停止ProcessQueue的消息消费
-    Iterator<Entry<MessageQueue, ProcessQueue>> it = this.processQueueTable.entrySet().iterator();
+    Iterator<Entry<MessageQueue, ProcessQueue>> it = 
+        this.processQueueTable.entrySet().iterator();
     while (it.hasNext()) {
         Entry<MessageQueue, ProcessQueue> next = it.next();
         MessageQueue mq = next.getKey();
@@ -3522,6 +3512,7 @@ private boolean updateProcessQueueTableInRebalance(final String topic, final Set
             }
         }// 省略其它判断
     }
+    
     // 2.再遍历新分配队列，与处理队列比较，不存在的则创建PullRequest拉取请求任务
     List<PullRequest> pullRequestList = new ArrayList<PullRequest>();
     for (MessageQueue mq : mqSet) {
@@ -3875,6 +3866,147 @@ class DeliverDelayedMessageTimerTask implements Runnable {
 
 从延时消息被持久化两次来考虑的话，就**最好不要把大体积消息和很多消息设为延时消息**。
 
+## 事务消息
+
+### 使用
+
+事务消息有3种状态：
+
+```java
+public enum LocalTransactionState {
+    COMMIT_MESSAGE,		// 提交事务，表示运行消费者消费该消息
+    ROLLBACK_MESSAGE,	// 回滚事务，表示该消息被删除，不允许消费
+    UNKNOW,				// 中间状态，表示需要MQ回查才能确认
+}
+```
+
+发送事务消息示例：
+
+```java
+public static void main(String[] args) throws MQClientException, InterruptedException {
+    TransactionListener transactionListener = new TransactionListenerImpl();
+    TransactionMQProducer producer = new TransactionMQProducer("please_rename_unique_group_name");
+    ExecutorService executorService = new ThreadPoolExecutor(2, 5, 100, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(2000), new ThreadFactory() {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread thread = new Thread(r);
+            thread.setName("client-transaction-msg-check-thread");
+            return thread;
+        }
+    });
+
+    producer.setExecutorService(executorService);
+    producer.setTransactionListener(transactionListener);
+    producer.start();
+
+    String[] tags = new String[]{"TagA", "TagB", "TagC", "TagD", "TagE"};
+    for (int i = 0; i < 10; i++) {
+        try {
+            Message msg =
+                new Message("TopicTest1234", tags[i % tags.length], "KEY" + i,
+                            ("Hello RocketMQ " + i).getBytes(RemotingHelper.DEFAULT_CHARSET));
+            SendResult sendResult = producer.sendMessageInTransaction(msg, null);
+            System.out.printf("%s%n", sendResult);
+
+            Thread.sleep(10);
+        } catch (MQClientException | UnsupportedEncodingException e) {
+            e.printStackTrace();
+        }
+    }
+
+    for (int i = 0; i < 100000; i++) {
+        Thread.sleep(1000);
+    }
+    producer.shutdown();
+}
+
+static class TransactionListenerImpl implements TransactionListener {
+    private final ConcurrentHashMap<String, Integer> localTrans = new ConcurrentHashMap<>();
+
+    /**
+     * 当发送 事务prepare(half)消息成功后，此方法将被调用
+     *
+     * @param msg Half(prepare) message
+     * @param arg Custom business parameter
+     * @return Transaction state
+     */
+    public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+        try {
+            /*
+                 省略本地事务处理
+                 */
+
+            // 本地事务处理成功，则向broker发送commit
+            return LocalTransactionState.COMMIT_MESSAGE;
+        } catch (Exception e) {
+            // 本地事务处理失败，向broker发送rollback
+            localTrans.put(msg.getTransactionId(), 2);// 只需要记录处理失败的事务id即可
+            return LocalTransactionState.ROLLBACK_MESSAGE;
+        }
+    }
+
+    /**
+     * 当broker没收到生产者关于prepare消息返回的状态，broker会发送检查消息来检查事务状态
+     * 此方法将被调用用以检查事务状态
+     *
+     * @param msg Check message
+     * @return Transaction state
+     */
+    public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        Integer status = localTrans.get(msg.getTransactionId());
+        if (status != null) {
+            switch (status) {
+                case 0:
+                    return LocalTransactionState.UNKNOW;
+                case 1:
+                    return LocalTransactionState.COMMIT_MESSAGE;
+                case 2:
+                    return LocalTransactionState.ROLLBACK_MESSAGE;
+            }
+        }
+        return LocalTransactionState.COMMIT_MESSAGE; // 默认认为是成功的
+    }
+}
+```
+
+### 原理
+
+RocketMQ采用**2PC思想**实现事务消息提交，同时增加了一个**补偿逻辑**处理二阶段超时或失败的消息。
+
+如下图：(图来自官方)
+
+![rocketmq_design_10](rocketmq.assets/rocketmq_design_10.png)
+
+当第4步二阶段提交commit或回滚rollback发送失败时，broker会主动回查生产者检查事务执行状态。
+
+**事务消息在一阶段对消费者不可见：**
+
+就像延时消息那样，事务消息会被原topic和queueId会被保存到消息属性中，topic被修改为内部Half主题：`RMQ_SYS_TRANS_HALF_TOPIC`，进而存入CommitLog和转发到相应ConsumeQueue中。此时消费者是无法看见这条消息的。
+
+**Op消息的引入**：
+
+为了标记Half消息的状态，RocketMQ又引入了Op消息，内部特殊的Topic，存储内容为对应的Half消息的消费队列offset。
+
+用Op消息标识事务消息已经确定的状态（Commit或者Rollback）。如果一条事务消息没有对应的Op消息，说明这个事务的状态未知(可能是二阶段失败了)。
+
+![rocketmq_design_12](rocketmq.assets/rocketmq_design_12.png)
+
+**二阶段提交或回滚**：
+
+若生产者对事务消息进行commit操作，broker将half消息取出，改回原本的topic和queueId，再一次将消息写入CommitLog文件，此时消息将被转发到正确的topic和queueId从而**消费者可见**。
+
+若生产者发送rollback操作，broker啥也不干，仅仅执行后面的添加Op消息标记此消息已经处理。此时**消息可认为被删除了，消费者不可见**。
+
+事务消息无论是Commit或者Rollback都会记录一个Op操作。
+
+**二阶段失败处理**：
+
+生产者在二阶段做Commit时出现网络问题而失败了，RocketMQ提供了补偿机制---回查。
+
+broker对未知状态half消息(即没有Op标记的)发起回查，生产者需返回commit或rollback，进而更新checkpoint。
+
+注意：rocketmq默认回查15次，否则默认回滚该消息。
+
 ## 顺序消息
 
 RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息按顺序消费。
@@ -3921,7 +4053,7 @@ RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息�
 >
 > 答：因为消息最长消费时限是15s，顺序消费情况下，为了严格保证消费顺序，需要等待再平衡过程中正在处理的消息处理完成或超时，然后将消费位移提交。
 
-## 消费重试
+## 消费重试(待续)
 
 ### 重试队列
 
@@ -3936,6 +4068,8 @@ RocketMQ只支持**局部消息顺序消费**，即1个消费队列上的消息�
 
 
 # HA主从同步分析
+
+[主从同步分析图原图](https://www.processon.com/view/link/62d81b805653bb45943fefe9)
 
 ![主从同步流程](rocketmq.assets/主从同步流程.png)
 
@@ -4427,7 +4561,9 @@ RocketMQ的多master多slave模式有两种复制方式：同步双写和异步�
 
 # RocketMQ与Kafka比较
 
-Kafka吞吐量强于RocketMQ。
+> 注意：以下是我在未搜索网络资料情况下，个人对两者的一些看法，可能会有问题。
+
+分别打开Kafka和RocketMQ的官网，发现Kafka宣传的核心特性是**高吞吐**，而RocketMQ宣传的是低延迟。
 
 RocketMQ功能性更好：
 
@@ -4439,6 +4575,18 @@ RocketMQ功能性更好：
 >
 > 4.顺序消息
 
-再平衡不同。
-
 RocketMQ官方提供的比较：https://rocketmq.apache.org/docs/motivation/
+
+**为什么Kafka吞吐量更高呢**？(一般RocketMQ是十万级，而Kafka是百万级)
+
+1、消息写入时，RocketMQ同一时刻**只有1个CommitLog可写入**，在写入时需要加锁；而Kafka的每个topic的每个分区对应的文件都是可写入的。
+
+2、消息消费时，RocketMQ需要根据ConsumeQueue消费队列上的phyOffset去CommitLog**一条一条的查询消息**，而Kafka直接将消息log文件的末尾批量读出即可，**顺序读>随机读**。
+
+3、**零拷贝方式不同**，RocketMQ基于自身CommitLog文件的设计，**只能选择mmap映射方式进行消息传输**，相比Kafka的sendfile方式文件通道到套接字通道的直接传输多了1次数据拷贝和2次内核态/用户态切换。
+
+**为什么RocketMQ延迟低呢**？
+
+1、RocketMQ几乎将负载均衡和再平衡都交给客户端完成，尤其是再平衡完全由单个客户端即可完成自身的消费队列分配，进而直接开始消息拉取。而Kafka再平衡需要选出再平衡代表，由它完成分区的分配并通知broker以及其他消费者，这个过程比RocketMQ的慢太多了。
+
+2、RocketMQ通过所谓的长轮询实现的push模式确实在消息时延上很友好。
