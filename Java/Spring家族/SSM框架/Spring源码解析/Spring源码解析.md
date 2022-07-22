@@ -465,831 +465,6 @@ public class DependencyInjectDemo {
 所谓延迟注入，就是在调用getObject()方法的时候才去ioc容器里查bean。
 
 有两个方式：ObjectFactory和ObjectProvider.
-## @Autowired和@Value注入
-
-**@Autowired标注在字段或普通方法上**注入处理的入口方法是`AutowiredAnnotationBeanPostProcessor#postProcessProperties()`。
-
-此类实现了`InstantiationAwareBeanPostProcessor`接口。
-
-bean生命周期中**属性填充阶段(populateBean)**会调用所有实现了`InstantiationAwareBeanPostProcessor`接口的bean的`postProcessProperties()`方法。
-
-首先看`AutowiredAnnotationBeanPostProcessor`类的构造器：
-
-```java
-// 这是一个有序set, 说明优先级@Autowired > @Value > @Inject
-private final Set<Class<? extends Annotation>> 
-    autowiredAnnotationTypes = new LinkedHashSet<>(4);
-/**
- * 为 Spring 的标准@Autowired和@Value注解提供支持
- * 如果JSR-330存在于 ClassPath 中，还支持JSR-330的@Inject注释。
- */
-public AutowiredAnnotationBeanPostProcessor() {
-    this.autowiredAnnotationTypes.add(Autowired.class);
-    this.autowiredAnnotationTypes.add(Value.class);
-    // 这里会尝试加载@Inject注解，若没有则忽略
-    try {
-        this.autowiredAnnotationTypes.add((Class<? extends Annotation>)
-                                          ClassUtils.forName("javax.inject.Inject", AutowiredAnnotationBeanPostProcessor.class.getClassLoader()));
-        logger.trace("JSR-330 'javax.inject.Inject' annotation found and supported for autowiring");
-    }
-    catch (ClassNotFoundException ex) {
-        // JSR-330 API not available - simply skip.
-    }
-}
-```
-
-也就是说此BeanPostProcessor实现类默认支持@Autowired注入和@Value注入，若@Inject注入在类路劲中则也提供支持。@Inject由javax.inject包提供，需要额外引入。
-
-### 处理入口
-
-案例如下：在`AutowiredAnnotationBeanPostProcessor#postProcessProperties()`处打断点调试
-
-```java
-@Configuration
-@Data
-public class DependencyProgressDemo {
-    public static void main(String[] args) {
-        try (AnnotationConfigApplicationContext application =
-             new AnnotationConfigApplicationContext()) {
-            application.register(DependencyProgressDemo.class);
-            application.refresh();
-            System.out.println(application.getBean(DependencyProgressDemo.class).userMap);
-        }
-    }
-    @Value("${user.name}")
-    private String username;// 这里会注入系统变量{user.name}
-    @Autowired
-    private User user;// 注入最合适User对象bean
-    @Autowired
-    private List<User> userList;// 注入所有User对象bean
-    @Autowired
-    private Map<String, User> userMap;// 会自动将beanName-->bean
-    @Autowired
-    @Lazy
-    private User lazyUser;// 延迟注入
-
-    @Bean
-    public User getUser1() {
-        return new User("fzk", 21);
-    }
-
-    @Bean
-    @Primary
-    public User getUser2() {
-        return new User("fzk", 21);
-    }
-}
-```
-
-然后就来到了注入处理入口：
-
-```java
-// AutowiredAnnotationBeanPostProcessor#postProcessProperties()
-public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName){
-    // 1.先找到这个bean内需要注入的元数据，即标注了注入注解的地方
-    InjectionMetadata metadata = findAutowiringMetadata(
-        beanName, bean.getClass(), pvs);
-    // 省略try/catch
-    // 2.将bean内所有需要注入的字段都注入，此处会进入一个依赖解析过程
-    metadata.inject(bean, beanName, pvs);
-    return pvs;
-}
-```
-
-这个注入处理可以看出大概就两步：
-
-- 查找注入字段和方法
-- 依赖查找并注入
-
-### 查找注入字段和方法
-
-
-```java
-private InjectionMetadata findAutowiringMetadata(String beanName, Class<?> clazz, @Nullable PropertyValues pvs) {
-    // 省略一大堆缓存查找
-    metadata = buildAutowiringMetadata(clazz);
-    // 省略一大堆缓存处理
-}
-
-// 循环查找bean及其父类的需要注入的字段和方法
-private InjectionMetadata buildAutowiringMetadata(Class<?> clazz) {
- 	// 省略
-	// 循环查找bean及其父类的需要注入的字段
-    do {
-        final List<InjectionMetadata.InjectedElement> currElements = new ArrayList<>();
-        // 1、对此类的所有字段遍历，查找需要注入的字段
-        ReflectionUtils.doWithLocalFields(targetClass, field -> {
-            // 1.1 判断此字段是否标注有@Autowired或@Value或@Inject
-            MergedAnnotation<?> ann = findAutowiredAnnotation(field);
-            if (ann != null) {
-                if (Modifier.isStatic(field.getModifiers())) {
-                   // 省略日志打印
-                    return;
-                }
-                // 解析@Autowired或@Value是否必须注入
-                boolean required = determineRequiredStatus(ann);
-                // 1.2 包装为AutowiredFieldElement
-                currElements.add(new AutowiredFieldElement(field, required));
-            }
-        });
-        // 2、对此类所有方法遍历，查找需要注入的方法
-        ReflectionUtils.doWithLocalMethods(targetClass, method -> {
-            Method bridgedMethod = BridgeMethodResolver.findBridgedMethod(method);
-            if (!BridgeMethodResolver.isVisibilityBridgeMethodPair(method, bridgedMethod)) {
-                return;
-            }
-            // 2.1 判断此方法是否标注有@Autowired或@Value或@Inject
-            MergedAnnotation<?> ann = findAutowiredAnnotation(bridgedMethod);
-            if (ann != null && 
-                method.equals(ClassUtils.getMostSpecificMethod(method, clazz))) {
-                if (Modifier.isStatic(method.getModifiers())) 
-                    // 注入方法不能是静态的, 忽略日志
-                if (method.getParameterCount() == 0) 
-                    // 注入方法必须由参数, 忽略日志
-                boolean required = determineRequiredStatus(ann);
-                PropertyDescriptor pd = BeanUtils.findPropertyForMethod(bridgedMethod, clazz);
-                // 2.2 包装为AutowiredMethodElement
-                currElements.add(new AutowiredMethodElement(method, required, pd));
-            }
-        });
-        // 省略部分代码
-        targetClass = targetClass.getSuperclass();
-    }while (targetClass != null && targetClass != Object.class);
-    // 省略
-}
-
-// 查找字段或方法上是否有注入注解
-private MergedAnnotation<?> findAutowiredAnnotation(AccessibleObject ao) {
-    // 拿到字段或方法上标记的所有注解，然后判断是否出现注入注解
-    MergedAnnotations annotations = MergedAnnotations.from(ao);
-    for (Class<? extends Annotation> type : this.autowiredAnnotationTypes) {
-        MergedAnnotation<?> annotation = annotations.get(type);
-        if (annotation.isPresent()) {
-            return annotation;
-        }
-    }
-    return null;
-}
-```
-在上面需要注意的是，找到的注入字段和注入方法分别包装为了AutowiredFieldElement和AutowiredMethodElement，它们都继承了InjectionMetadata.InjectedElement并实现了各自的inject()方法。
-
-### 依赖查找并注入
-
-```java
-// InjectionMetadata#inject()
-public void inject(Object target, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
-    // 省略部分代码
-    // 遍历所有需要注入的字段，解析依赖并注入
-    if (!elementsToIterate.isEmpty()) 
-        for (InjectedElement element : elementsToIterate) 
-            element.inject(target, beanName, pvs);
-}
-```
-
-这里字段和方法的注入inject()实现各不相同：
-
-1、字段的注入：由AutowiredAnnotationBeanPostProcessor.AutowiredFieldElement类实现
-
-```java
-private class AutowiredFieldElement extends InjectionMetadata.InjectedElement {
-    private final boolean required;
-    private volatile boolean cached;
-    private volatile Object cachedFieldValue;
-
-    protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
-        Field field = (Field) this.member;
-        Object value;
-        // 省略部分代码
-        // 解析该字段依赖的bean或值
-        value = resolveFieldValue(field, bean, beanName);
-        // 直接反射将字段赋值!
-        if (value != null) {
-            ReflectionUtils.makeAccessible(field);
-            field.set(bean, value);
-        }
-    }
-    // 解析字段依赖的bean或值：此处会进入 依赖解析过程
-    private Object resolveFieldValue(Field field, Object bean, @Nullable String beanName) {
-        // 将字段包装为 字段依赖描述符DependencyDescriptor
-        DependencyDescriptor desc = new DependencyDescriptor(field, this.required);
-        desc.setContainingClass(bean.getClass());
-        Set<String> autowiredBeanNames = new LinkedHashSet<>(1);
-        TypeConverter typeConverter = beanFactory.getTypeConverter();
-        Object value;
-        // 依赖解析处理，解析完成返回合适的
-        value = beanFactory.resolveDependency(
-            desc, beanName, autowiredBeanNames, typeConverter);
-
-        // 省略缓存处理部分代码
-        return value;
-    }
-}
-```
-
-字段注入过程就是先依赖解析得到合适的字段值然后直接反射写入即可。依赖解析的过程在后面给出。
-
-2、方法参数注入：AutowiredAnnotationBeanPostProcessor.AutowiredMethodElement实现
-
-```java
-private class AutowiredMethodElement extends InjectionMetadata.InjectedElement {
-    private final boolean required;
-    private volatile boolean cached;
-    private volatile Object[] cachedMethodArguments;
-
-    protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
-        // 省略检查
-        Method method = (Method) this.member;
-        Object[] arguments;
-		// 省略缓存处理
-        arguments = resolveMethodArguments(method, bean, beanName);
-        // 将方法参数依赖解析完成后直接反射调用方法
-        if (arguments != null) {
-            ReflectionUtils.makeAccessible(method);
-            method.invoke(bean, arguments);
-        }
-    }
-
-    private Object[] resolveMethodArguments(Method method, Object bean, @Nullable String beanName) {
-        int argumentCount = method.getParameterCount();
-        Object[] arguments = new Object[argumentCount];
-        DependencyDescriptor[] descriptors = new DependencyDescriptor[argumentCount];
-        Set<String> autowiredBeans = new LinkedHashSet<>(argumentCount);
-        TypeConverter typeConverter = beanFactory.getTypeConverter();
-        // 将所需参数都 解析依赖
-        for (int i = 0; i < arguments.length; i++) {
-            MethodParameter methodParam = new MethodParameter(method, i);
-            DependencyDescriptor currDesc = new DependencyDescriptor(methodParam, this.required);
-            currDesc.setContainingClass(bean.getClass());
-            descriptors[i] = currDesc;
-			// 依赖解析处理，返回合适的bean或value
-            Object arg = beanFactory.resolveDependency(
-                currDesc, beanName, autowiredBeans, typeConverter);
-            if (arg == null && !this.required) {
-                arguments = null;
-                break;
-            }
-            arguments[i] = arg;
-        }
-       	// 省略缓存处理
-        return arguments;
-    }
-}
-```
-
-方法参数注入和字段注入过程差不多，核心都在依赖解析。
-
-### 依赖解析过程
-
-在上面的字段注入和方法参数注入中，都是先解析依赖拿到需要的bean或value，从而反射注入或反射调用方法。
-
-- 入口 - `DefaultListableBeanFactory#resolveDependency`
-
-- 依赖描述符 - `DependencyDescriptor`
-
-- 自定绑定候选对象处理器 - `AutowireCandidateResolver`
-
-#### 依赖描述符
-
-首先先看这个依赖描述符：它可以描述一个待注入字段或方法
-
-```java
-// 描述一个依赖，包装构造函数参数、方法参数或字段，允许统一访问它们的元数据
-public class DependencyDescriptor extends InjectionPoint implements Serializable {
-
-	private final Class<?> declaringClass;
-
-	@Nullable
-	private String methodName;// 若方法注入，则此处为注入方法名
-	@Nullable
-	private Class<?>[] parameterTypes;// 方法或构造器参数类型
-	private int parameterIndex;
-
-	@Nullable
-	private String fieldName;// 若字段注入，则此处为字段名
-	private final boolean required;// 是否必须，对应于@Autowired(required=true)
-	private final boolean eager;// 是否急切，对应@Lazy
-	private int nestingLevel = 1;// 嵌入层次，因为@Autowired可以被放入的是嵌套类
-
-	@Nullable
-	private Class<?> containingClass;
-	@Nullable
-	private transient volatile ResolvableType resolvableType;
-	@Nullable
-	private transient volatile TypeDescriptor typeDescriptor;
-}
-
-// 注入点的简单描述符，指向方法/构造函数参数或字段
-// 主要是要看它的子类AutowiredFieldElement和AutowiredMethodElement
-public class InjectionPoint {
-	@Nullable
-	protected MethodParameter methodParameter;
-	@Nullable
-	protected Field field;
-	@Nullable
-	private volatile Annotation[] fieldAnnotations;// 字段上标注的所有注解
-}
-```
-
-#### 依赖解析入口
-
-来到依赖处理入口处：`DefaultListableBeanFactory#resolveDependency()`
-
-```java
-public Object resolveDependency(DependencyDescriptor descriptor, 
-                                @Nullable String requestingBeanName,
-                                @Nullable Set<String> autowiredBeanNames,
-                                @Nullable TypeConverter typeConverter) throws BeansException {
-	// 一些特殊情况处理：如ObjectFactory与ObjectProvider延迟bean
-    descriptor.initParameterNameDiscovery(getParameterNameDiscoverer());
-    if (Optional.class == descriptor.getDependencyType())
-        return createOptionalDependency(descriptor, requestingBeanName);
-    else if (ObjectFactory.class == descriptor.getDependencyType() ||
-             ObjectProvider.class == descriptor.getDependencyType())
-        return new DependencyObjectProvider(descriptor, requestingBeanName);
-    else if (javaxInjectProviderClass == descriptor.getDependencyType())
-        return new Jsr330Factory().createDependencyProvider(descriptor, requestingBeanName);
-    else {
-        // @Lazy延迟注入入口在这：
-        // 这里会用cglib库生成一个bean的代理对象，在第1次使用的时候才去ioc容器获取该bean
-        Object result = getAutowireCandidateResolver().getLazyResolutionProxyIfNecessary(
-            descriptor, requestingBeanName);
-        if (result == null) 
-            // 默认入口：
-            result = doResolveDependency(
-                descriptor, requestingBeanName, autowiredBeanNames, typeConverter);
-        return result;
-    }
-}
-
-public Object doResolveDependency(DependencyDescriptor descriptor, 
-                                  @Nullable String beanName,
-                                  @Nullable Set<String> autowiredBeanNames, 
-                                  @Nullable TypeConverter typeConverter) 
-throws BeansException {
-    // 省略try/finally和部分代码
-    // 1.获取@Value中的值，即先处理是否为@Value注解
-  
-    // 2.集合或map类型bean注入处理
-
-    // 3.单bean字段bean注入处理
-}
-```
-
-`doResolveDependency()`方法依赖解析大致分为3种可能：
-
-- @Value的解析
-- 集合或map类型字段或参数类型的依赖解析
-- 单bean字段或参数类型的依赖解析
-
-具体细节在下面分开描述。
-
-#### @Value处理(待完善)
-
-`doResolveDependency()`依赖解析最开始是处理@Value注解标记的字段：
-
-```java
-public Object doResolveDependency(DependencyDescriptor descriptor, 
-                                  @Nullable String beanName,
-                                  @Nullable Set<String> autowiredBeanNames, 
-                                  @Nullable TypeConverter typeConverter) 
-throws BeansException {
-    // 省略try/finally和部分代码
-    // 1.获取@Value中的值，即先处理是否为@Value注解
-    Object value = getAutowireCandidateResolver().getSuggestedValue(descriptor);
-    if (value != null) {
-        if (value instanceof String) {
-            // 1.1 解析出该值，可能从系统属性或配置文件中获取，没有则默认值
-            String strVal = resolveEmbeddedValue((String) value);
-            BeanDefinition bd = (beanName != null && containsBean(beanName) ?
-                                 getMergedBeanDefinition(beanName) : null);
-            value = evaluateBeanDefinitionString(strVal, bd);
-        }
-        // 1.2 将String类型转换为需要的类型
-        TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());
-        return converter.convertIfNecessary(value, type, descriptor.getTypeDescriptor());
-    }
-
-    // 2.集合或map类型bean注入处理
-   	// 省略
-    // 3.单bean字段bean注入处理
-    // 省略
-}
-```
-
-> 如何解析具体步骤暂时懒得看了。
-
-#### 单bean注入
-
-`doResolveDependency()`中如果不是@Value注解，则再解析是否是集合或map类型bean注入处理，最后才是最常见的单bean处理：
-
-```java
-public Object doResolveDependency(DependencyDescriptor descriptor, 
-                                  @Nullable String beanName,
-                                  @Nullable Set<String> autowiredBeanNames, 
-                                  @Nullable TypeConverter typeConverter) 
-throws BeansException {
-    // 省略try/finally和部分代码
-    // 1.获取@Value中的值，即先处理是否为@Value注解
-	// 省略
-    // 2.集合或map类型bean注入处理
-	// 省略
-    
-    // 3.单bean字段bean注入处理
-    // 3.1 查询类型匹配的beanName-->Class映射
-    Map<String, Object> matchingBeans = findAutowireCandidates(beanName, type, descriptor);
-    if (matchingBeans.isEmpty()) {/* 省略*/}
-
-    String autowiredBeanName;
-    Object instanceCandidate;
-	// 3.2 多个bean匹配
-    if (matchingBeans.size() > 1) {
-        // 根据@Primary和@Priority查找最匹配bean
-        autowiredBeanName = determineAutowireCandidate(matchingBeans, descriptor);
-        if (autowiredBeanName == null) {/*省略*/}
-        instanceCandidate = matchingBeans.get(autowiredBeanName);
-    }
-    else {// 3.3 只有1个bean匹配
-        Map.Entry<String, Object> entry = matchingBeans.entrySet().iterator().next();
-        autowiredBeanName = entry.getKey();
-        instanceCandidate = entry.getValue();
-    }
-    if (autowiredBeanNames != null)
-        autowiredBeanNames.add(autowiredBeanName);
-    // 3.4 beanFactory.getBean()根据beanName获取bean对象
-    if (instanceCandidate instanceof Class)
-        instanceCandidate = descriptor.resolveCandidate(autowiredBeanName, type, this);
-    
-    Object result = instanceCandidate;
- 	// 3.5 判断是否符合类型要求
-    if (!ClassUtils.isAssignableValue(type, result))
-        throw new BeanNotOfRequiredTypeException(
-        autowiredBeanName, type, instanceCandidate.getClass());
-    return result;
-}
-```
-
-单bean依赖解析过程就：根据注入类型查找候选者beanName，然后根据一些规则选出最佳候选bean，获取其对象实例返回。
-
-##### 类型匹配候选者
-
-根据类型查找所有候选者beanName：
-
-```java
-// 查找与所需类型匹配的 bean 实例。在指定 bean 的自动装配期间调用
-protected Map<String, Object> findAutowireCandidates(
-    @Nullable String beanName, Class<?> requiredType, 
-    DependencyDescriptor descriptor) {
-	// 根据类型获取所有beanName
-    String[] candidateNames = BeanFactoryUtils.beanNamesForTypeIncludingAncestors(
-        this, requiredType, true, descriptor.isEager());
-    Map<String, Object> result = CollectionUtils.newLinkedHashMap(candidateNames.length);
-    // 省略部分代码
-    return result;// 这里返回的map映射为：beanName-->Class
-}
-```
-
-##### 决定最佳候选者
-
-排序选出最佳候选者bean：
-
-```java
-/**
- * 确定给定 bean 集中的自动装配候选者bean
- * 顺序规则如下：@Primary-->@Priority/Ordered接口-->DependencyDescriptor中的字段名或参数名
- */
-protected String determineAutowireCandidate(Map<String, Object> candidates, DependencyDescriptor descriptor) {
-    Class<?> requiredType = descriptor.getDependencyType();
-    // 1.先找有无标记为@Primary的bean，有则返回(只会有1个同类型bean可以标为Primary)
-    // 即根据beanName找到BeanDefinition来判断是否为Primary
-    String primaryCandidate = determinePrimaryCandidate(candidates, requiredType);
-    if (primaryCandidate != null) return primaryCandidate;
-         
-    // 2.再找最高优先级的候选者: @Priority或Ordered接口
-    String priorityCandidate = determineHighestPriorityCandidate(candidates, requiredType);
-    if (priorityCandidate != null) return priorityCandidate;
-    
-    // 3.冗余处理：根据要注入的字段名或参数名匹配候选者
-    for (Map.Entry<String, Object> entry : candidates.entrySet()) {
-        String candidateName = entry.getKey();
-        Object beanInstance = entry.getValue();
-        if ((beanInstance != null && 
-             this.resolvableDependencies.containsValue(beanInstance)) ||
-            matchesBeanName(candidateName, descriptor.getDependencyName())) {
-            return candidateName;
-        }
-    }
-    return null;
-}
-```
-
-#### 多bean注入
-
-`doResolveDependency()`依赖解析对于集合或map类型的字段或参数也能处理解析：
-
-```java
-public Object doResolveDependency(DependencyDescriptor descriptor, 
-                                  @Nullable String beanName,
-                                  @Nullable Set<String> autowiredBeanNames, 
-                                  @Nullable TypeConverter typeConverter) 
-throws BeansException {
-    // 省略try/finally和部分代码
-    // 1.获取@Value中的值，即先处理是否为@Value注解
-	// 省略
-    
-    // 2.集合或map类型bean注入处理
-    Object multipleBeans = resolveMultipleBeans(
-        descriptor, beanName, autowiredBeanNames, typeConverter);
-    if (multipleBeans != null) return multipleBeans;
-
-    // 3.单bean字段bean注入处理
-	// 省略
-}
-
-// 数组、集合或map类型bean注入解析
-private Object resolveMultipleBeans(
-    DependencyDescriptor descriptor, 
-    @Nullable String beanName,
-    @Nullable Set<String> autowiredBeanNames, 
-    @Nullable TypeConverter typeConverter) {
-	// 1.取出要注入字段或参数的类型
-    Class<?> type = descriptor.getDependencyType();
-	// 2.数组、集合、map类型注入解析
-    // 2.1 stream流类型
-    if (descriptor instanceof StreamDependencyDescriptor) { /*省略*/ }
-    // 2.2 数组类型
-    else if (type.isArray()) {/*处理逻辑和2.3差不多，省略*/}
-    // 2.3 集合类型
-    else if (Collection.class.isAssignableFrom(type) && type.isInterface()) { /*省略*/ }
-    // 2.4 map类型
-    else if (Map.class == type) { /*省略*/ }
-    else return null;// 其它类型不在这里解析
-}
-```
-
-当待注入字段或参数类型为stream、数组、集合、map时都会将类型匹配的所有bean全部返回。不同的是map类型中的元素为：`beanName-->bean`。
-
-##### 集合类型
-
-集合类型为Collection，大致有Set和List。
-
-```java
-// 数组、集合或map类型bean注入解析
-private Object resolveMultipleBeans(
-	// 省略
-    // 2.3 集合类型
-    else if (Collection.class.isAssignableFrom(type) && type.isInterface()) {
-        // 2.3.1 获取集合元素类型
-        Class<?> elementType = descriptor.getResolvableType().asCollection().resolveGeneric();
-        if (elementType == null) return null;
-        // 2.3.2 找到集合元素类型的匹配的bean
-        Map<String, Object> matchingBeans =findAutowireCandidates(
-            beanName, elementType, 
-            new MultiElementDescriptor(descriptor));
-        if (matchingBeans.isEmpty()) return null;
-        
-        if (autowiredBeanNames != null) 
-            autowiredBeanNames.addAll(matchingBeans.keySet());
-        // 2.3.3 转换为需要的集合类型
-        TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());
-        Object result = converter.convertIfNecessary(matchingBeans.values(), type);
-		// 2.3.4 根据PriorityOrdered和Ordered接口给定的顺序排序
-        if (result instanceof List) 
-            if (((List<?>) result).size() > 1) {
-                Comparator<Object> comparator = adaptDependencyComparator(matchingBeans);
-                if (comparator != null) {
-                    ((List<?>) result).sort(comparator);
-                }
-            }
-        return result;
-    }
-    // 2.4 map类型
-    else if (Map.class == type) {/*省略*/}
-}
-```
-
-##### map类型
-
-```java
-// 数组、集合或map类型bean注入解析
-private Object resolveMultipleBeans(
-    // 省略
-    // 2.4 map类型
-    else if (Map.class == type) {
-        // 2.4.1 获取map的key和value类型
-        ResolvableType mapType = descriptor.getResolvableType().asMap();
-        Class<?> keyType = mapType.resolveGeneric(0);
-        // 只有key为String时才有效
-        if (String.class != keyType) return null;
-        Class<?> valueType = mapType.resolveGeneric(1);
-        if (valueType == null) return null;
-        // 2.4.2 找到value元素类型的匹配的bean
-        Map<String, Object> matchingBeans = findAutowireCandidates(
-            beanName, valueType,
-            new MultiElementDescriptor(descriptor));
-        if (matchingBeans.isEmpty()) return null; 
-        if (autowiredBeanNames != null) 
-            autowiredBeanNames.addAll(matchingBeans.keySet());
-        return matchingBeans;
-    }
-    else return null;// 其它类型不在这里解析
-}
-```
-
-map类型字段或参数时这里返回的结果也是map类型：`beanName-->bean`，会查出所有类型匹配的bean。
-
-> 注意：上面代码中可以看到，只有当map的key为String时才会查出所有bean，并返回beanName->bean的map。
-
-## Java通用注解处理
-
-Spring通过`CommonAnnotationBeanPostProcessor`支持javax.annotation包中对bean管理的注解：
-
-- 注入注解
-  - javax.xml.ws.WebServiceRef 
-  - javax.ejb.EJB 
-  - javax.annotation.Resource 
-
-- 生命周期注解 
-  - javax.annotation.PostConstruct 
-  - javax.annotation.PreDestroy
-
-### @Resource注入
-
-```java
-public class CommonAnnotationBeanPostProcessor extends InitDestroyAnnotationBeanPostProcessor
-		implements InstantiationAwareBeanPostProcessor, BeanFactoryAware, Serializable {
-	private static final Set<Class<? extends Annotation>> resourceAnnotationTypes = 
-        new LinkedHashSet<>(4);
-
-	static {
-        // 提供对@Resource支持
-		resourceAnnotationTypes.add(Resource.class);
-		// 提供对@WebSrviceRef支持
-		webServiceRefClass = loadAnnotationType("javax.xml.ws.WebServiceRef");
-		if (webServiceRefClass != null) 
-			resourceAnnotationTypes.add(webServiceRefClass);
-		// 提供对@EJB支持
-		ejbClass = loadAnnotationType("javax.ejb.EJB");
-		if (ejbClass != null) 
-			resourceAnnotationTypes.add(ejbClass);
-    }
-
-    // 通过实现InstantiationAwareBeanPostProcessor接口的属性填充阶段的回调方法
-    // 实现了@Resource等注解的注入
-    public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
-        // 寻找标注有上诉3个注解的方法或字段进行注入
-        InjectionMetadata metadata = findResourceMetadata(beanName, bean.getClass(), pvs);
-        metadata.inject(bean, beanName, pvs);
-        // 省略部分代码
-        return pvs;
-    }
-}
-```
-
-可以很明显的看到此处对于@Resource的实现和@Autowired注解的实现几乎一样，所以不详细分析了。
-
-### @PostConstruct和@PreDestory回调
-
-@PostConstruct和@PreDestroy的由其父类`InitDestroyAnnotationBeanPostProcessor`支持。
-
-```java
-// 此类实现了BeanPostProcessor接口的
-public class InitDestroyAnnotationBeanPostProcessor
-		implements DestructionAwareBeanPostProcessor, MergedBeanDefinitionPostProcessor, PriorityOrdered, Serializable {
-    // 通过实现BeanPostProcessor接口的初始化前回调
-    // 实现了@PostConstruct指定的初始化方法执行
-    public Object postProcessBeforeInitialization(Object bean, String beanName) 
-        throws BeansException {
-        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
-        try {
-            metadata.invokeInitMethods(bean, beanName);
-        }
-        // 省略部分代码
-        return bean;
-    }
-    
-	// 通过实现DestructionAwareBeanPostProcessor接口的销毁前回调
-    // 实现@PreDestroy指定的销毁方法执行
-    public void postProcessBeforeDestruction(Object bean, String beanName) 
-        throws BeansException {
-        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
-        try {
-            metadata.invokeDestroyMethods(bean, beanName);
-        }
-      	// 省略部分代码
-    }
-}
-```
-
-更多细节这里不列出了，可以直接看源码，比较简单。
-
-### @Resource和@Autowired处理顺序
-
-从上面得知@Resouce由`CommonAnnotationBeanPostProcessor`处理，而`@Autowired`由`AutowiredAnnotationBeanPostProcessor`处理，它们都实现了`InstantiationAwareBeanPostProcessors#postProcessProperties()`回调，那么这两的优先级就决定了谁的处理顺序在前：order越小优先级越高。
-
-```java
-public class CommonAnnotationBeanPostProcessor{// 此处忽略其实现接口
-	public CommonAnnotationBeanPostProcessor() {
-		setOrder(Ordered.LOWEST_PRECEDENCE - 3);// 优先级在这
-		setInitAnnotationType(PostConstruct.class);
-		setDestroyAnnotationType(PreDestroy.class);
-		// 省略部分代码
-	}
-}
-
-public class AutowiredAnnotationBeanPostProcessor {// 此处忽略其实现接口
-	private int order = Ordered.LOWEST_PRECEDENCE - 2;
-}
-```
-
-从这里看出`AutowiredAnnotationBeanPostProcessor`优先级更低，说明**@Resource先于@Autowired注解处理**，即后者会覆盖前者。
-
-### @Resource和@Autowired区别(待续)
-
-在注入上没有任何区别，因为都是**调用的同一个依赖解析方法**，都会先通过类型查出所有bean，再根据优先级选择bean，选不出来再根据名称选择。
-
-在注解的属性上有区别。
-
-## 自定义依赖注入注解
-
-要自定义的依赖注入注解生效，也得像`AutowiredAnnotationBeanPostProcessor`那样解析元数据，依赖查找，依赖注入。
-
-最简单的方式就是扩展`AutowiredAnnotationBeanPostProcessor`这个并注入到容器内。
-
-```java
-@Target({ElementType.CONSTRUCTOR, ElementType.METHOD, ElementType.PARAMETER, ElementType.FIELD, ElementType.ANNOTATION_TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-@Documented
-public @interface MyAutowired {
-}
-
-@Configuration
-@Data
-public class DependencyProgressDemo {
-    public static void main(String[] args) {
-        try (AnnotationConfigApplicationContext application = 
-             new AnnotationConfigApplicationContext()) {
-            application.register(DependencyProgressDemo.class);
-            application.refresh();
-            System.out.println(application.getBean(DependencyProgressDemo.class));
-        }
-    }
-
-    @MyAutowired
-    private User user;
-    @Autowired
-    private List<User> userList;
-
-    // 用这个内部的beanName目的是覆盖默认的注入处理BeanPostProcessor
-    @Bean(org.springframework.context.annotation.AnnotationConfigUtils.
-          AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME)
-    // 此处必须是static静态方法，这样这个bean才能尽早注册，从而覆盖掉默认的
-    public static AutowiredAnnotationBeanPostProcessor getMy() {
-        AutowiredAnnotationBeanPostProcessor postProcessor = 
-            new AutowiredAnnotationBeanPostProcessor();
-        // 这里其实就是非常简单的把默认要解析的@Autowired和@Value注解
-        // 换成了自己的注解
-        postProcessor.setAutowiredAnnotationTypes(Set.of(MyAutowired.class));
-        return postProcessor;
-    }
-
-    @Bean
-    public User getUser1() {
-        return new User("fzk", 21);
-    }
-
-    @Bean
-    @Primary
-    public User getUser2() {
-        return new User("fzk", 21);
-    }
-}
-```
-
-在上面的例子中，扩展的处理器覆盖了默认的注入处理器，因此user字段可以成功注入，而userList字段将为null，因为`@Autowired`注解已经不再支持了。
-
-## 依赖查找和依赖注入来源
-
-| 来源                  | SpringBean对象 | 生命周期管理 | 配置元信息 | 使用场景           |
-| --------------------- | -------------- | ------------ | ---------- | ------------------ |
-| BeanDefinition        | √              | √            | √          | 依赖查找、依赖注入 |
-| 直接注册单例bean      | √              | ×            | ×          | 依赖查找、依赖注入 |
-| Resolvable Dependency | ×              | ×            | ×          | 依赖注入           |
-
-依赖查找指通过这种方式：`application.getBean("beanName")`获取IOC容器内bean对象，其实就是bean查找。
-
-依赖注入是指将bean对象、BeanFactory或Application、外部化配置注入到指定对象中，如@Autowired、@Value。
-
-- BeanDefinition就是Spring正常启动流程扫描到的bean定义或者通过Java API手动注册的bean定义。
-
-- 直接注册的单例bean指的是直接将某个对象put到ioc容器的单例容器map中：
-
-```java
-// 直接注入一个单例对象到ioc的单例容器map中
-application.getBeanFactory().registerSingleton("username", "fzk");
-```
-
-- ResolvableDependency其实指的就是Application和BeanFactory，这两个并没有注入IOC容器，不能通过依赖查找从容器内获得。
-
 ## Bean作用域
 
 | 作用域      | 描述                                                       |
@@ -2062,8 +1237,6 @@ public void destroy() {
 
 在bean的销毁前回调方法都执行完成后，Spring会将该bean及其BeanDefinition从所有相关集合中移除，无指向它的引用后，JVM自动回收内存。
 
-# Spring事件(待续)
-
 # Spring注解驱动
 
 Spring注解编程模型：[官网说明](https://github.com/spring-projects/spring-framework/wiki/Spring-Annotation-Programming-Model)
@@ -2649,6 +1822,832 @@ private void loadBeanDefinitionsForBeanMethod(BeanMethod beanMethod) {
     this.registry.registerBeanDefinition(beanName, beanDefToRegister);
 }
 ```
+
+## @Autowired和@Value注入
+
+**@Autowired标注在字段或普通方法上**注入处理的入口方法是`AutowiredAnnotationBeanPostProcessor#postProcessProperties()`。
+
+此类实现了`InstantiationAwareBeanPostProcessor`接口。
+
+bean生命周期中**属性填充阶段(populateBean)**会调用所有实现了`InstantiationAwareBeanPostProcessor`接口的bean的`postProcessProperties()`方法。
+
+首先看`AutowiredAnnotationBeanPostProcessor`类的构造器：
+
+```java
+// 这是一个有序set, 说明优先级@Autowired > @Value > @Inject
+private final Set<Class<? extends Annotation>> 
+    autowiredAnnotationTypes = new LinkedHashSet<>(4);
+/**
+ * 为 Spring 的标准@Autowired和@Value注解提供支持
+ * 如果JSR-330存在于 ClassPath 中，还支持JSR-330的@Inject注释。
+ */
+public AutowiredAnnotationBeanPostProcessor() {
+    this.autowiredAnnotationTypes.add(Autowired.class);
+    this.autowiredAnnotationTypes.add(Value.class);
+    // 这里会尝试加载@Inject注解，若没有则忽略
+    try {
+        this.autowiredAnnotationTypes.add((Class<? extends Annotation>)
+                                          ClassUtils.forName("javax.inject.Inject", AutowiredAnnotationBeanPostProcessor.class.getClassLoader()));
+        logger.trace("JSR-330 'javax.inject.Inject' annotation found and supported for autowiring");
+    }
+    catch (ClassNotFoundException ex) {
+        // JSR-330 API not available - simply skip.
+    }
+}
+```
+
+也就是说此BeanPostProcessor实现类默认支持@Autowired注入和@Value注入，若@Inject注入在类路劲中则也提供支持。@Inject由javax.inject包提供，需要额外引入。
+
+### 处理入口
+
+案例如下：在`AutowiredAnnotationBeanPostProcessor#postProcessProperties()`处打断点调试
+
+```java
+@Configuration
+@Data
+public class DependencyProgressDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application =
+             new AnnotationConfigApplicationContext()) {
+            application.register(DependencyProgressDemo.class);
+            application.refresh();
+            System.out.println(application.getBean(DependencyProgressDemo.class).userMap);
+        }
+    }
+    @Value("${user.name}")
+    private String username;// 这里会注入系统变量{user.name}
+    @Autowired
+    private User user;// 注入最合适User对象bean
+    @Autowired
+    private List<User> userList;// 注入所有User对象bean
+    @Autowired
+    private Map<String, User> userMap;// 会自动将beanName-->bean
+    @Autowired
+    @Lazy
+    private User lazyUser;// 延迟注入
+
+    @Bean
+    public User getUser1() {
+        return new User("fzk", 21);
+    }
+
+    @Bean
+    @Primary
+    public User getUser2() {
+        return new User("fzk", 21);
+    }
+}
+```
+
+然后就来到了注入处理入口：
+
+```java
+// AutowiredAnnotationBeanPostProcessor#postProcessProperties()
+public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName){
+    // 1.先找到这个bean内需要注入的元数据，即标注了注入注解的地方
+    InjectionMetadata metadata = findAutowiringMetadata(
+        beanName, bean.getClass(), pvs);
+    // 省略try/catch
+    // 2.将bean内所有需要注入的字段都注入，此处会进入一个依赖解析过程
+    metadata.inject(bean, beanName, pvs);
+    return pvs;
+}
+```
+
+这个注入处理可以看出大概就两步：
+
+- 查找注入字段和方法
+- 依赖查找并注入
+
+### 查找注入字段和方法
+
+
+```java
+private InjectionMetadata findAutowiringMetadata(String beanName, Class<?> clazz, @Nullable PropertyValues pvs) {
+    // 省略一大堆缓存查找
+    metadata = buildAutowiringMetadata(clazz);
+    // 省略一大堆缓存处理
+}
+
+// 循环查找bean及其父类的需要注入的字段和方法
+private InjectionMetadata buildAutowiringMetadata(Class<?> clazz) {
+ 	// 省略
+	// 循环查找bean及其父类的需要注入的字段
+    do {
+        final List<InjectionMetadata.InjectedElement> currElements = new ArrayList<>();
+        // 1、对此类的所有字段遍历，查找需要注入的字段
+        ReflectionUtils.doWithLocalFields(targetClass, field -> {
+            // 1.1 判断此字段是否标注有@Autowired或@Value或@Inject
+            MergedAnnotation<?> ann = findAutowiredAnnotation(field);
+            if (ann != null) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                   // 省略日志打印
+                    return;
+                }
+                // 解析@Autowired或@Value是否必须注入
+                boolean required = determineRequiredStatus(ann);
+                // 1.2 包装为AutowiredFieldElement
+                currElements.add(new AutowiredFieldElement(field, required));
+            }
+        });
+        // 2、对此类所有方法遍历，查找需要注入的方法
+        ReflectionUtils.doWithLocalMethods(targetClass, method -> {
+            Method bridgedMethod = BridgeMethodResolver.findBridgedMethod(method);
+            if (!BridgeMethodResolver.isVisibilityBridgeMethodPair(method, bridgedMethod)) {
+                return;
+            }
+            // 2.1 判断此方法是否标注有@Autowired或@Value或@Inject
+            MergedAnnotation<?> ann = findAutowiredAnnotation(bridgedMethod);
+            if (ann != null && 
+                method.equals(ClassUtils.getMostSpecificMethod(method, clazz))) {
+                if (Modifier.isStatic(method.getModifiers())) 
+                    // 注入方法不能是静态的, 忽略日志
+                if (method.getParameterCount() == 0) 
+                    // 注入方法必须由参数, 忽略日志
+                boolean required = determineRequiredStatus(ann);
+                PropertyDescriptor pd = BeanUtils.findPropertyForMethod(bridgedMethod, clazz);
+                // 2.2 包装为AutowiredMethodElement
+                currElements.add(new AutowiredMethodElement(method, required, pd));
+            }
+        });
+        // 省略部分代码
+        targetClass = targetClass.getSuperclass();
+    }while (targetClass != null && targetClass != Object.class);
+    // 省略
+}
+
+// 查找字段或方法上是否有注入注解
+private MergedAnnotation<?> findAutowiredAnnotation(AccessibleObject ao) {
+    // 拿到字段或方法上标记的所有注解，然后判断是否出现注入注解
+    MergedAnnotations annotations = MergedAnnotations.from(ao);
+    for (Class<? extends Annotation> type : this.autowiredAnnotationTypes) {
+        MergedAnnotation<?> annotation = annotations.get(type);
+        if (annotation.isPresent()) {
+            return annotation;
+        }
+    }
+    return null;
+}
+```
+
+在上面需要注意的是，找到的注入字段和注入方法分别包装为了AutowiredFieldElement和AutowiredMethodElement，它们都继承了InjectionMetadata.InjectedElement并实现了各自的inject()方法。
+
+### 依赖查找并注入
+
+```java
+// InjectionMetadata#inject()
+public void inject(Object target, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+    // 省略部分代码
+    // 遍历所有需要注入的字段，解析依赖并注入
+    if (!elementsToIterate.isEmpty()) 
+        for (InjectedElement element : elementsToIterate) 
+            element.inject(target, beanName, pvs);
+}
+```
+
+这里字段和方法的注入inject()实现各不相同：
+
+1、字段的注入：由AutowiredAnnotationBeanPostProcessor.AutowiredFieldElement类实现
+
+```java
+private class AutowiredFieldElement extends InjectionMetadata.InjectedElement {
+    private final boolean required;
+    private volatile boolean cached;
+    private volatile Object cachedFieldValue;
+
+    protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+        Field field = (Field) this.member;
+        Object value;
+        // 省略部分代码
+        // 解析该字段依赖的bean或值
+        value = resolveFieldValue(field, bean, beanName);
+        // 直接反射将字段赋值!
+        if (value != null) {
+            ReflectionUtils.makeAccessible(field);
+            field.set(bean, value);
+        }
+    }
+    // 解析字段依赖的bean或值：此处会进入 依赖解析过程
+    private Object resolveFieldValue(Field field, Object bean, @Nullable String beanName) {
+        // 将字段包装为 字段依赖描述符DependencyDescriptor
+        DependencyDescriptor desc = new DependencyDescriptor(field, this.required);
+        desc.setContainingClass(bean.getClass());
+        Set<String> autowiredBeanNames = new LinkedHashSet<>(1);
+        TypeConverter typeConverter = beanFactory.getTypeConverter();
+        Object value;
+        // 依赖解析处理，解析完成返回合适的
+        value = beanFactory.resolveDependency(
+            desc, beanName, autowiredBeanNames, typeConverter);
+
+        // 省略缓存处理部分代码
+        return value;
+    }
+}
+```
+
+字段注入过程就是先依赖解析得到合适的字段值然后直接反射写入即可。依赖解析的过程在后面给出。
+
+2、方法参数注入：AutowiredAnnotationBeanPostProcessor.AutowiredMethodElement实现
+
+```java
+private class AutowiredMethodElement extends InjectionMetadata.InjectedElement {
+    private final boolean required;
+    private volatile boolean cached;
+    private volatile Object[] cachedMethodArguments;
+
+    protected void inject(Object bean, @Nullable String beanName, @Nullable PropertyValues pvs) throws Throwable {
+        // 省略检查
+        Method method = (Method) this.member;
+        Object[] arguments;
+		// 省略缓存处理
+        arguments = resolveMethodArguments(method, bean, beanName);
+        // 将方法参数依赖解析完成后直接反射调用方法
+        if (arguments != null) {
+            ReflectionUtils.makeAccessible(method);
+            method.invoke(bean, arguments);
+        }
+    }
+
+    private Object[] resolveMethodArguments(Method method, Object bean, @Nullable String beanName) {
+        int argumentCount = method.getParameterCount();
+        Object[] arguments = new Object[argumentCount];
+        DependencyDescriptor[] descriptors = new DependencyDescriptor[argumentCount];
+        Set<String> autowiredBeans = new LinkedHashSet<>(argumentCount);
+        TypeConverter typeConverter = beanFactory.getTypeConverter();
+        // 将所需参数都 解析依赖
+        for (int i = 0; i < arguments.length; i++) {
+            MethodParameter methodParam = new MethodParameter(method, i);
+            DependencyDescriptor currDesc = new DependencyDescriptor(methodParam, this.required);
+            currDesc.setContainingClass(bean.getClass());
+            descriptors[i] = currDesc;
+			// 依赖解析处理，返回合适的bean或value
+            Object arg = beanFactory.resolveDependency(
+                currDesc, beanName, autowiredBeans, typeConverter);
+            if (arg == null && !this.required) {
+                arguments = null;
+                break;
+            }
+            arguments[i] = arg;
+        }
+       	// 省略缓存处理
+        return arguments;
+    }
+}
+```
+
+方法参数注入和字段注入过程差不多，核心都在依赖解析。
+
+### 依赖解析过程
+
+在上面的字段注入和方法参数注入中，都是先解析依赖拿到需要的bean或value，从而反射注入或反射调用方法。
+
+- 入口 - `DefaultListableBeanFactory#resolveDependency`
+
+- 依赖描述符 - `DependencyDescriptor`
+
+- 自定绑定候选对象处理器 - `AutowireCandidateResolver`
+
+#### 依赖描述符
+
+首先先看这个依赖描述符：它可以描述一个待注入字段或方法
+
+```java
+// 描述一个依赖，包装构造函数参数、方法参数或字段，允许统一访问它们的元数据
+public class DependencyDescriptor extends InjectionPoint implements Serializable {
+
+	private final Class<?> declaringClass;
+
+	@Nullable
+	private String methodName;// 若方法注入，则此处为注入方法名
+	@Nullable
+	private Class<?>[] parameterTypes;// 方法或构造器参数类型
+	private int parameterIndex;
+
+	@Nullable
+	private String fieldName;// 若字段注入，则此处为字段名
+	private final boolean required;// 是否必须，对应于@Autowired(required=true)
+	private final boolean eager;// 是否急切，对应@Lazy
+	private int nestingLevel = 1;// 嵌入层次，因为@Autowired可以被放入的是嵌套类
+
+	@Nullable
+	private Class<?> containingClass;
+	@Nullable
+	private transient volatile ResolvableType resolvableType;
+	@Nullable
+	private transient volatile TypeDescriptor typeDescriptor;
+}
+
+// 注入点的简单描述符，指向方法/构造函数参数或字段
+// 主要是要看它的子类AutowiredFieldElement和AutowiredMethodElement
+public class InjectionPoint {
+	@Nullable
+	protected MethodParameter methodParameter;
+	@Nullable
+	protected Field field;
+	@Nullable
+	private volatile Annotation[] fieldAnnotations;// 字段上标注的所有注解
+}
+```
+
+#### 依赖解析入口
+
+来到依赖处理入口处：`DefaultListableBeanFactory#resolveDependency()`
+
+```java
+public Object resolveDependency(DependencyDescriptor descriptor, 
+                                @Nullable String requestingBeanName,
+                                @Nullable Set<String> autowiredBeanNames,
+                                @Nullable TypeConverter typeConverter) throws BeansException {
+	// 一些特殊情况处理：如ObjectFactory与ObjectProvider延迟bean
+    descriptor.initParameterNameDiscovery(getParameterNameDiscoverer());
+    if (Optional.class == descriptor.getDependencyType())
+        return createOptionalDependency(descriptor, requestingBeanName);
+    else if (ObjectFactory.class == descriptor.getDependencyType() ||
+             ObjectProvider.class == descriptor.getDependencyType())
+        return new DependencyObjectProvider(descriptor, requestingBeanName);
+    else if (javaxInjectProviderClass == descriptor.getDependencyType())
+        return new Jsr330Factory().createDependencyProvider(descriptor, requestingBeanName);
+    else {
+        // @Lazy延迟注入入口在这：
+        // 这里会用cglib库生成一个bean的代理对象，在第1次使用的时候才去ioc容器获取该bean
+        Object result = getAutowireCandidateResolver().getLazyResolutionProxyIfNecessary(
+            descriptor, requestingBeanName);
+        if (result == null) 
+            // 默认入口：
+            result = doResolveDependency(
+                descriptor, requestingBeanName, autowiredBeanNames, typeConverter);
+        return result;
+    }
+}
+
+public Object doResolveDependency(DependencyDescriptor descriptor, 
+                                  @Nullable String beanName,
+                                  @Nullable Set<String> autowiredBeanNames, 
+                                  @Nullable TypeConverter typeConverter) 
+throws BeansException {
+    // 省略try/finally和部分代码
+    // 1.获取@Value中的值，即先处理是否为@Value注解
+  
+    // 2.集合或map类型bean注入处理
+
+    // 3.单bean字段bean注入处理
+}
+```
+
+`doResolveDependency()`方法依赖解析大致分为3种可能：
+
+- @Value的解析
+- 集合或map类型字段或参数类型的依赖解析
+- 单bean字段或参数类型的依赖解析
+
+具体细节在下面分开描述。
+
+#### @Value处理(待完善)
+
+`doResolveDependency()`依赖解析最开始是处理@Value注解标记的字段：
+
+```java
+public Object doResolveDependency(DependencyDescriptor descriptor, 
+                                  @Nullable String beanName,
+                                  @Nullable Set<String> autowiredBeanNames, 
+                                  @Nullable TypeConverter typeConverter) 
+throws BeansException {
+    // 省略try/finally和部分代码
+    // 1.获取@Value中的值，即先处理是否为@Value注解
+    Object value = getAutowireCandidateResolver().getSuggestedValue(descriptor);
+    if (value != null) {
+        if (value instanceof String) {
+            // 1.1 解析出该值，可能从系统属性或配置文件中获取，没有则默认值
+            String strVal = resolveEmbeddedValue((String) value);
+            BeanDefinition bd = (beanName != null && containsBean(beanName) ?
+                                 getMergedBeanDefinition(beanName) : null);
+            value = evaluateBeanDefinitionString(strVal, bd);
+        }
+        // 1.2 将String类型转换为需要的类型
+        TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());
+        return converter.convertIfNecessary(value, type, descriptor.getTypeDescriptor());
+    }
+
+    // 2.集合或map类型bean注入处理
+   	// 省略
+    // 3.单bean字段bean注入处理
+    // 省略
+}
+```
+
+> 如何解析具体步骤暂时懒得看了。
+
+#### 单bean注入
+
+`doResolveDependency()`中如果不是@Value注解，则再解析是否是集合或map类型bean注入处理，最后才是最常见的单bean处理：
+
+```java
+public Object doResolveDependency(DependencyDescriptor descriptor, 
+                                  @Nullable String beanName,
+                                  @Nullable Set<String> autowiredBeanNames, 
+                                  @Nullable TypeConverter typeConverter) 
+throws BeansException {
+    // 省略try/finally和部分代码
+    // 1.获取@Value中的值，即先处理是否为@Value注解
+	// 省略
+    // 2.集合或map类型bean注入处理
+	// 省略
+    
+    // 3.单bean字段bean注入处理
+    // 3.1 查询类型匹配的beanName-->Class映射
+    Map<String, Object> matchingBeans = findAutowireCandidates(beanName, type, descriptor);
+    if (matchingBeans.isEmpty()) {/* 省略*/}
+
+    String autowiredBeanName;
+    Object instanceCandidate;
+	// 3.2 多个bean匹配
+    if (matchingBeans.size() > 1) {
+        // 根据@Primary和@Priority查找最匹配bean
+        autowiredBeanName = determineAutowireCandidate(matchingBeans, descriptor);
+        if (autowiredBeanName == null) {/*省略*/}
+        instanceCandidate = matchingBeans.get(autowiredBeanName);
+    }
+    else {// 3.3 只有1个bean匹配
+        Map.Entry<String, Object> entry = matchingBeans.entrySet().iterator().next();
+        autowiredBeanName = entry.getKey();
+        instanceCandidate = entry.getValue();
+    }
+    if (autowiredBeanNames != null)
+        autowiredBeanNames.add(autowiredBeanName);
+    // 3.4 beanFactory.getBean()根据beanName获取bean对象
+    if (instanceCandidate instanceof Class)
+        instanceCandidate = descriptor.resolveCandidate(autowiredBeanName, type, this);
+    
+    Object result = instanceCandidate;
+ 	// 3.5 判断是否符合类型要求
+    if (!ClassUtils.isAssignableValue(type, result))
+        throw new BeanNotOfRequiredTypeException(
+        autowiredBeanName, type, instanceCandidate.getClass());
+    return result;
+}
+```
+
+单bean依赖解析过程就：根据注入类型查找候选者beanName，然后根据一些规则选出最佳候选bean，获取其对象实例返回。
+
+##### 类型匹配候选者
+
+根据类型查找所有候选者beanName：
+
+```java
+// 查找与所需类型匹配的 bean 实例。在指定 bean 的自动装配期间调用
+protected Map<String, Object> findAutowireCandidates(
+    @Nullable String beanName, Class<?> requiredType, 
+    DependencyDescriptor descriptor) {
+	// 根据类型获取所有beanName
+    String[] candidateNames = BeanFactoryUtils.beanNamesForTypeIncludingAncestors(
+        this, requiredType, true, descriptor.isEager());
+    Map<String, Object> result = CollectionUtils.newLinkedHashMap(candidateNames.length);
+    // 省略部分代码
+    return result;// 这里返回的map映射为：beanName-->Class
+}
+```
+
+##### 决定最佳候选者
+
+排序选出最佳候选者bean：
+
+```java
+/**
+ * 确定给定 bean 集中的自动装配候选者bean
+ * 顺序规则如下：@Primary-->@Priority/Ordered接口-->DependencyDescriptor中的字段名或参数名
+ */
+protected String determineAutowireCandidate(Map<String, Object> candidates, DependencyDescriptor descriptor) {
+    Class<?> requiredType = descriptor.getDependencyType();
+    // 1.先找有无标记为@Primary的bean，有则返回(只会有1个同类型bean可以标为Primary)
+    // 即根据beanName找到BeanDefinition来判断是否为Primary
+    String primaryCandidate = determinePrimaryCandidate(candidates, requiredType);
+    if (primaryCandidate != null) return primaryCandidate;
+         
+    // 2.再找最高优先级的候选者: @Priority或Ordered接口
+    String priorityCandidate = determineHighestPriorityCandidate(candidates, requiredType);
+    if (priorityCandidate != null) return priorityCandidate;
+    
+    // 3.冗余处理：根据要注入的字段名或参数名匹配候选者
+    for (Map.Entry<String, Object> entry : candidates.entrySet()) {
+        String candidateName = entry.getKey();
+        Object beanInstance = entry.getValue();
+        if ((beanInstance != null && 
+             this.resolvableDependencies.containsValue(beanInstance)) ||
+            matchesBeanName(candidateName, descriptor.getDependencyName())) {
+            return candidateName;
+        }
+    }
+    return null;
+}
+```
+
+#### 多bean注入
+
+`doResolveDependency()`依赖解析对于集合或map类型的字段或参数也能处理解析：
+
+```java
+public Object doResolveDependency(DependencyDescriptor descriptor, 
+                                  @Nullable String beanName,
+                                  @Nullable Set<String> autowiredBeanNames, 
+                                  @Nullable TypeConverter typeConverter) 
+throws BeansException {
+    // 省略try/finally和部分代码
+    // 1.获取@Value中的值，即先处理是否为@Value注解
+	// 省略
+    
+    // 2.集合或map类型bean注入处理
+    Object multipleBeans = resolveMultipleBeans(
+        descriptor, beanName, autowiredBeanNames, typeConverter);
+    if (multipleBeans != null) return multipleBeans;
+
+    // 3.单bean字段bean注入处理
+	// 省略
+}
+
+// 数组、集合或map类型bean注入解析
+private Object resolveMultipleBeans(
+    DependencyDescriptor descriptor, 
+    @Nullable String beanName,
+    @Nullable Set<String> autowiredBeanNames, 
+    @Nullable TypeConverter typeConverter) {
+	// 1.取出要注入字段或参数的类型
+    Class<?> type = descriptor.getDependencyType();
+	// 2.数组、集合、map类型注入解析
+    // 2.1 stream流类型
+    if (descriptor instanceof StreamDependencyDescriptor) { /*省略*/ }
+    // 2.2 数组类型
+    else if (type.isArray()) {/*处理逻辑和2.3差不多，省略*/}
+    // 2.3 集合类型
+    else if (Collection.class.isAssignableFrom(type) && type.isInterface()) { /*省略*/ }
+    // 2.4 map类型
+    else if (Map.class == type) { /*省略*/ }
+    else return null;// 其它类型不在这里解析
+}
+```
+
+当待注入字段或参数类型为stream、数组、集合、map时都会将类型匹配的所有bean全部返回。不同的是map类型中的元素为：`beanName-->bean`。
+
+##### 集合类型
+
+集合类型为Collection，大致有Set和List。
+
+```java
+// 数组、集合或map类型bean注入解析
+private Object resolveMultipleBeans(
+	// 省略
+    // 2.3 集合类型
+    else if (Collection.class.isAssignableFrom(type) && type.isInterface()) {
+        // 2.3.1 获取集合元素类型
+        Class<?> elementType = descriptor.getResolvableType().asCollection().resolveGeneric();
+        if (elementType == null) return null;
+        // 2.3.2 找到集合元素类型的匹配的bean
+        Map<String, Object> matchingBeans =findAutowireCandidates(
+            beanName, elementType, 
+            new MultiElementDescriptor(descriptor));
+        if (matchingBeans.isEmpty()) return null;
+        
+        if (autowiredBeanNames != null) 
+            autowiredBeanNames.addAll(matchingBeans.keySet());
+        // 2.3.3 转换为需要的集合类型
+        TypeConverter converter = (typeConverter != null ? typeConverter : getTypeConverter());
+        Object result = converter.convertIfNecessary(matchingBeans.values(), type);
+		// 2.3.4 根据PriorityOrdered和Ordered接口给定的顺序排序
+        if (result instanceof List) 
+            if (((List<?>) result).size() > 1) {
+                Comparator<Object> comparator = adaptDependencyComparator(matchingBeans);
+                if (comparator != null) {
+                    ((List<?>) result).sort(comparator);
+                }
+            }
+        return result;
+    }
+    // 2.4 map类型
+    else if (Map.class == type) {/*省略*/}
+}
+```
+
+##### map类型
+
+```java
+// 数组、集合或map类型bean注入解析
+private Object resolveMultipleBeans(
+    // 省略
+    // 2.4 map类型
+    else if (Map.class == type) {
+        // 2.4.1 获取map的key和value类型
+        ResolvableType mapType = descriptor.getResolvableType().asMap();
+        Class<?> keyType = mapType.resolveGeneric(0);
+        // 只有key为String时才有效
+        if (String.class != keyType) return null;
+        Class<?> valueType = mapType.resolveGeneric(1);
+        if (valueType == null) return null;
+        // 2.4.2 找到value元素类型的匹配的bean
+        Map<String, Object> matchingBeans = findAutowireCandidates(
+            beanName, valueType,
+            new MultiElementDescriptor(descriptor));
+        if (matchingBeans.isEmpty()) return null; 
+        if (autowiredBeanNames != null) 
+            autowiredBeanNames.addAll(matchingBeans.keySet());
+        return matchingBeans;
+    }
+    else return null;// 其它类型不在这里解析
+}
+```
+
+map类型字段或参数时这里返回的结果也是map类型：`beanName-->bean`，会查出所有类型匹配的bean。
+
+> 注意：上面代码中可以看到，只有当map的key为String时才会查出所有bean，并返回beanName->bean的map。
+
+## Java通用注解处理
+
+Spring通过`CommonAnnotationBeanPostProcessor`支持javax.annotation包中对bean管理的注解：
+
+- 注入注解
+  - javax.xml.ws.WebServiceRef 
+  - javax.ejb.EJB 
+  - javax.annotation.Resource 
+
+- 生命周期注解 
+  - javax.annotation.PostConstruct 
+  - javax.annotation.PreDestroy
+
+### @Resource注入
+
+```java
+public class CommonAnnotationBeanPostProcessor extends InitDestroyAnnotationBeanPostProcessor
+		implements InstantiationAwareBeanPostProcessor, BeanFactoryAware, Serializable {
+	private static final Set<Class<? extends Annotation>> resourceAnnotationTypes = 
+        new LinkedHashSet<>(4);
+
+	static {
+        // 提供对@Resource支持
+		resourceAnnotationTypes.add(Resource.class);
+		// 提供对@WebSrviceRef支持
+		webServiceRefClass = loadAnnotationType("javax.xml.ws.WebServiceRef");
+		if (webServiceRefClass != null) 
+			resourceAnnotationTypes.add(webServiceRefClass);
+		// 提供对@EJB支持
+		ejbClass = loadAnnotationType("javax.ejb.EJB");
+		if (ejbClass != null) 
+			resourceAnnotationTypes.add(ejbClass);
+    }
+
+    // 通过实现InstantiationAwareBeanPostProcessor接口的属性填充阶段的回调方法
+    // 实现了@Resource等注解的注入
+    public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
+        // 寻找标注有上诉3个注解的方法或字段进行注入
+        InjectionMetadata metadata = findResourceMetadata(beanName, bean.getClass(), pvs);
+        metadata.inject(bean, beanName, pvs);
+        // 省略部分代码
+        return pvs;
+    }
+}
+```
+
+可以很明显的看到此处对于@Resource的实现和@Autowired注解的实现几乎一样，所以不详细分析了。
+
+### @PostConstruct和@PreDestory回调
+
+@PostConstruct和@PreDestroy的由其父类`InitDestroyAnnotationBeanPostProcessor`支持。
+
+```java
+// 此类实现了BeanPostProcessor接口的
+public class InitDestroyAnnotationBeanPostProcessor
+		implements DestructionAwareBeanPostProcessor, MergedBeanDefinitionPostProcessor, PriorityOrdered, Serializable {
+    // 通过实现BeanPostProcessor接口的初始化前回调
+    // 实现了@PostConstruct指定的初始化方法执行
+    public Object postProcessBeforeInitialization(Object bean, String beanName) 
+        throws BeansException {
+        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
+        try {
+            metadata.invokeInitMethods(bean, beanName);
+        }
+        // 省略部分代码
+        return bean;
+    }
+    
+	// 通过实现DestructionAwareBeanPostProcessor接口的销毁前回调
+    // 实现@PreDestroy指定的销毁方法执行
+    public void postProcessBeforeDestruction(Object bean, String beanName) 
+        throws BeansException {
+        LifecycleMetadata metadata = findLifecycleMetadata(bean.getClass());
+        try {
+            metadata.invokeDestroyMethods(bean, beanName);
+        }
+      	// 省略部分代码
+    }
+}
+```
+
+更多细节这里不列出了，可以直接看源码，比较简单。
+
+### @Resource和@Autowired处理顺序
+
+从上面得知@Resouce由`CommonAnnotationBeanPostProcessor`处理，而`@Autowired`由`AutowiredAnnotationBeanPostProcessor`处理，它们都实现了`InstantiationAwareBeanPostProcessors#postProcessProperties()`回调，那么这两的优先级就决定了谁的处理顺序在前：order越小优先级越高。
+
+```java
+public class CommonAnnotationBeanPostProcessor{// 此处忽略其实现接口
+	public CommonAnnotationBeanPostProcessor() {
+		setOrder(Ordered.LOWEST_PRECEDENCE - 3);// 优先级在这
+		setInitAnnotationType(PostConstruct.class);
+		setDestroyAnnotationType(PreDestroy.class);
+		// 省略部分代码
+	}
+}
+
+public class AutowiredAnnotationBeanPostProcessor {// 此处忽略其实现接口
+	private int order = Ordered.LOWEST_PRECEDENCE - 2;
+}
+```
+
+从这里看出`AutowiredAnnotationBeanPostProcessor`优先级更低，说明**@Resource先于@Autowired注解处理**，即后者会覆盖前者。
+
+### @Resource和@Autowired区别(待续)
+
+在注入上没有任何区别，因为都是**调用的同一个依赖解析方法**，都会先通过类型查出所有bean，再根据优先级选择bean，选不出来再根据名称选择。
+
+在注解的属性上有区别。
+
+## 自定义依赖注入注解
+
+要自定义的依赖注入注解生效，也得像`AutowiredAnnotationBeanPostProcessor`那样解析元数据，依赖查找，依赖注入。
+
+最简单的方式就是扩展`AutowiredAnnotationBeanPostProcessor`这个并注入到容器内。
+
+```java
+@Target({ElementType.CONSTRUCTOR, ElementType.METHOD, ElementType.PARAMETER, ElementType.FIELD, ElementType.ANNOTATION_TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+public @interface MyAutowired {
+}
+
+@Configuration
+@Data
+public class DependencyProgressDemo {
+    public static void main(String[] args) {
+        try (AnnotationConfigApplicationContext application = 
+             new AnnotationConfigApplicationContext()) {
+            application.register(DependencyProgressDemo.class);
+            application.refresh();
+            System.out.println(application.getBean(DependencyProgressDemo.class));
+        }
+    }
+
+    @MyAutowired
+    private User user;
+    @Autowired
+    private List<User> userList;
+
+    // 用这个内部的beanName目的是覆盖默认的注入处理BeanPostProcessor
+    @Bean(org.springframework.context.annotation.AnnotationConfigUtils.
+          AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME)
+    // 此处必须是static静态方法，这样这个bean才能尽早注册，从而覆盖掉默认的
+    public static AutowiredAnnotationBeanPostProcessor getMy() {
+        AutowiredAnnotationBeanPostProcessor postProcessor = 
+            new AutowiredAnnotationBeanPostProcessor();
+        // 这里其实就是非常简单的把默认要解析的@Autowired和@Value注解
+        // 换成了自己的注解
+        postProcessor.setAutowiredAnnotationTypes(Set.of(MyAutowired.class));
+        return postProcessor;
+    }
+
+    @Bean
+    public User getUser1() {
+        return new User("fzk", 21);
+    }
+
+    @Bean
+    @Primary
+    public User getUser2() {
+        return new User("fzk", 21);
+    }
+}
+```
+
+在上面的例子中，扩展的处理器覆盖了默认的注入处理器，因此user字段可以成功注入，而userList字段将为null，因为`@Autowired`注解已经不再支持了。
+
+## 依赖查找和依赖注入来源
+
+| 来源                  | SpringBean对象 | 生命周期管理 | 配置元信息 | 使用场景           |
+| --------------------- | -------------- | ------------ | ---------- | ------------------ |
+| BeanDefinition        | √              | √            | √          | 依赖查找、依赖注入 |
+| 直接注册单例bean      | √              | ×            | ×          | 依赖查找、依赖注入 |
+| Resolvable Dependency | ×              | ×            | ×          | 依赖注入           |
+
+依赖查找指通过这种方式：`application.getBean("beanName")`获取IOC容器内bean对象，其实就是bean查找。
+
+依赖注入是指将bean对象、BeanFactory或Application、外部化配置注入到指定对象中，如@Autowired、@Value。
+
+- BeanDefinition就是Spring正常启动流程扫描到的bean定义或者通过Java API手动注册的bean定义。
+
+- 直接注册的单例bean指的是直接将某个对象put到ioc容器的单例容器map中：
+
+```java
+// 直接注入一个单例对象到ioc的单例容器map中
+application.getBeanFactory().registerSingleton("username", "fzk");
+```
+
+- ResolvableDependency其实指的就是Application和BeanFactory，这两个并没有注入IOC容器，不能通过依赖查找从容器内获得。
 
 # ClassPathXmlApplicationContext
 
