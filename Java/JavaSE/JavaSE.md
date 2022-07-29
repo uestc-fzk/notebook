@@ -2282,7 +2282,7 @@ Externalizable接口和Serializable接口功能类似，不过此接口强制用
 
 Java17源码nio包
 
-掘金社区和微信公众号
+[IO模型详解](https://mp.weixin.qq.com/s?__biz=Mzg3NzU5NTIwNg==&mid=2247496448&idx=1&sn=cd502f850290a25949dd4a11ac55a039)
 
 ## 概述
 

@@ -1436,6 +1436,10 @@ Reading messages... (press Ctrl-C to quit)
 
 ## stream
 
+> Stream是Redis 5引入的一种新数据类，是一种仅附加数据结构。支持多播的可持久化消息队列。
+> Redis借鉴Kafka的消费者组概念，实现了自己的一套消息队列功能。
+> Redis为每个消费者维护一个待处理条目列表(PEL)，即已送达但尚未ack的消息ID列表。由于tream没有实现消息分区和负载均衡，因此多个消费者消费同一个stream时必须使用xautoclaim命令自动去抢夺超时处理的消息的所有权。
+
 [Stream](https://redis.io/docs/manual/data-types/streams/) 是 Redis 5.0 引入的一种新数据类型。Redis Streams 主要是一种**仅附加数据结构**。**支持多播的可持久化消息队列**。
 
 Stream是Redis的数据类型中最复杂的，尽管数据类型本身非常简单，它实现了额外的非强制性的特性：提供了一组允许消费者以阻塞的方式等待生产者向Stream中发送的新消息，此外还有一个名为**消费者组Consumer Group**的概念。
@@ -2794,6 +2798,8 @@ rename-command CONFIG ""
 
 ## redis 的持久化
 
+![redis持久化机制](redis.assets/redis持久化机制.png)
+
 Redis 是内存数据库，如果不将内存中的数据库状态保存到磁盘，那么一旦服务器进程退出，服务器中的数据库状态也会消失
 
 Redis 提供了两种持久化方式:
@@ -3117,6 +3123,10 @@ Redis不使用真正LRU实现是因为需要消耗大量的内存维护访问顺
 # redis 主从复制
 
 > Redis Replication中文相关文档：http://www.redis.cn/topics/replication.html
+
+Redis主从复制是高可用基石，Redis有两种高可用方案：
+1.Sentinel哨兵：多个sentinel哨兵监控1个master和多个slave，通过流言协议判断主客观下线，通过raft算法选举sentinel leader进行自动故障迁移。但仅有1个主节点。
+2.Cluster集群：通过16384个哈希槽分割数据，提供负载均衡和可用性，实现了自动故障迁移、扩缩容、哈希槽重分配等功能。
 
 ## 概述
 
