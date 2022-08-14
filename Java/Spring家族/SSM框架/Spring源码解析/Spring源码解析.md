@@ -298,7 +298,7 @@ Bean初始化方法执行顺序是:
 
 Bean销毁方法执行顺序是：
 
-> `@Bean(destroyMethod="methodName") --> @PreDestroy --> DisposableBean`
+> `@PreDestroy --> DisposableBean --> @Bean(destroyMethod="methodName") `
 
 ## 依赖查找
 
@@ -4601,7 +4601,7 @@ public static void registerBeanPostProcessors(
 }
 ```
 
-这个方法主要是将所有的BeanPostProcessor提前实例化并添加到容器内。
+这个方法主要是**将所有的BeanPostProcessor提前实例化并添加到容器内**。
 
 比如这里注册了AutowiredAnnotationBeanPostProcessor，它会自动装配带注释的字段、setter 方法和任意配置方法。
 
@@ -4874,7 +4874,7 @@ protected void finishRefresh() {
     // 这里会将容器内实现了SmartLifecycle且设置为随容器刷新而重启的单例bean调用start()方法
     getLifecycleProcessor().onRefresh();
 
-    // 发布Spring应用上下文完成事件
+    // 发布Spring应用上下文刷新完成事件
     publishEvent(new ContextRefreshedEvent(this));
 
     // Participate in LiveBeansView MBean, if active.

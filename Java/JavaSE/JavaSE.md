@@ -123,8 +123,6 @@ public abstract class AbstractQueuedSynchronizer
 
 同步器也提供了一些模板方法，主要有acquire(int arg)，acquireShared(int arg)，release(int arg)，release(int arg)，以及一些限时获取的方法。acquire和acquireShared方法会在必要时将线程加入等待队列并阻塞。接下来就先研究一下这个等待队列。
 
-
-
 ### 同步队列
 
 同步队列是一个双向队列，由AQS的内部类Node构成，其每个节点保存同步状态失败的线程引用、等待状态、以及前后继结点
@@ -241,8 +239,6 @@ acquire是以互斥方式获取同步状态，可用于实现写锁。此方法�
         }
     }
 ```
-
-
 
 #### release
 
@@ -431,8 +427,6 @@ public class ConditionObject implements Condition, java.io.Serializable {
 在对象监视器模型上(即synchronized)，一个对象只有一个同步队列和等待队列，而Lock和Condition拥有一个同步队列和多个等待队列：
 
 ![Condition等待队列](JavaSE.assets/Condition等待队列.jpg)
-
-
 
 ### await
 
