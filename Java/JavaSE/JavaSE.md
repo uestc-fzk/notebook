@@ -335,8 +335,6 @@ acquire是以互斥方式获取同步状态，可用于实现写锁。此方法�
 
 可以看到在AQS层面，这里和独占式的释放区别不大。而在tryReleaseShared需要保证同步状态的安全释放，因为共享模式下，可能会有多个线程同时进行释放操作，这里就需要CAS+失败重试了。
 
-
-
 ## Condition接口
 
 在synchronized关键字中，有wait()和notify()等监视器方法来实现等待/通知机制。Lock和Condition接口结合使用也能实现等待/通知模式。
@@ -528,8 +526,6 @@ private void doSignal(Node first) {
              (first = firstWaiter) != null);
 }
 ```
-
-
 
 ## ReentrantLock
 
@@ -1432,10 +1428,6 @@ final void updateHead(Node<E> h, Node<E> p) {
 }
 ```
 
-
-
-
-
 ## 并发工具类
 
 ### CountDownLatch
@@ -1776,8 +1768,6 @@ public class CyclicBarrier {
 3、如果都到达了屏障，则优先执行屏障行为，再释放所有等待线程，生成下一代屏障
 4、否则，一直等待直到被唤醒或中断或屏障被破坏
 
-
-
 ### Semaphore
 
 信号量，控制并发访问的线程数量。可以用来做流量控制，如数据库连接。
@@ -1951,10 +1941,6 @@ public void acquire(int permits) throws InterruptedException {
 }
 ```
 
-
-
-
-
 ### Exchanger
 
 线程间交换数据
@@ -1963,11 +1949,480 @@ public void acquire(int permits) throws InterruptedException {
 
 ## ThreadPoolExecutor
 
-留坑...
+```java
+/*
+核心和最大池大小
+	ThreadPoolExecutor将根据corePoolSize和maximumPoolSize设置的边界自动调整池大小
+	方法execute(Runnable)中提交新任务时，若运行线程少于corePoolSize，则创建新线程来处理请求；如果少于maximumPoolSize个线程在运行，则仅当队列已满时才会创建新线程来处理任务。
+
+创建新线程
+	新线程是使用ThreadFactory创建的，默认Executors.defaultThreadFactory ，它创建的线程都在同一个ThreadGroup中，并且具有相同的NORM_PRIORITY优先级和非守护进程状态。
+	通过提供不同的 ThreadFactory，可以更改线程的名称、线程组、优先级、守护进程状态等。
+
+keep-alive
+	若池内线程数多于corePoolSize，非核心线程空闲时间超过 keepAliveTime将被终止。
+	默认情况下，keep-alive 策略仅适用于超过corePoolSize的线程，方法allowCoreThreadTimeOut(boolean)也可用于将此超时策略应用到核心线程
+
+工作队列
+	若线程数不少于corePoolSize，则先将新任务放入队列，若队列满了则尝试新建线程，若线程数等于maximumPoolSize，则执行拒绝策略。
+	队列的一般策略有以下三种：
+	1.直接交接。一个很好的默认选择是SynchronousQueue，它会阻塞线程直至将任务直接交给工作线程。
+	2.无界队列。注意无界队列会使得线程池只能创建核心线程，因为队列不会满。
+	3.有界队列。如ArrayBlockingQueue与有限的 maximumPoolSizes 一起使用时可防止资源耗尽。
+	队列大小和最大池大小可以相互权衡：
+	大队列+小池可以最大限度地减少CPU使用率、操作系统资源和上下文切换开销。如果任务经常阻塞（如它们受 I/O 限制），会降低吞吐量。
+	小队列+大池会使 CPU 更忙，调度开销更大，这也会降低吞吐量。
+
+拒绝策略
+	当Executor关闭时，或当工作队列满且线程数达maximumPoolSize时，提交的新任务将被拒绝并调用RejectedExecutionHandler.rejectedExecution()方法执行拒绝策略：
+	1.默认：ThreadPoolExecutor.AbortPolicy，抛出运行时异常RejectedExecutionException；
+	2.ThreadPoolExecutor.CallerRunsPolicy，调用execute本身的线程运行任务；
+	3.ThreadPoolExecutor.DiscardPolicy，无法执行的任务被简单地丢弃；
+	4.ThreadPoolExecutor.DiscardOldestPolicy中，如果 executor 没有关闭，则丢弃工作队列头部的任务，然后重试执行；
+
+挂钩方法
+	此类提供protected的beforeExecute(Thread, Runnable)和afterExecute(Runnable, Throwable)方法，这些方法在执行每个任务之前和之后调用。这些可用于操纵执行环境；例如，重新初始化 ThreadLocals、收集统计信息或添加日志条目。
+
+矫正
+	程序中不再引用并且没有剩余线程的池可以被回收（垃圾收集）而无需显式关闭。您可以通过设置适当的保持活动时间、使用零核心线程的下限和/或设置allowCoreThreadTimeOut(boolean)来配置池以允许所有未使用的线程最终死亡。
+*/
+public class ThreadPoolExecutor extends AbstractExecutorService {
+    /**
+     *
+     * @param corePoolSize 核心线程数，即使它们是空闲的也不会停止，除非设置allowCoreThreadTimeOut
+     * @param maximumPoolSize 线程池最大线程数
+     * @param keepAliveTime 多余核心线程的空闲线程在终止前等待新任务的最长时间。
+     * @param unit keepAliveTime的时间单位
+     * @param workQueue 用于在执行任务之前保存任务的队列。此队列将仅保存由execute方法提交的Runnable任务。
+     * @param threadFactory 创建线程的工厂
+     * @param handler 队列已满且线程池也满时使用的拒绝策略处理程序
+     */
+    public ThreadPoolExecutor(int corePoolSize,
+                              int maximumPoolSize,
+                              long keepAliveTime,
+                              TimeUnit unit,
+                              BlockingQueue<Runnable> workQueue,
+                              ThreadFactory threadFactory,
+                              RejectedExecutionHandler handler) {
+        // 省略赋值操作
+    }
+
+    // 执行任务前回调方法
+    protected void beforeExecute(Thread t, Runnable r) { }
+    // 执行任务后回调方法
+    protected void afterExecute(Runnable r, Throwable t) { }
+
+    // 线程数量
+    private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0));
+    private final BlockingQueue<Runnable> workQueue;// 阻塞工作队列
+
+    // 访问worker集合的锁
+    private final ReentrantLock mainLock = new ReentrantLock();
+    private final Condition termination = mainLock.newCondition();
+    // 工作线程集合
+    private final HashSet<Worker> workers = new HashSet<>();
+
+    // 跟踪获得的最大池大小。只能在 mainLock 下访问。
+    private int largestPoolSize;
+    // 已完成任务的计数器。仅在工作线程终止时更新。只能在 mainLock 下访问
+    private long completedTaskCount;
+    
+    // 执行中饱和或关闭时调用的拒绝策略处理程序
+    private volatile RejectedExecutionHandler handler;
+
+    // false(默认)，核心线程即使在空闲时也保持活动状态
+    // true，核心线程使用 keepAliveTime 超时等待工作
+    private volatile boolean allowCoreThreadTimeOut;
+}
+```
+
+### 提交任务
+
+```java
+// 提交任务
+public void execute(Runnable command) {
+    if (command == null)
+        throw new NullPointerException();
+    // 1.若线程少于核心线程数量，则创建新核心线程执行任务
+    int c = ctl.get();
+    if (workerCountOf(c) < corePoolSize) {
+        if (addWorker(command, true))
+            return;
+        c = ctl.get();
+    }
+    // 2.若线程池未停止且成功将任务加入队列，那么我们仍然需要仔细检查我们是否应该添加一个线程（因为现有的线程自上次检查后死亡）或者池在进入此方法后关闭。
+    if (isRunning(c) && workQueue.offer(command)) {
+        int recheck = ctl.get();
+        if (! isRunning(recheck) && remove(command))
+            reject(command);
+        else if (workerCountOf(recheck) == 0)// 若线程池无线程则新建线程
+            addWorker(null, false);
+    }
+    // 3.队列满了先尝试新建非核心线程
+    // 若线程池满了则执行拒绝策略
+    else if (!addWorker(command, false))// 无法创建新线程说明线程池满了
+        reject(command);
+}
+```
+
+### 添加工作线程
+
+在提交任务时可能会创建新的工作线程worker：
+
+```java
+/**
+ * 检查是否可以根据当前池状态和给定边界（核心或最大值）添加新工作线程
+ * 如果池已停止或有资格关闭，则此方法返回 false
+ * @param firstTask 新线程应该首先运行的任务（如果没有，则为 null）
+ * @param core 是否为创建核心线程
+ * @return true if successful
+ */
+private boolean addWorker(Runnable firstTask, boolean core) {
+    retry:
+    for (int c = ctl.get();;) {
+        // Check if queue empty only if necessary.
+        if (runStateAtLeast(c, SHUTDOWN)
+            && (runStateAtLeast(c, STOP)
+                || firstTask != null
+                || workQueue.isEmpty()))
+            return false;
+
+        // 1.先循环CAS让线程数+1
+        for (;;) {
+            // 线程数超过限制则创建失败
+            if (workerCountOf(c)
+                >= ((core ? corePoolSize : maximumPoolSize) & COUNT_MASK))
+                return false;
+            if (compareAndIncrementWorkerCount(c))
+                break retry;
+            c = ctl.get();  // Re-read ctl
+            if (runStateAtLeast(c, SHUTDOWN))
+                continue retry;
+            // else CAS failed due to workerCount change; retry inner loop
+        }
+    }
+
+    boolean workerStarted = false;
+    boolean workerAdded = false;
+    Worker w = null;
+    try {
+        // 2.新建工作线程
+        w = new Worker(firstTask);
+        final Thread t = w.thread;
+        // 3.将工作线程加入worker集合并启动线程
+        if (t != null) {
+            final ReentrantLock mainLock = this.mainLock;
+            mainLock.lock();
+            try {
+                // Recheck while holding lock.
+                // Back out on ThreadFactory failure or if
+                // shut down before lock acquired.
+                int c = ctl.get();
+
+                if (isRunning(c) ||
+                    (runStateLessThan(c, STOP) && firstTask == null)) {
+                    if (t.getState() != Thread.State.NEW)
+                        throw new IllegalThreadStateException();
+                    workers.add(w);
+                    workerAdded = true;
+                    int s = workers.size();
+                    if (s > largestPoolSize)
+                        largestPoolSize = s;
+                }
+            } finally {
+                mainLock.unlock();
+            }
+            if (workerAdded) {
+                t.start();
+                workerStarted = true;
+            }
+        }
+    } finally {
+        // 4.因为线程池停止或出现了异常导致工作线程未启动时，执行回滚操作
+        if (! workerStarted) addWorkerFailed(w);
+    }
+    return workerStarted;
+}
+
+// 回滚工作线程创建, 从worker移除、减少线程数
+private void addWorkerFailed(Worker w) {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        if (w != null)
+            workers.remove(w);
+        decrementWorkerCount();
+        tryTerminate();
+    } finally {
+        mainLock.unlock();
+    }
+}
+```
+
+### 工作线程Worker
+
+线程池以私有类Worker作为Runnable接口实现类，内置Thread属性作为线程运行。
+
+```java
+/**
+ * 此类扩展了AQS(AbstractQueuedSynchronizer)以简化获取和释放围绕每个任务执行的锁。
+ * 实现了简单的不可重入互斥锁，而不是使用 ReentrantLock，因为我们不希望工作任务在调用 setCorePoolSize 等池控制方法时能够重新获取锁。
+ * 此外，为了在线程真正开始运行任务之前抑制中断，我们将锁定状态初始化为负值，并在启动时将其清除（在 runWorker 中）。
+ */
+private final class Worker extends AbstractQueuedSynchronizer implements Runnable{
+	// 此工作者的运行线程
+    final Thread thread;
+    // 初始运行任务，可能为null
+    Runnable firstTask;
+    // 每个线程完成任务数量
+    volatile long completedTasks;
+
+    Worker(Runnable firstTask) {
+        setState(-1); // inhibit interrupts until runWorker
+        this.firstTask = firstTask;
+        this.thread = getThreadFactory().newThread(this);
+    }
+
+    /** Delegates main run loop to outer runWorker. */
+    public void run() {
+        runWorker(this);
+    }
+
+    // Lock methods
+    //
+    // The value 0 代表未锁定
+    // The value 1 代表锁定
+    public void lock()        { acquire(1); }
+    public boolean tryLock()  { return tryAcquire(1); }
+    public void unlock()      { release(1); }
+    public boolean isLocked() { return isHeldExclusively(); }
+}
+```
+
+run()方法调用了ThreadPoolExecutor.runWorker()方法：
+
+```java
+/**
+ * 反复从队列中获取任务并执行它们，同时处理许多问题： 
+ * 1. 我们可能从一个初始任务开始，在这种情况下我们不需要获取第一个任务。否则，只要 pool 正在运行，我们就从 getTask 获取任务。如果它返回 null ，则工作人员会因池状态或配置参数的更改而退出。其他退出是由外部代码中的异常抛出导致的，在这种情况下，completedAbruptly 成立，这通常会导致 processWorkerExit 替换该线程。 
+ * 2. 在运行任何任务之前，获取锁以防止在任务执行过程中发生其他池中断，然后我们确保除非池停止，否则该线程没有设置其中断。 
+ * 3.任务执行前beforeExecute回调，产生异常线程将结束
+ * 4.执行任务并收集它抛出的任何异常发送给afterExecute回调, 任何抛出的异常也会保守地导致线程死亡。 
+ * 5.任务执行完执行afterExecute回调，若抛出异常会导致线程死掉
+ */
+final void runWorker(Worker w) {
+    Thread wt = Thread.currentThread();
+    Runnable task = w.firstTask;
+    w.firstTask = null;
+    w.unlock(); // allow interrupts
+    boolean completedAbruptly = true;
+    try {
+        // 反复从队列中获取任务, 一旦返回null，将导致线程结束
+        while (task != null || (task = getTask()) != null) {
+            w.lock();
+            // 若线程池停止了，则中断工作线程
+            // if not, ensure thread is not interrupted.  This
+            // requires a recheck in second case to deal with
+            // shutdownNow race while clearing interrupt
+            if ((runStateAtLeast(ctl.get(), STOP) ||
+                 (Thread.interrupted() &&
+                  runStateAtLeast(ctl.get(), STOP))) &&
+                !wt.isInterrupted())
+                wt.interrupt();
+            try {
+                // 任务执行前回调
+                beforeExecute(wt, task);
+                try {
+                    // 任务执行
+                    task.run();
+                    // 任务执行后回调
+                    afterExecute(task, null);
+                } catch (Throwable ex) {
+                    afterExecute(task, ex);// 若产生异常则将异常一并传给任务执行后回调
+                    throw ex;
+                }
+            } finally {
+                task = null;
+                w.completedTasks++;
+                w.unlock();
+            }
+        }
+        completedAbruptly = false;
+    } finally {
+        // 工作线程结束的收尾工作
+        processWorkerExit(w, completedAbruptly);
+    }
+}
 
 
+// 为即将结束的工作线程进行清理和记录
+private void processWorkerExit(Worker w, boolean completedAbruptly) {
+    if (completedAbruptly) // If abrupt, then workerCount wasn't adjusted
+        decrementWorkerCount();
 
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        // 将完成任务数量加到线程池总共完成任务数量
+        // 并从工作者集合中移除
+        completedTaskCount += w.completedTasks;
+        workers.remove(w);
+    } finally {
+        mainLock.unlock();
+    }
 
+    tryTerminate();
+
+    int c = ctl.get();
+    if (runStateLessThan(c, STOP)) {
+        if (!completedAbruptly) {
+            int min = allowCoreThreadTimeOut ? 0 : corePoolSize;
+            if (min == 0 && ! workQueue.isEmpty())
+                min = 1;
+            if (workerCountOf(c) >= min)
+                return; // replacement not needed
+        }
+        // 如果核心线程数不足则新建核心线程
+        addWorker(null, false);
+    }
+}
+```
+
+**注意：工作线程每次取到任务后，都将改变自己的state来锁定自己，目的是避免被shutdown()方法中断。**
+
+### 获取任务
+
+在上面工作线程的runWorker()方法中，反复调用getTask()方法从队列获取任务：
+
+```java
+/**
+ * 执行阻塞或定时等待任务，具体取决于当前配置设置，或者如果此工作人员由于以下任何原因必须退出，则返回 null：   
+ * 1.工作线程超过 maximumPoolSize(由于调用 setMaximumPoolSize)。 
+ * 2.池停止。
+ * 3.池关闭，队列为空。 
+ * 4.该worker等待任务超时，超时worker在定时等待前后都会被终止（即allowCoreThreadTimeOut || workerCount > corePoolSize）
+ */
+private Runnable getTask() {
+    boolean timedOut = false; // Did the last poll() time out?
+    for (;;) {
+        int c = ctl.get();
+
+        // 1.池关闭且队列为空则返回null
+        if (runStateAtLeast(c, SHUTDOWN)
+            && (runStateAtLeast(c, STOP) || workQueue.isEmpty())) {
+            decrementWorkerCount();
+            return null;
+        }
+
+        int wc = workerCountOf(c);
+
+        // Are workers subject to culling?
+        boolean timed = allowCoreThreadTimeOut || wc > corePoolSize;
+		// 2.若工作线程超过限制或空闲等待超时则返回null
+        if ((wc > maximumPoolSize || (timed && timedOut))
+            && (wc > 1 || workQueue.isEmpty())) {
+            if (compareAndDecrementWorkerCount(c))
+                return null;
+            continue;
+        }
+		// 3.从队列获取任务，要么限时，要么take阻塞直至成功
+        try {
+            Runnable r = timed ?
+                workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
+            workQueue.take();
+            if (r != null)
+                return r;
+            timedOut = true;
+        } catch (InterruptedException retry) {
+            timedOut = false;
+        }
+    }
+}
+```
+
+可以看到此方法**根据是否返回null来控制是否结束线程**，若为核心线程，将使用阻塞队列的take()方法一直阻塞直至成功，若为非核心线程，则限时等待，失败则返回null。
+
+### 关闭线程池
+
+关闭线程池有两个方法：
+
+- **shutdown()**
+  将池状态设为SHUTDOWN，**中断空闲的线程**。
+
+```java
+// 有序关闭，继续之前之前的任务，但不会接受新任务
+public void shutdown() {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+        advanceRunState(SHUTDOWN);// 设置状态为SHUTDOWN
+        interruptIdleWorkers();// 中断所有空闲线程
+        // 关闭线程池回调函数
+        onShutdown(); // hook for ScheduledThreadPoolExecutor
+    } finally {
+        mainLock.unlock();
+    }
+    // 如果（SHUTDOWN 并且池和队列为空）或（STOP 并且池为空），则转换到 TERMINATED 状态
+    tryTerminate();
+}
+```
+
+问题1：中断所有空闲线程是如何判断空闲的呢？
+
+因为worker在获取到任务后会用lock()方法改变自己状态，所以**调用worker.tryLock()方法若失败说明正在执行任务**，成功则说明是空闲线程，直接中断即可。
+
+问题2：中断后，若队列还有任务，这些任务如何处理？
+
+还存活的工作线程获取任务getTask()方法**在池关闭但队列不为空时依旧会获取到任务并执行**，直至队列空才返回null从而结束线程。
+
+- **shutdownNow()**
+  将池状态设为STOP，**中断所有线程**，并返回等待执行任务列表。
+
+```java
+/**
+ * 终止所有线程，将等待队列的任务移除并返回
+ * 此实现通过Thread.interrupt中断任务；任何未能响应中断的任务都可能永远不会终止。
+ */
+public List<Runnable> shutdownNow() {
+    List<Runnable> tasks;
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+        advanceRunState(STOP);// 设置状态为stop
+        interruptWorkers();// 对所有线程调用Thread.interrupt方法
+        tasks = drainQueue();
+    } finally {
+        mainLock.unlock();
+    }
+    tryTerminate();
+    return tasks;
+}
+```
+
+### 配置和监控线程池
+
+1、配置线程池可以从以下几个角度分析：
+
+- 任务性质
+  - CPU密集型任务：**可配置cpu数量+1线程数**
+  - IO密集型任务：可配置2*cpu数量线程数
+- 任务优先级：若对任务优先级有要求，可使用**优先级阻塞队列PriorityBlockingQueue**。
+  为避免低优先级任务一直被抢占，可动态计算优先级，将等待时间作为优先级因素之一
+- **建议使用有界队列**
+
+2、监控线程池：如果系统大量使用线程池，有必要进行监控。
+
+用子类扩展线程池，重写其回调函数如beforeExecute、afterExecute和terminated方法对线程池进行监控，如监控任务平均执行时间、最大/最小执行时间、吐吞量等。
+
+监控线程池可以从以下几个属性考虑：
+
+- taskCount：线程池待执行任务数
+- completedTaskCount：线程池完成任务数
+- largestPoolSize：线程池曾创建的最大线程数，根据该值可知线程池是否满过
+- **getPoolSize：线程池线程数量**
+- **getActiveCount：活动线程数**
 
 # 序列化与反序列化
 
@@ -1998,6 +2453,12 @@ Serializable接口是一个标记接口，不用实现任何方法。一旦实�
 还强烈建议显式 serialVersionUID 声明尽可能使用**private修饰符**，serialVersionUID 字段不能用作继承成员。 数组类不能显式声明 serialVersionUID，因此它们始终具有默认计算值，但数组类无需匹配 serialVersionUID 值。
 
 最后，当大幅修改了一个类的时候，可以考虑更改版本号，使得以前保存在硬盘的字节流对应的对象无效，不能转换为目前这个新类。
+
+什么情况下需要修改serialVersionUID呢？分三种情况：
+
+- 如果只是修改了方法，反序列化不容影响，则无需修改版本号；
+- 如果只是修改了静态变量，瞬态变量（transient修饰的变量），反序列化不受影响，无需修改版本号；
+- 如果修改了非瞬态变量，则可能导致反序列化失败。**如果新类中实例变量的类型与序列化时类的类型不一致，则会反序列化失败，这时候需要更改serialVersionUID。**如果只是新增了实例变量，则反序列化回来新增的是默认值；如果减少了实例变量，反序列化时会忽略掉减少的实例变量。
 
 ### 简单使用
 
@@ -2042,7 +2503,7 @@ public class MySerialTest {
 
 从输出结果可以看出，**Java序列化同一对象，并不会将此对象序列化多次得到多个对象。**
 
-**Java序列化算法**
+### Java序列化算法
 
 > 1、所有保存到磁盘的对象都有一个序列化编码号
 > 2、当程序试图序列化一个对象时，会先检查此对象是否已经序列化过，只有此对象从未（在此虚拟机）被序列化过，才会将此对象序列化为字节序列输出。
