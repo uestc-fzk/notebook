@@ -2633,6 +2633,8 @@ private void loadBeanDefinitionsForBeanMethod(BeanMethod beanMethod) {
 
 `ConfigurationClassPostProcessor`的实现的接口`BeanDefinitionRegistryPostProcessor`主要是解析配置类从而注册BeanDefinition，而该接口还有个父接口`BeanFactoryPostProcessor`，对该接口方法`postProcessBeanFactory()`实现为增强容器内所有的配置类，代理其@Bean方法从而使得再次调用能返回同一个bean。
 
+> 注意：@Component标注的类为lite模式不增强，而@Configuration标注的类为Full模式，增强其@Bean方法
+
 ```java
 // 通过用 CGLIB 增强的子类替换它们，准备在运行时为 bean 请求提供服务的配置类。
 public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
@@ -6574,7 +6576,7 @@ public class UserServiceProxy implements UserService {
 
 ### jdk动态代理
 
-**JDK 动态代理**基于接口代理，在 JVM 运行时通过反射机制生成一个实现代理接口的类，在调用具体方法时会调用 InvokeHandler 来进行处理。
+**JDK 动态代理**基于接口代理，**在 JVM 运行时通过生成字节码的byte数组并以类加载器加载该字节码二进制流以生成一个实现代理接口的类**，在调用代理方法时会调用 InvokeHandler#invoke()并传入**Method对象来反射调用被代理对象的方法**。
 
 新生成的代理对象会继承 `Proxy`，且实现所有的入参 `interfaces` 中的接口，在实现的方法中实际是调用入参 `InvocationHandler` 的 `invoke()` 方法。
 
@@ -6636,12 +6638,9 @@ public class Main {
         }
 
         /**
-         * 
-         * @param proxy 调用该方法的代理实例
-         *
+         * @param proxy 调用该方法的代理实例 
          * @param method  Method实例对应于代理实例上调用的接口方法。 
          *                Method对象的声明类将是声明该方法的接口，该接口可能是代理类继承该方法的代理接口的超接口。
-         *
          * @param args 一个对象数组，其中包含在代理实例上的方法调用中传递的参数值，如果接口方法不接受任何参数，则null
          *             原始类型的参数被包装在适当的原始包装类的实例中，例如Integer或Boolean
          */
@@ -6661,6 +6660,179 @@ public class Main {
     }
 }
 ```
+
+#### 新创建的Class文件
+
+在上面代码的main方法中添加如下配置可将JDK生成的Class对象保存为Class文件：
+
+```java
+public static void main(String[] args) {
+    // 此配置将使得jdk生成的Class文件保存于工程根目录
+    System.getProperties().put("jdk.proxy.ProxyGenerator.saveGeneratedFiles", "true");
+	// 省略代码
+}
+```
+
+上面例子生成的class文件反编译结果如下：
+
+```java
+// 可以看到生成代理类继承了Proxy类，且实现了指定的UserService接口
+public final class $Proxy0 extends Proxy implements UserService {
+    private static final Method m0;
+    private static final Method m1;
+    private static final Method m2;
+    private static final Method m3;
+	// 这里传入的InvocationHandler就是上面实现的处理器对象
+    // 它将被设置到Proxy.h属性中
+    public $Proxy0(InvocationHandler var1) { super(var1);}
+
+    public final int hashCode() {
+        try {
+            return (Integer)super.h.invoke(this, m0, (Object[])null);
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    public final boolean equals(Object var1) {
+        try {
+            return (Boolean)super.h.invoke(this, m1, new Object[]{var1});
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    public final String toString() {
+        try {
+            return (String)super.h.invoke(this, m2, (Object[])null);
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    public final User getUser(String var1) {
+        try {
+            return (User)super.h.invoke(this, m3, new Object[]{var1});
+        } catch (RuntimeException | Error var2) {
+            throw var2;
+        } catch (Throwable var3) {
+            throw new UndeclaredThrowableException(var3);
+        }
+    }
+
+    static {
+        try {
+            m0 = Class.forName("java.lang.Object").getMethod("hashCode");
+            m1 = Class.forName("java.lang.Object").getMethod("equals", Class.forName("java.lang.Object"));
+            m2 = Class.forName("java.lang.Object").getMethod("toString");
+            m3 = Class.forName("service.UserService").getMethod("getUser", Class.forName("java.lang.String"));
+        } catch (NoSuchMethodException var2) {
+            throw new NoSuchMethodError(var2.getMessage());
+        } catch (ClassNotFoundException var3) {
+            throw new NoClassDefFoundError(var3.getMessage());
+        }
+    }
+
+    private static MethodHandles.Lookup proxyClassLookup(MethodHandles.Lookup var0) throws IllegalAccessException {
+        if (var0.lookupClass() == Proxy.class && var0.hasFullPrivilegeAccess()) {
+            return MethodHandles.lookup();
+        } else {
+            throw new IllegalAccessException(var0.toString());
+        }
+    }
+}
+```
+
+jdk动态代理会代理Object的equals()、hashCode()、toString()方法，其它不代理。
+
+JDK动态代理**将所有代理方法调用都指向InvocationHandler的invoke()方法**，并传入Method对象、方法参数，**让调用器以Method对象反射调用**。
+
+#### Proxy原理
+
+Proxy创建代理对象方法会先调用内部类ProxyBuilder的方法获得代理Class，再以代理Class得到代理对象：
+
+```java
+// Proxy.ProxyBuilder.class
+private static Class<?> defineProxyClass(Module m, List<Class<?>> interfaces) {
+    String proxyPkg = null;     // package to define proxy class in
+    int accessFlags = Modifier.PUBLIC | Modifier.FINAL;
+    boolean nonExported = false;
+
+    //记录非public代理接口包名，目的是让代理class定义在同一个包下
+    //验证所有非public接口在相同包
+    for (Class<?> intf : interfaces) {
+        int flags = intf.getModifiers();
+        if (!Modifier.isPublic(flags)) {
+            accessFlags = Modifier.FINAL;  // non-public, final
+            String pkg = intf.getPackageName();
+            if (proxyPkg == null)
+                proxyPkg = pkg;
+            else if (!pkg.equals(proxyPkg))
+                throw new IllegalArgumentException(
+                    "non-public interfaces from different packages");
+        } else {
+            if (!intf.getModule().isExported(intf.getPackageName())) {
+                // module-private types
+                nonExported = true;
+            }
+        }
+    }
+	// 说明所有接口都是public
+    if (proxyPkg == null) {
+        if (!m.isNamed())
+            throw new InternalError("ununamed module: " + m);
+        // 若没有私有模块化，则代理包名为com.sun.proxy
+        proxyPkg = nonExported ? PROXY_PACKAGE_PREFIX + "." + m.getName()
+            : m.getName();
+    }
+    // 省略一堆检查
+    // 生成唯一代理类名
+    long num = nextUniqueNumber.getAndIncrement();
+    String proxyName = proxyPkg.isEmpty()
+        ? proxyClassNamePrefix + num
+        : proxyPkg + "." + proxyClassNamePrefix + num;
+
+    ClassLoader loader = getLoader(m);
+    trace(proxyName, m, loader, interfaces);
+
+   	// 生成字节码byte数组
+    byte[] proxyClassFile = ProxyGenerator.generateProxyClass(loader, proxyName, interfaces, accessFlags);
+    try {
+        // 以给定类加载器加载字节码数组生成Class对象并返回
+        Class<?> pc = JLA.defineClass(loader, proxyName, proxyClassFile,
+                                      null, "__dynamic_proxy__");
+        reverseProxyCache.sub(pc).putIfAbsent(loader, Boolean.TRUE);
+        return pc;
+    } catch (ClassFormatError e) { /*省略*/ }
+}
+```
+
+1. 遍历需要实现的接口，进行校验；
+   - 校验该接口是在存在这个 ClassLoader 中
+   - 校验是否真的是接口（因为入参也可以不传接口）
+   - 校验是否出现相同的接口（因为入参也可以传相同的接口）
+2. 遍历需要实现的接口，判断是否存在非 public的接口，该步骤和生成的代理类的名称有关；
+   - 如果存在，则记录下来，并记录所在的包名
+   - 如果存在非 `public` 的接口，且还存在其他包路径下的接口，则抛出异常
+3. 如果不存在非 `public` 的接口，则代理类的名称前缀为 `com.sun.proxy.`
+4. 生成一个代理类的名称，com.sun.proxy.$Proxy+唯一数字(从0开始递增) 
+   - 对于非 `public` 的接口，这里的名前缀就取原接口包名了，因为不是 `public` 修饰需要保证可访问
+5. 根据代理类的名称、需要实现的接口以及修饰符**生成字节码的字节数组**
+6. 根据第 `5` 步生成的代理类对应的字节数组**以类加载器加载字节码二进制流以创建 Class 对象**
+
+#### 问题
+
+1. jdk代理为什么只能代理接口，而不能代理类？
+   对于入参中的 `interfaces` 如果存在非接口，那么会抛出异常；且从生成的代理对象中看到会继承 `Proxy` 这个类，在 Java 中类只能是单继承关系，无法再继承一个代理类，所以只能基于接口代理。
+2. 入参 `InvocationHandler h` 实际放入了父类 `Proxy` 中，为什么不直接声明到这个代理对象里面呢，这样甚至不用继承Proxy类？
+   我不太理解，因为如果生成的代理对象新增一个属性来放调用器，并且所有代理方法全部执行调用器的invoke()方法并传入Method对象，也能实现代理诶，这样做甚至可以代理子类！
+   Proxy.isProxyClass()以其是否继承Proxy判断是否为jdk代理类，但我认为用一个标记接口也能实现此辨别功能。
 
 ### cglib动态代理
 
@@ -6708,6 +6880,26 @@ public class CglibProxy {
     }
 }
 ```
+
+#### 新创建的Class文件
+
+以下配置可以将CGLIB产生的Class对象保存为Class文件：
+
+```java
+public class CglibProxy {
+    public static void main(String[] args) {
+        // 指定 CGLIB 将动态生成的代理类保存至指定的磁盘路径下
+        System.setProperty(DebuggingClassWriter.DEBUG_LOCATION_PROPERTY, "./cglib");
+        // 省略
+    }
+}
+```
+
+#### 原理
+
+https://www.cnblogs.com/ZhangZiSheng001/p/11917086.html
+
+看不懂...
 
 ## 前言
 
@@ -10157,8 +10349,6 @@ protected void commitTransactionAfterReturning(@Nullable TransactionInfo txInfo)
 ```
 
 就是拿到connection直接提交了。
-
-
 
 
 
