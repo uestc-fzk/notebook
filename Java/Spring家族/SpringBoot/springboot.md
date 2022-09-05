@@ -303,7 +303,7 @@ public static void main(String[] args) {
     - SpringBoot帮我们配置好了所有web开发的常见场景
 - 默认的包结构
     - 主程序所在包及其下面的所有子包里面的组件都会被默认扫描进来
-    因此典型的包布局：
+      因此典型的包布局：
       
         ```
         com 
@@ -4303,3 +4303,1199 @@ spring.profiles.active=myproduction
 没看懂。
 
 深入的时候可以再研究研究。
+
+# Jar包启动流程
+
+Jar包启动机制由Java提供，具体看《Java核心技术》对jar的分析。
+
+Spring Boot 提供了 Maven 插件 [`spring-boot-maven-plugin`](https://docs.spring.io/spring-boot/docs/current/reference/html/build-tool-plugins.html#build-tool-plugins-maven-plugin)，可以很方便的将我们的 Spring Boot 项目打成 `jar` 包，`jar` 包中主要分为三个模块：
+
+- `BOOT-INF` 目录，里面保存了我们自己 Spring Boot 项目编译后的所有文件，其中 `classes` 目录下面就是编译后的 .class 文件，包括项目中的配置文件等，`lib` 目录下就是我们引入的第三方依赖
+- `META-INF` 目录，通过 `MANIFEST.MF` 文件提供 `jar` 包的**元数据**，声明 `jar` 的启动类等信息。每个 Java `jar` 包应该是都有这个文件的，参考 [Oracle 官方](https://docs.oracle.com/javase/8/docs/technotes/guides/jar/jar.html)对于 `jar` 的说明，里面有一个 `Main-Class` 配置用于指定启动类
+- `org.springframework.boot.loader` 目录，也就是 Spring Boot 的 `spring-boot-loader` 子模块，它就是 `java -jar xxx.jar` 启动 Spring Boot 项目的秘密所在，上面的 `Main-Class` 指定的就是里面的一个类
+
+通过 `java -jar` 启动应用时，根据通过 `MANIFEST.MF` 文件提供的 `Main-Class` 配置会调用 `org.springframework.boot.loader.JarLauncher` 的`main(String[])` 方法；其中会先创建一个**自定义的 ClassLoader 类加载器**(它可从`BOOT-INF`目录下加载出我们 Spring Boot 应用的 Class 类对象，包括依赖的第三方 `jar` 包中的 Class 类对象)；然后根据 `Start-Class` 配置调用我们 Spring Boot 应用启动类的 `main(String[])` 方法（反射），这样也就启动了应用。
+
+# SpringBoot启动流程
+
+资料来源：小马哥的书《SpringBoot 编程思想》；https://www.cnblogs.com/lifullmoon/p/14957398.html；
+
+启动类如下：
+
+```java
+@SpringBootApplication
+public class SpringBootDemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(SpringBootDemoApplication.class, args);
+    }
+}
+```
+
+由jar包启动流程得知，启动类的main方法将被JarLauncher#launch()调用。
+
+## 	新建SpringApplication
+
+先看看SpringApplication这个类：
+
+```java
+public class SpringApplication {
+	// Spring应用关闭钩子
+	static final SpringApplicationShutdownHook shutdownHook = new SpringApplicationShutdownHook();
+    
+	// 原始来源配置类（通常为我们的启动类，优先注册）
+	private Set<Class<?>> primarySources;
+	// 来源 Bean（优先注册）
+	private Set<String> sources = new LinkedHashSet<>();
+	// 启动类
+	private Class<?> mainApplicationClass;
+	
+	// 是否接收命令行中的参数
+	private boolean addCommandLineProperties = true;
+	// 是否设置 ConversionService 类型转换器
+	private boolean addConversionService = true;
+
+    // 资源加载器
+	private ResourceLoader resourceLoader;
+	// beanName生成器
+	private BeanNameGenerator beanNameGenerator;
+	// 应用环境
+	private ConfigurableEnvironment environment;
+
+    // Web 应用的类型（Servlet、Reactive）
+	private WebApplicationType webApplicationType;
+
+	// ApplicationContextInitializer对象（主要是对 Spring 应用上下文做一些初始化工作）
+	private List<ApplicationContextInitializer<?>> initializers;
+	// ApplicationListener 监听器（支持在整个 SpringBoot 的多个时间点进行扩展）
+	private List<ApplicationListener<?>> listeners;
+
+	// 额外的profile环境
+	private Set<String> additionalProfiles = Collections.emptySet();
+
+	// ApplicationContext工厂，将由它新建(Servlet或Reactive的应用上下文)
+	private ApplicationContextFactory applicationContextFactory = ApplicationContextFactory.DEFAULT;
+}
+```
+
+SpringBoot启动的SpringApplication.run()会调用如下方法：
+
+它会先新建SpringApplication实例，再调用实例的run方法：
+
+```java
+public static ConfigurableApplicationContext run(Class<?>[] primarySources, String[] args) {
+    return new SpringApplication(primarySources).run(args);
+}
+
+public SpringApplication(ResourceLoader resourceLoader, Class<?>... primarySources) {
+    this.resourceLoader = resourceLoader;
+    Assert.notNull(primarySources, "PrimarySources must not be null");
+    this.primarySources = new LinkedHashSet<>(Arrays.asList(primarySources));
+    // 1.通过`classpath`判断是否存在相应的Class对象，决定当前Web应用的类型(REACTIVE、SERVLET、NONE)
+    this.webApplicationType = WebApplicationType.deduceFromClasspath();
+
+    this.bootstrapRegistryInitializers = new ArrayList<>(
+        getSpringFactoriesInstances(BootstrapRegistryInitializer.class));
+    /*
+    2.通过类加载器从`META-INF/spring.factories`文件中获取ApplicationContextInitializer类型的类名称
+    并进行实例化
+     */
+    setInitializers((Collection) getSpringFactoriesInstances(
+        ApplicationContextInitializer.class));
+    /*
+     3.通过类加载器从`META-INF/spring.factories`文件中获取ApplicationListener类型的类名称，并进行实例化
+     例如有一个 {@link ConfigFileApplicationListener}
+     */
+    setListeners((Collection) getSpringFactoriesInstances(ApplicationListener.class));
+    this.mainApplicationClass = deduceMainApplicationClass();
+}
+```
+
+### 判断Web应用类型
+
+Web应用类型有Servlet、Reactive、None，根据各自相关的类是否在类路径上判断：
+
+> 注意：从下面代码可知，当webmvc和webflux包都在类路径时，默认启动Servlet应用。
+
+```java
+static WebApplicationType deduceFromClasspath() {
+    // 当存在DispatcherHandler而不存在DispatcherServlet时为Reactive Web应用
+    if (ClassUtils.isPresent(WEBFLUX_INDICATOR_CLASS, null) && !ClassUtils.isPresent(WEBMVC_INDICATOR_CLASS, null)
+        && !ClassUtils.isPresent(JERSEY_INDICATOR_CLASS, null)) {
+        return WebApplicationType.REACTIVE;
+    }
+    // 当不存在Servlet类时为非Web应用
+    for (String className : SERVLET_INDICATOR_CLASSES) {
+        if (!ClassUtils.isPresent(className, null)) {
+            return WebApplicationType.NONE;
+        }
+    }
+    // 否则为Servlet Web应用
+    return WebApplicationType.SERVLET;
+}
+```
+
+### 实例化Initializer和Listener
+
+接下来是对`ApplicationContextInitializer`和`ApplicationListener`的实例化，它们都调用`getSpringFactoriesInstances(Class)`方法从`META-INF/spring.factories`文件中获取所有实现类名称并将其实例化：所以只看这个方法的实现：
+
+#### getSpringFactoriesInstances
+
+对于这个spring.factories文件，比如spring-boot这个jar包：关于`ApplicationContextInitializer`和`ApplicationListener`指定的实现类：
+
+```properties
+# Application Context Initializers
+org.springframework.context.ApplicationContextInitializer=\
+org.springframework.boot.context.ConfigurationWarningsApplicationContextInitializer,\
+org.springframework.boot.context.ContextIdApplicationContextInitializer,\
+org.springframework.boot.context.config.DelegatingApplicationContextInitializer,\
+org.springframework.boot.rsocket.context.RSocketPortInfoApplicationContextInitializer,\
+org.springframework.boot.web.context.ServerPortInfoApplicationContextInitializer
+
+# Application Listeners
+org.springframework.context.ApplicationListener=\
+org.springframework.boot.ClearCachesApplicationListener,\
+org.springframework.boot.builder.ParentContextCloserApplicationListener,\
+org.springframework.boot.context.FileEncodingApplicationListener,\
+org.springframework.boot.context.config.AnsiOutputApplicationListener,\
+org.springframework.boot.context.config.DelegatingApplicationListener,\
+org.springframework.boot.context.logging.LoggingApplicationListener,\
+org.springframework.boot.env.EnvironmentPostProcessorApplicationListener
+```
+
+此方法的任务就是从`META-INF/spring.factories`文件中获取某类Class的所有**指定**的实现类全类名。
+
+```java
+private <T> Collection<T> getSpringFactoriesInstances(Class<T> type) {
+    return getSpringFactoriesInstances(type, new Class<?>[] {});
+}
+
+private <T> Collection<T> getSpringFactoriesInstances(Class<T> type, Class<?>[] parameterTypes, Object... args) {
+    ClassLoader classLoader = getClassLoader();
+    // 通过类加载器从`META-INF/spring.factories`文件中获取类型为`type`的子类名称
+    Set<String> names = new LinkedHashSet<>(SpringFactoriesLoader.loadFactoryNames(type, classLoader));
+    // 根据所有类名进行反射调用构造器实例化
+    List<T> instances = createSpringFactoriesInstances(type, parameterTypes, classLoader, args, names);
+    // 通过 `@Order` 注解进行排序
+    AnnotationAwareOrderComparator.sort(instances);
+    return instances;
+}
+```
+
+接下来进入SpringFactoriesLoader.loadFactoryNames(type, classLoader)方法：
+
+```java
+// SpringFactoriesLoader.java
+public static List<String> loadFactoryNames(Class<?> factoryType, @Nullable ClassLoader classLoader) {
+    ClassLoader classLoaderToUse = classLoader;
+    if (classLoaderToUse == null)
+        classLoaderToUse = SpringFactoriesLoader.class.getClassLoader();
+
+    String factoryTypeName = factoryType.getName();
+    return loadSpringFactories(classLoaderToUse).getOrDefault(factoryTypeName, Collections.emptyList());
+}
+
+// 解析从`META-INF/spring.factories`文件，将每个类型对应的所有类名转为map
+// key--> 类型, 如ApplicationContextInitializer
+// value-->所有指定的类，封装为List<String>
+private static Map<String, List<String>> loadSpringFactories(ClassLoader classLoader) {
+    // 从缓存中直接获取
+    Map<String, List<String>> result = cache.get(classLoader);
+    if (result != null)
+        return result;
+
+    result = new HashMap<>();
+    // 省略try/catch
+    Enumeration<URL> urls = classLoader.getResources(FACTORIES_RESOURCE_LOCATION);
+    while (urls.hasMoreElements()) {
+        URL url = urls.nextElement();
+        UrlResource resource = new UrlResource(url);
+        Properties properties = PropertiesLoaderUtils.loadProperties(resource);
+        for (Map.Entry<?, ?> entry : properties.entrySet()) {
+            String factoryTypeName = ((String) entry.getKey()).trim();
+            String[] factoryImplementationNames =
+                StringUtils.commaDelimitedListToStringArray((String) entry.getValue());
+            for (String factoryImplementationName : factoryImplementationNames) {
+                result.computeIfAbsent(factoryTypeName, key -> new ArrayList<>())
+                    .add(factoryImplementationName.trim());
+            }
+        }
+    }
+
+    // Replace all lists with unmodifiable lists containing unique elements
+    result.replaceAll((factoryType, implementations) -> implementations.stream().distinct()
+                      .collect(Collectors.collectingAndThen(Collectors.toList(), Collections::unmodifiableList)));
+    cache.put(classLoader, result);
+    return result;
+}
+```
+
+## SpringApplication#run()
+
+新建SpringApplication对象后就会调用其run()方法：
+
+```java
+public ConfigurableApplicationContext run(String... args) {
+    long startTime = System.nanoTime();
+    // 1.创建BootstrapContext--->引导上下文
+    DefaultBootstrapContext bootstrapContext = createBootstrapContext();
+    ConfigurableApplicationContext context = null;
+    configureHeadlessProperty();
+    // 2.从从`META-INF/spring.factories`文件找到所有SpringApplicationRunListener并实例化
+    SpringApplicationRunListeners listeners = getRunListeners(args);
+    // 3.SpringApplicationRunListener#starting回调
+    // 如EventPublishingRunListener在此处会广播ApplicationStartingEvent事件
+    listeners.starting(bootstrapContext, this.mainApplicationClass);
+    try {
+        ApplicationArguments applicationArguments = new DefaultApplicationArguments(args);
+        // 4.准备Environment环境
+        ConfigurableEnvironment environment = prepareEnvironment(listeners, bootstrapContext, applicationArguments);
+        configureIgnoreBeanInfo(environment);
+        // 打印banner
+        Banner printedBanner = printBanner(environment);
+        // 5.创建ApplicationContext--->应用程序上下文
+        context = createApplicationContext();
+        context.setApplicationStartup(this.applicationStartup);
+        // 6.应用上下文初始化，如执行ApplicationContextInitializer#initialize(..)方法
+        prepareContext(bootstrapContext, context, environment, listeners, applicationArguments, printedBanner);
+        // 7.应用上下文刷新！即调用applicationContext.refresh()方法
+        // 刷新 Spring 应用上下文，在这里会完成bean扫描、注册、预实例化
+		// 同时会初始化好 Servlet 容器，例如 Tomcat
+        refreshContext(context);
+        // 8.完成刷新 Spring 应用上下文的后置操作，空实现，扩展点
+        afterRefresh(context, applicationArguments);
+        Duration timeTakenToStartup = Duration.ofNanos(System.nanoTime() - startTime);
+        if (this.logStartupInfo) {
+            new StartupInfoLogger(this.mainApplicationClass).logStarted(getApplicationLog(), timeTakenToStartup);
+        }
+        // 9.RunListener#started回调
+        listeners.started(context, timeTakenToStartup);
+        // 10.回调IoC容器中所有 ApplicationRunner 和 CommandLineRunner 类型的启动器
+        callRunners(context, applicationArguments);
+    }
+    catch (Throwable ex) {
+        handleRunFailure(context, ex, listeners);
+        throw new IllegalStateException(ex);
+    }
+    try {
+        Duration timeTakenToReady = Duration.ofNanos(System.nanoTime() - startTime);
+        // 11.RunListener#ready回调
+        listeners.ready(context, timeTakenToReady);
+    }
+    catch (Throwable ex) {
+        handleRunFailure(context, ex, null);
+        throw new IllegalStateException(ex);
+    }
+    return context;
+}
+```
+
+### SpringApplicationRunListener
+
+**SpringApplication#run方法侦听器，它会随着SpringApplication的启动流程而执行各个阶段回调：**
+
+```java
+// SpringApplication run方法的侦听器。 SpringApplicationRunListener通过SpringFactoriesLoader加载，并且应该声明一个接受SpringApplication实例和String[]参数的公共构造函数。每次运行都会创建一个新的SpringApplicationRunListener实例
+public interface SpringApplicationRunListener {
+	// run方法第1次启动时立即调用，用于非常早期初始化
+    // @param bootstrapContext – 引导上下文
+    default void starting(ConfigurableBootstrapContext bootstrapContext) {}
+
+    // 环境Environment准备好的回调
+    // @param bootstrapContext – 引导上下文
+    default void environmentPrepared(ConfigurableBootstrapContext bootstrapContext,
+                                     ConfigurableEnvironment environment) {}
+
+  	// 在创建和准备ApplicationContext后，但在加载源之前调用
+    // @param context – 应用程序上下文
+    default void contextPrepared(ConfigurableApplicationContext context) {}
+    
+	// 应用上下文加载完成回调
+    default void contextLoaded(ConfigurableApplicationContext context) {}
+
+    // 上下文已刷新，应用程序已启动，但尚未调用CommandLineRunners和ApplicationRunners
+    default void started(ConfigurableApplicationContext context, Duration timeTaken) {
+        started(context);
+    }
+    @Deprecated// 2.8将删除
+    default void started(ConfigurableApplicationContext context) { }
+
+    /**
+	 * 在run方法完成之前回调，此时应用程序上下文已刷新并且所有CommandLineRunners和ApplicationRunners已被调用
+	 * @param timeTaken 应用程序准备就绪所用的时间，如果未知，则为null
+	 * @since 2.6.0
+	 */
+    default void ready(ConfigurableApplicationContext context, Duration timeTaken) {
+        running(context);
+    }
+
+    @Deprecated// 由ready()替代了
+    default void running(ConfigurableApplicationContext context){}
+
+    // 当运行应用程序发生故障时回调
+    default void failed(ConfigurableApplicationContext context, Throwable exception){}
+}
+```
+
+这个run方法全程跟踪回调器有一个经典实现：`EventPublishingRunListener`
+
+#### EventPublishingRunListener
+
+事件发布run方法监听器：
+
+```java
+// 在run方法各个阶段发布SpringApplicationEvent 。
+// 对在实际刷新上下文之前触发的事件使用内部ApplicationEventMulticaster 
+public class EventPublishingRunListener implements SpringApplicationRunListener, Ordered {
+    private final SpringApplication application;
+    private final String[] args;
+    private final SimpleApplicationEventMulticaster initialMulticaster;
+
+    public EventPublishingRunListener(SpringApplication application, String[] args) {
+        this.application = application;
+        this.args = args;
+        // 事件多播器
+        this.initialMulticaster = new SimpleApplicationEventMulticaster();
+        for (ApplicationListener<?> listener : application.getListeners()) {
+            this.initialMulticaster.addApplicationListener(listener);
+        }
+    }
+
+    @Override
+    public void starting(ConfigurableBootstrapContext bootstrapContext) {
+        this.initialMulticaster
+            .multicastEvent(new ApplicationStartingEvent(bootstrapContext, this.application, this.args));
+    }
+
+    @Override
+    public void environmentPrepared(ConfigurableBootstrapContext bootstrapContext,
+                                    ConfigurableEnvironment environment) {
+        this.initialMulticaster.multicastEvent(
+            new ApplicationEnvironmentPreparedEvent(bootstrapContext, this.application, this.args, environment));
+    }
+
+    @Override
+    public void contextPrepared(ConfigurableApplicationContext context) {
+        this.initialMulticaster
+            .multicastEvent(new ApplicationContextInitializedEvent(this.application, this.args, context));
+    }
+
+    @Override
+    public void contextLoaded(ConfigurableApplicationContext context) {
+        for (ApplicationListener<?> listener : this.application.getListeners()) {
+            if (listener instanceof ApplicationContextAware) {
+                ((ApplicationContextAware) listener).setApplicationContext(context);
+            }
+            context.addApplicationListener(listener);
+        }
+        this.initialMulticaster.multicastEvent(new ApplicationPreparedEvent(this.application, this.args, context));
+    }
+
+    @Override
+    public void started(ConfigurableApplicationContext context, Duration timeTaken) {
+        context.publishEvent(new ApplicationStartedEvent(this.application, this.args, context, timeTaken));
+        AvailabilityChangeEvent.publish(context, LivenessState.CORRECT);
+    }
+
+    @Override
+    public void ready(ConfigurableApplicationContext context, Duration timeTaken) {
+        context.publishEvent(new ApplicationReadyEvent(this.application, this.args, context, timeTaken));
+        AvailabilityChangeEvent.publish(context, ReadinessState.ACCEPTING_TRAFFIC);
+    }
+}
+```
+
+此实现类就是在run()方法各个阶段发布Spring事件通知。
+
+### 准备Environment
+
+```java
+// SpringApplication.java
+private ConfigurableEnvironment prepareEnvironment(SpringApplicationRunListeners listeners,
+                                                   DefaultBootstrapContext bootstrapContext, ApplicationArguments applicationArguments) {
+    // 根据Web类型创建StandardServletEnvironment的子类，如ApplicationServletEnvironment
+    ConfigurableEnvironment environment = getOrCreateEnvironment();
+    configureEnvironment(environment, applicationArguments.getSourceArgs());
+    ConfigurationPropertySources.attach(environment);
+    // SpringApplicationRunListener#environmentPrepared回调，即环境准备好了的回调
+    // 比如EventPublishingRunListener在此处发布ApplicationEnvironmentPreparedEvent事件
+    listeners.environmentPrepared(bootstrapContext, environment);
+    DefaultPropertiesPropertySource.moveToEnd(environment);
+    Assert.state(!environment.containsProperty("spring.main.environment-prefix"),
+                 "Environment prefix cannot be set via properties.");
+    // 将 `environment` 绑定到当前 SpringApplication 上
+    bindToSpringApplication(environment);
+    if (!this.isCustomEnvironment) {
+        environment = convertEnvironment(environment);
+    }
+    ConfigurationPropertySources.attach(environment);
+    return environment;
+}
+```
+
+准备Web应用环境部分需要关注的就是这个RunListener的回调了。
+
+
+
+### 应用上下文创建
+
+默认的应用上下文创建工厂将根据Web应用类型创建不同ApplicationContext：
+
+```java
+// ApplicationContextFactory.java
+ApplicationContextFactory DEFAULT = (webApplicationType) -> {
+    // 省略try/catch
+    switch (webApplicationType) {
+        case SERVLET:
+            return new AnnotationConfigServletWebServerApplicationContext();
+        case REACTIVE:
+            return new AnnotationConfigReactiveWebServerApplicationContext();
+        default:
+            return new AnnotationConfigApplicationContext();
+    }
+};
+```
+
+如Servlet应用就创建`AnnotationConfigServletWebServerApplicationContext`。
+
+### 应用上下文初始化
+
+这里需要注意的有：
+
+- ApplicationContextInitializer应用**初始化器回调**
+- RunListener的contextPrepared上下文准备回调
+- RunListener的contextLoaded上下文加载完成回调
+
+```java
+// SpringApplication.java
+private void prepareContext(DefaultBootstrapContext bootstrapContext, 
+                            ConfigurableApplicationContext context, 
+                            ConfigurableEnvironment environment, 
+                            SpringApplicationRunListeners listeners,
+                            ApplicationArguments applicationArguments, 
+                            Banner printedBanner) {
+    context.setEnvironment(environment);
+    // 将一些工具 Bean 设置到 Spring 应用上下文中，如beanNameGenerator
+    postProcessApplicationContext(context);
+    // 1.ApplicationContextInitializer的initialize()方法回调
+    applyInitializers(context);
+    // 2.RunListener的contextPrepared回调
+    listeners.contextPrepared(context);
+    // 3.关闭引导上下文
+    bootstrapContext.close(context);
+    if (this.logStartupInfo) {
+        logStartupInfo(context.getParent() == null);
+        logStartupProfileInfo(context);
+    }
+    // 4.添加SpringBoot特殊的单例bean，如`main(String[])`方法的参数和命令行参数Bean和Banner对象 
+    ConfigurableListableBeanFactory beanFactory = context.getBeanFactory();
+    beanFactory.registerSingleton("springApplicationArguments", applicationArguments);
+    if (printedBanner != null)
+        beanFactory.registerSingleton("springBootBanner", printedBanner);
+    
+    if (beanFactory instanceof AbstractAutowireCapableBeanFactory) {
+        ((AbstractAutowireCapableBeanFactory) beanFactory).setAllowCircularReferences(this.allowCircularReferences);
+        if (beanFactory instanceof DefaultListableBeanFactory) {
+            ((DefaultListableBeanFactory) beanFactory)
+            .setAllowBeanDefinitionOverriding(this.allowBeanDefinitionOverriding);
+        }
+    }
+    if (this.lazyInitialization)
+        context.addBeanFactoryPostProcessor(new LazyInitializationBeanFactoryPostProcessor());
+    
+    // 5.将源对象注册为BeanDefinition
+    // 取`primarySources`（启动类）和 `sources`（例如 Spring Cloud 中的BootstrapConfiguration）源对象
+    Set<Object> sources = getAllSources();
+    Assert.notEmpty(sources, "Sources must not be empty");
+    load(context, sources.toArray(new Object[0]));// 将源对象注册到BeanFactory
+    // 6.RunListener的contextLoaded回调
+    listeners.contextLoaded(context);
+}
+```
+
+### 应用上下文刷新
+
+```java
+// SpringApplication.java
+private void refreshContext(ConfigurableApplicationContext context) {
+    // 为当前 Spring 应用上下文注册一个钩子函数
+    // 在 JVM 关闭时先关闭 Spring 应用上下文
+    if (this.registerShutdownHook) {
+        shutdownHook.registerApplicationContext(context);
+    }
+    refresh(context);
+}
+```
+
+关于这个刷新方法，它是SpringIOC中最重要的启动方法，它最后会提前实例化所有单例bean，具体看Spring分析部分，此处不赘述。
+
+根据 **createApplicationContext 方法** ，默认情况下是 **SERVLET** 应用类型，也就是创建一个 `AnnotationConfigServletWebServerApplicationContext` 对象，在其父类 `ServletWebServerApplicationContext` 中重写了 `onRefresh()` 方法，会创建一个 Servlet 容器（默认为 Tomcat），也就是当前 Spring Boot 应用所运行的 Web 环境，这部分内容后面分析。
+
+# SpringBoot自动装配
+
+## @SpringBootApplication
+
+首先分析这个`@SpringBootApplication`：
+
+```java
+@SpringBootConfiguration // 继承 `@Configuration` 注解
+@EnableAutoConfiguration // 开启自动配置功能
+// 扫描指定路径下的 Bean
+@ComponentScan( excludeFilters = {
+    // 默认没有 TypeExcludeFilter
+    @Filter(type = FilterType.CUSTOM, classes = TypeExcludeFilter.class),
+    // 排除掉自动配置类
+    @Filter(type = FilterType.CUSTOM, classes = AutoConfigurationExcludeFilter.class) })
+public @interface SpringBootApplication {
+    // 省略属性
+}
+```
+
+`@ComponentScan`注解通常需要和 `@Configuration` 注解一起使用，因为需要先被当做一个**配置类**，然后解析到上面有 `@ComponentScan` 注解后则处理该注解，通过 ClassPathBeanDefinitionScanner 扫描器去扫描指定路径下标注了 `@Component` 注解的类，将他们解析成 BeanDefinition，注册到IOC容器内。
+
+> 如果该注解没有通过 `basePackages` 指定路径，Spring 会选在以该注解标注的类所在的包作为基础路径，然后扫描包下面的这些类
+
+## @EnableAutoConfiguration
+
+SpringBoot的自动转配呢，主要核心就是这个`@EnableAutoConfiguration`注解：
+
+```java
+@AutoConfigurationPackage	// 这个呢会把当前注解标注类(一般是启动类)所在包注册为bean，比如JPA会用
+@Import(AutoConfigurationImportSelector.class)
+public @interface EnableAutoConfiguration {
+	// 是否启动自动配置
+    String ENABLED_OVERRIDE_PROPERTY = "spring.boot.enableautoconfiguration";
+
+   	// 排除特定的自动配置类
+    Class<?>[] exclude() default {};
+    // 排除特定的自动配置类名称
+    String[] excludeName() default {};
+}
+```
+
+它引入了`AutoConfigurationImportSelector`自动配置引入选择器：同时也可以指定排除哪些自动配置类：
+
+进入此类的`selectImports()`：关于@Import注解的和配置选择器的解析请看Spring对@Configuration解析部分。
+
+```java
+// AutoConfigurationImportSelector.java
+public String[] selectImports(AnnotationMetadata annotationMetadata) {
+    // 如果配置了不允许自动配置，将不引入自动配置类
+    if (!isEnabled(annotationMetadata))
+        return NO_IMPORTS;
+
+    AutoConfigurationEntry autoConfigurationEntry = 
+        getAutoConfigurationEntry(annotationMetadata);
+    return StringUtils.toStringArray(autoConfigurationEntry.getConfigurations());
+}
+// 从所有的 `META-INF/spring.factories` 文件中找到`@EnableAutoConfiguration`注解对应的类
+// 这些就是自动配置类
+protected AutoConfigurationEntry getAutoConfigurationEntry(AnnotationMetadata annotationMetadata) {
+    if (!isEnabled(annotationMetadata)) {
+        return EMPTY_ENTRY;
+    }
+    AnnotationAttributes attributes = getAttributes(annotationMetadata);
+    // 1.从所有的`META-INF/spring.factories`文件中找到`@EnableAutoConfiguration`注解对应的类
+    // 读取候选自动配置类
+    List<String> configurations = getCandidateConfigurations(annotationMetadata, attributes);
+    configurations = removeDuplicates(configurations);// 去重
+    // 2.获取需要排除的自动配置类
+    // 从@EnableAutoConfiguration配置的exclude()和`spring.autoconfigure.exclude`配置获取
+    Set<String> exclusions = getExclusions(annotationMetadata, attributes);
+    checkExcludedClasses(configurations, exclusions);
+    // 排除自动配置类
+    configurations.removeAll(exclusions);
+    // 3.过滤自动配置类
+    configurations = getConfigurationClassFilter().filter(configurations);
+    // 4.自动装配事件回调
+    fireAutoConfigurationImportEvents(configurations, exclusions);
+    return new AutoConfigurationEntry(configurations, exclusions);
+}
+```
+
+## 1.读取候选自动配置类
+
+获取自动配置类的第1步是从所有的 `META-INF/spring.factories` 文件中找到`@EnableAutoConfiguration`注解对应的类：
+
+```java
+// AutoConfigurationImportSelector.java	
+protected List<String> getCandidateConfigurations(AnnotationMetadata metadata, AnnotationAttributes attributes) {
+    List<String> configurations = SpringFactoriesLoader.loadFactoryNames(getSpringFactoriesLoaderFactoryClass(),
+                                                                         getBeanClassLoader());
+   	// 省略非空检查
+    return configurations;
+}
+```
+
+可以看到还是用的`SpringFactoriesLoader`去 `META-INF/spring.factories` 加载，从而避免直接加载Class的字节码。
+
+## 2.排除自动配置类
+
+排除自动配置类，SpringBoot提供了2种方式：
+
+- 代码配置方式：
+  - `@EnableAutoConfiguration.exclude()`属性方法，排除指定自动配置类
+  - `@EnableAutoConfiguration.excludeName()`属性方法，排除指定自动配置类名
+
+- 外部化配置方式：
+  - 配置属性：`spring.autoconfigure.exclude`
+
+所有在获取排除的自动配置类时将从这3个方面出发：
+
+```java
+// 获取需要排除的自动配置类
+protected Set<String> getExclusions(AnnotationMetadata metadata, AnnotationAttributes attributes) {
+    Set<String> excluded = new LinkedHashSet<>();
+    excluded.addAll(asList(attributes, "exclude"));
+    excluded.addAll(Arrays.asList(attributes.getStringArray("excludeName")));
+    excluded.addAll(getExcludeAutoConfigurationsProperty());
+    return excluded;
+}
+// 返回spring.autoconfigure.exclude属性排除的自动配置类
+protected List<String> getExcludeAutoConfigurationsProperty() {
+    Environment environment = getEnvironment();
+    if (environment == null) {
+        return Collections.emptyList();
+    }
+    if (environment instanceof ConfigurableEnvironment) {
+        Binder binder = Binder.get(environment);
+        return binder.bind(PROPERTY_NAME_AUTOCONFIGURE_EXCLUDE, String[].class).map(Arrays::asList)
+            .orElse(Collections.emptyList());
+    }
+    String[] excludes = environment.getProperty(PROPERTY_NAME_AUTOCONFIGURE_EXCLUDE, String[].class);
+    return (excludes != null) ? Arrays.asList(excludes) : Collections.emptyList();
+}
+
+private static final String PROPERTY_NAME_AUTOCONFIGURE_EXCLUDE = "spring.autoconfigure.exclude";
+```
+
+在获取到排除的自动配置类后，将从候选自动配置类集合中将它们移除，这里不详细分析。
+
+## 3.过滤自动配置类
+
+这里是自动装配的重点：
+
+```java
+// 从所有的 `META-INF/spring.factories` 文件中找到`@EnableAutoConfiguration`注解对应的类
+// 这些就是自动配置类
+protected AutoConfigurationEntry getAutoConfigurationEntry(AnnotationMetadata annotationMetadata) {
+    if (!isEnabled(annotationMetadata)) {
+        return EMPTY_ENTRY;
+    }
+    AnnotationAttributes attributes = getAttributes(annotationMetadata);
+    // 1.从所有的`META-INF/spring.factories`文件中找到`@EnableAutoConfiguration`注解对应的类
+    // 读取候选自动配置类
+    List<String> configurations = getCandidateConfigurations(annotationMetadata, attributes);
+    configurations = removeDuplicates(configurations);// 去重
+    // 2.获取需要排除的自动配置类
+    // 从@EnableAutoConfiguration配置的exclude()和`spring.autoconfigure.exclude`配置获取
+    Set<String> exclusions = getExclusions(annotationMetadata, attributes);
+    checkExcludedClasses(configurations, exclusions);
+    // 排除自动配置类
+    configurations.removeAll(exclusions);
+    // 3.过滤自动配置类
+    configurations = getConfigurationClassFilter().filter(configurations);
+    // 4.自动装配事件回调
+    fireAutoConfigurationImportEvents(configurations, exclusions);
+    return new AutoConfigurationEntry(configurations, exclusions);
+}
+```
+
+在这里第3步，过滤自动配置类将**会过滤掉绝大多数配置类**。
+
+首先是获取自动配置过滤器链：`ConfigurationClassFilter`
+
+```java
+// AutoConfigurationImportSelector.java
+private ConfigurationClassFilter getConfigurationClassFilter() {
+    if (this.configurationClassFilter == null) {
+        // 从`META-INF/spring.factories`文件获得自动配置过滤器类
+        List<AutoConfigurationImportFilter> filters = getAutoConfigurationImportFilters();
+        for (AutoConfigurationImportFilter filter : filters)
+            invokeAwareMethods(filter);
+        // 新建过滤器链：将自动配置过滤器类都放入这个过滤器链中
+        this.configurationClassFilter = new ConfigurationClassFilter(this.beanClassLoader, filters);
+    }
+    return this.configurationClassFilter;
+}
+
+// 从`META-INF/spring.factories`文件找到AutoConfigurationImportFilter过滤器类
+protected List<AutoConfigurationImportFilter> getAutoConfigurationImportFilters() {
+    return SpringFactoriesLoader.loadFactories(AutoConfigurationImportFilter.class, this.beanClassLoader);
+}
+```
+
+自动配置顾虑器在spring-boot-autoconfigure包下的spring.factories文件有以下几个：
+
+```properties
+# Auto Configuration Import Filters
+org.springframework.boot.autoconfigure.AutoConfigurationImportFilter=\
+org.springframework.boot.autoconfigure.condition.OnBeanCondition,\
+org.springframework.boot.autoconfigure.condition.OnClassCondition,\
+org.springframework.boot.autoconfigure.condition.OnWebApplicationCondition
+```
+
+### 自动配置过滤器链
+
+接下来分析这个自动配置过滤器链类：`ConfigurationClassFilter`
+
+```java
+private static class ConfigurationClassFilter {
+    // 自动配置元信息
+    // 封装了`META-INF/spring-autoconfigure-metadata.properties`下的配置信息
+    private final AutoConfigurationMetadata autoConfigurationMetadata;
+    // 自动配置过滤器链，来自于`META-INF/spring.factories`文件
+    private final List<AutoConfigurationImportFilter> filters;
+
+    ConfigurationClassFilter(ClassLoader classLoader, List<AutoConfigurationImportFilter> filters) {
+        // 从`META-INF/spring-autoconfigure-metadata.properties`文件加载自动配置元信息
+        this.autoConfigurationMetadata = AutoConfigurationMetadataLoader.loadMetadata(classLoader);
+        this.filters = filters;
+    }
+
+    /**
+     * 过滤方法就是用每个过滤器链对所有的候选自动配置类进行过滤
+     * 返回所有过滤器都匹配成功的自动配置类
+     */
+    List<String> filter(List<String> configurations) {
+        // 省略
+    }
+}
+```
+
+自动配置过滤器链在创建时会先从`META-INF/spring-autoconfigure-metadata.properties`文件的获取自动配置元信息，这个**元信息将辅助过滤器进行过滤筛选**。
+
+> 注意：此处对于自动过滤器类如OnClassCondition或OnBeanCondition在此处的快速过滤自动配置类的具体分析就不展开了，如果之后想研究可以来到上诉的filter方法去探究。
+>
+> 总之它们在此处的过滤都是借助下面的自动配置元信息，直接判断需要的Class类是否存在于类路径即可。
+
+### 自动配置元信息
+
+```java
+// 用于加载AutoConfigurationMetadata的内部实用程序
+final class AutoConfigurationMetadataLoader {
+    protected static final String PATH = "META-INF/spring-autoconfigure-metadata.properties";
+
+    static AutoConfigurationMetadata loadMetadata(ClassLoader classLoader) {
+        return loadMetadata(classLoader, PATH);
+    }
+
+    static AutoConfigurationMetadata loadMetadata(ClassLoader classLoader, String path) {
+		// 省略try/catch
+        Enumeration<URL> urls = (classLoader != null) ? classLoader.getResources(path)
+            : ClassLoader.getSystemResources(path);
+        Properties properties = new Properties();
+        // 将"META-INF/spring-autoconfigure-metadata.properties"的配置元信息都放入Properties对象
+        while (urls.hasMoreElements()) {
+            properties.putAll(PropertiesLoaderUtils.loadProperties(new UrlResource(urls.nextElement())));
+        }
+        return loadMetadata(properties);
+    }
+}
+```
+
+> 这个自动配置元信息有什么用？
+>
+> 答：以**文件形式记录自动配置类的元信息**，方便自动配置过滤器快速过滤自动配置类，而**不去加载器字节码**
+
+1. 在引入 `spring-boot-autoconfigure-processor` 工具模块依赖后，其中会通过 Java SPI 机制引入 **AutoConfigureAnnotationProcessor** 注解处理器在编译阶段进行相关处理
+2. 其中 `spring-boot-autoconfigure` 模块会引入该工具模块（不具有传递性），那么 Spring Boot 在编译 `spring-boot-autoconfigure` 这个 `jar` 包的时候，在编译阶段会扫描到带有 `@ConditionalOnClass` 等注解的 `.class` 文件，也就是自动配置类，然后将自动配置类的一些信息保存至 `META-INF/spring-autoconfigure-metadata.properties` 文件中
+3. 文件中保存了`自动配置类类名` --> `空字符串`， `自动配置类类名.注解简称` --> `注解中的值(逗号分隔)`
+4. 当然，自己写的 Spring Boot Starter 中的自动配置模块也可以引入这个 Spring Boot 提供的插件
+
+至于为什么这么做，是因为 Spring Boot 提供的自动配置类比较多，大部分都不会使用，如果每次启动应用的过程中，都一个一个去加载自动配置类的Class字节码并解析上面的 Conditional 注解，那么肯定会有不少的性能损耗。
+
+所以，Spring Boot 做了一个优化，通过自己提供的工具，在编译阶段将自动配置类的一些注解信息保存在一个 `properties` 文件中，这样一来，在启动应用的过程中，就可以直接读取该文件中的信息，提前过滤掉一些自动配置类，相比于每次都去解析它们所有的注解，性能提升不少。
+
+比如在该文件中对于`WebMvcAutoConfiguration`的元信息记录：该类如下：
+
+```java
+@Configuration(proxyBeanMethods = false)
+@ConditionalOnWebApplication(type = Type.SERVLET)
+@ConditionalOnClass({ Servlet.class, DispatcherServlet.class, WebMvcConfigurer.class })
+@ConditionalOnMissingBean(WebMvcConfigurationSupport.class)
+@AutoConfigureOrder(Ordered.HIGHEST_PRECEDENCE + 10)
+@AutoConfigureAfter({ DispatcherServletAutoConfiguration.class, TaskExecutionAutoConfiguration.class,
+		ValidationAutoConfiguration.class })
+public class WebMvcAutoConfiguration {
+    // 省略了内部的其它配置
+}
+```
+
+其元信息保存到文件如下：
+
+```properties
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration=
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration.AutoConfigureAfter=org.springframework.boot.autoconfigure.web.servlet.DispatcherServletAutoConfiguration,org.springframework.boot.autoconfigure.task.TaskExecutionAutoConfiguration,org.springframework.boot.autoconfigure.validation.ValidationAutoConfiguration
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration.AutoConfigureOrder=-2147483638
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration.ConditionalOnClass=javax.servlet.Servlet,org.springframework.web.servlet.config.annotation.WebMvcConfigurer,org.springframework.web.servlet.DispatcherServlet
+org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration.ConditionalOnWebApplication=SERVLET
+```
+
+大致保存了自动配置类如下信息：
+
+- `类名.ConditionalOnClass=xxx`，该配置类标注的@ConditionalOnClass注解的值，即需要哪些类存在才启动，由`OnClassCondition自动配置过滤器类`使用过滤
+
+- `类名.AutoConfigureOrder=-2147483638`，自动配置顺序，用于排序配置类
+- `类名.AutoConfigureAfter=xxx`，保存了@AutoConfigureAfter注解的值，在xxx之后自动配置，用于配置类排序，将排在xxx后面
+- `类名.AutoConfigureBefore=xxx`，同上，排于xxx前面
+- `类名.ConditionalOnWebApplication=SERVLET`，@ConditionalOnWebApplication注解的值，指在Web类型为SERVLET时才能装配，由`OnWebApplicationCondition过滤器类`使用过滤
+
+还有一些其它注解如`@ConditionalOnBean`如果配置了的话这里也将记录。
+
+不过似乎`@ConditionalOnMissingBean`并不会记录，在文件也未查到任何一条它的记录。
+
+
+
+## 4.自动配置事件回调
+
+获取自动配置类的前3步已经成功选出所有合适的自动配置类，此时第4步将回调自动配置事件：
+
+```java
+// AutoConfigurationImportSelector.java
+private void fireAutoConfigurationImportEvents(List<String> configurations, Set<String> exclusions) {
+    // 查出所有自动配置类引入监听器
+    List<AutoConfigurationImportListener> listeners = getAutoConfigurationImportListeners();
+    // 监听器事件回调
+    if (!listeners.isEmpty()) {
+        AutoConfigurationImportEvent event = new AutoConfigurationImportEvent(this, configurations, exclusions);
+        for (AutoConfigurationImportListener listener : listeners) {
+            invokeAwareMethods(listener);
+            listener.onAutoConfigurationImportEvent(event);
+        }
+    }
+}
+
+// 从`META-INF/spring.factories`文件找到AutoConfigurationImportListener自动配置类引入监听器
+protected List<AutoConfigurationImportListener> getAutoConfigurationImportListeners() {
+    return SpringFactoriesLoader.loadFactories(AutoConfigurationImportListener.class, this.beanClassLoader);
+}
+```
+
+这个没啥好分析的。
+
+自己新建个自动配置引入监听器实现类，统计有多少个自动配置类启用：
+
+```java
+public class MyImportListener implements AutoConfigurationImportListener {
+    @Override
+    public void onAutoConfigurationImportEvent(AutoConfigurationImportEvent event) {
+        // 1. 获取所有的自动配置类；从`META-INF/spring.factories`文件
+        // 注意：这里必须传入Spring加载的类加载器或null
+        List<String> candidates = SpringFactoriesLoader.loadFactoryNames(
+                EnableAutoConfiguration.class, event.getClass().getClassLoader());
+
+        // 2.配置了被排除的自动配置类
+        Set<String> exclusions = event.getExclusions();
+
+        // 3.实际的自动配置类
+        List<String> configurations = event.getCandidateConfigurations();
+
+        // 输出结果：
+        // 自动配置类： 候选数量=133 排除数量=0 最终数量=24
+        System.out.printf("自动配置类： 候选数量=%d 排除数量=%d 最终数量=%d \n", candidates.size(), exclusions.size(), configurations.size());
+    }
+}
+```
+
+可以新建个META-INF目录，再新建个spring.factories文件让SpringFactoriesLoader找到这个自定义监听器：
+
+```properties
+org.springframework.boot.autoconfigure.AutoConfigurationImportListener=\
+com.example.springbootdemo.listener.MyImportListener
+```
+
+## 5.自动配置类排序
+
+上面分析的4步都是在`AutoConfigurationImportSelector`自动配置引入选择器中进行的，同时它实现了`DeferredImportSelector`，从名字看它是**延迟的引入选择器**，Spring在解析@Import注解时，针对此接口会单独处理，将其先包装为DeferredImportSelectorHolder对象，放入队列，待所有ConfigurationClass处理完毕后，再处理这个延迟引入选择器队列。
+
+总之具体的流程可以去看源码中`ConfigurationClassParser`对配置类@Import的解析过程。
+
+反正此处的这个自动配置类选择器会调用下面这个方法对引入的自动配置类进行排序：
+
+```java
+// AutoConfigurationSorter.java
+List<String> getInPriorityOrder(Collection<String> classNames) {
+    AutoConfigurationClasses classes = new AutoConfigurationClasses(this.metadataReaderFactory,
+                                                                    this.autoConfigurationMetadata, classNames);
+    List<String> orderedClassNames = new ArrayList<>(classNames);
+    // 1.初始排序：根据字典序
+    Collections.sort(orderedClassNames);
+    // 2.根据顺序排序：@AutoConfigureOrder
+    orderedClassNames.sort((o1, o2) -> {
+        int i1 = classes.get(o1).getOrder();
+        int i2 = classes.get(o2).getOrder();
+        return Integer.compare(i1, i2);
+    });
+    // 3.最后遵循 @AutoConfigureBefore 和 @AutoConfigureAfter
+    orderedClassNames = sortByAnnotation(classes, orderedClassNames);
+    return orderedClassNames;
+}
+```
+
+SpringBoot提供了2中自动配置类的排序手段：
+
+- 绝对自动配置类顺序：`@AutoConfigureOrder`
+- 相对自动配置类顺序：`@AutoConfigureBefore`和`@AutoConfigureAfter`
+
+一般都是用后者来控制装配顺序。
+
+**这3个注解的信息也是来自于上面分析的`META-INF/spring-autoconfigure-metadata.properties`文件的自动配置元信息，不需要去通过ASM读取类元信息。**
+
+ # SpringBootCondition
+
+在上面的自动配置分析过程中得知，可以根据保存于文件的自动配置元信息提前过滤一些不必要的自动配置类，它们的过滤器都是在原本的Spring的Condition接口上进行的扩展。(对于Condition接口和@Conditional注解的解析去看Spring注解驱动分析部分)。
+
+但是提前过滤自动配置类只对ConditionOnClass这种是否存在某个类有效，对是否存在某个bean或不存在某些类则无效了，而且也可能有些自动配置类没有用`spring-boot-autoconfigure-processor` 工具提前保存自动配置元信息。
+
+所以在注册BeanDefinition之前的对shouldSkip()方法的调用判断`Condition#match()`是否满足这里才是处理关键(对于Condition接口在哪生效请看Spring注解驱动分析环节)。
+
+SpringBootCondition扩展抽象类如下：它是SpringBoot扩展Condition的基础
+
+```java
+// Spring Boot 使用的所有Condition实现的基础
+public abstract class SpringBootCondition implements Condition {
+
+    @Override
+    public final boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        // 1.获取条件注解标注的 类名 或 方法名
+        String classOrMethodName = getClassOrMethodName(metadata);
+        // 省略try/catch
+        
+        // 2.匹配结果，由子类实现
+        ConditionOutcome outcome = getMatchOutcome(context, metadata);
+        // 3.向 ConditionEvaluationReport 中记录本次的匹配结果
+        recordEvaluation(context, classOrMethodName, outcome);
+        return outcome.isMatch();// 返回是否匹配成功
+    }
+	// 获取注解标注的 类名 或 方法名
+    private static String getClassOrMethodName(AnnotatedTypeMetadata metadata) {
+        if (metadata instanceof ClassMetadata) {
+            ClassMetadata classMetadata = (ClassMetadata) metadata;
+            return classMetadata.getClassName();
+        }
+        MethodMetadata methodMetadata = (MethodMetadata) metadata;
+        return methodMetadata.getDeclaringClassName() + "#" + methodMetadata.getMethodName();
+    }
+}
+```
+
+可以看到Condition接口的核心方法match()在SpringBootCondition接口呢又转向去调用`getMatchOutcome()`方法了，各个子类对此方法进行实现，比如OnClassCondition。
+
+## OnClassCondition
+
+它既是`自动配置过滤器类AutoConfigurationImportFilter`的子类，也是SpringBootCondition的子类，可以在两处都进行过滤：
+
+```java
+// 检查特定类是否存在的Condition和AutoConfigurationImportFilter
+// 处理 @ConditionalOnClass 与 @ConditionalOnMissingClass
+@Order(Ordered.HIGHEST_PRECEDENCE)
+class OnClassCondition extends FilteringSpringBootCondition {
+
+    public ConditionOutcome getMatchOutcome(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        ClassLoader classLoader = context.getClassLoader();
+        ConditionMessage matchMessage = ConditionMessage.empty();
+        // 1.获取@ConditionalOnClass的值，可能为空
+        List<String> onClasses = getCandidates(metadata, ConditionalOnClass.class);
+        if (onClasses != null) {
+            // 1.1 找到这些需要的Class中哪些是不存在的
+            List<String> missing = filter(onClasses, ClassNameFilter.MISSING, classLoader);
+            // 1.2 如果有不存在的，那么不符合条件，返回不匹配
+            if (!missing.isEmpty()) {
+                return ConditionOutcome.noMatch(ConditionMessage.forCondition(ConditionalOnClass.class)
+                                                .didNotFind("required class", "required classes").items(Style.QUOTE, missing));
+            }
+            // 1.3 添加 `@ConditionalOnClass` 满足条件的匹配信息
+            matchMessage = matchMessage.andCondition(ConditionalOnClass.class)
+                .found("required class", "required classes")
+                .items(Style.QUOTE, filter(onClasses, ClassNameFilter.PRESENT, classLoader));
+        }
+        // 2.获取@ConditionalOnMissingClass的值，可能为空
+        List<String> onMissingClasses = getCandidates(metadata, ConditionalOnMissingClass.class);
+        if (onMissingClasses != null) {
+            // 2.1 找到这些要求不存在 但却 存在的Class
+            List<String> present = filter(onMissingClasses, ClassNameFilter.PRESENT, classLoader);
+            // 2.2 如果有一个存在，那么不符合条件，返回不匹配
+            if (!present.isEmpty()) {
+                return ConditionOutcome.noMatch(ConditionMessage.forCondition(ConditionalOnMissingClass.class)
+                                                .found("unwanted class", "unwanted classes").items(Style.QUOTE, present));
+            }
+            // 2.3 添加 `@ConditionalOnMissingClass` 满足条件的匹配信息
+            matchMessage = matchMessage.andCondition(ConditionalOnMissingClass.class)
+                .didNotFind("unwanted class", "unwanted classes")
+                .items(Style.QUOTE, filter(onMissingClasses, ClassNameFilter.MISSING, classLoader));
+        }
+        // 3.返回符合条件的结果
+        return ConditionOutcome.match(matchMessage);
+    }
+}
+```
+
+上面这个不管是找应该存在而不存在的，还是找不该存在却存在的，都是以filter方法并传入一个Filter对象：
+
+```java
+// FilteringSpringBootCondition.java
+protected final List<String> filter(Collection<String> classNames, ClassNameFilter classNameFilter, ClassLoader classLoader) {
+    if (CollectionUtils.isEmpty(classNames))
+        return Collections.emptyList();
+    
+    List<String> matches = new ArrayList<>(classNames.size());
+    for (String candidate : classNames) {
+        if (classNameFilter.matches(candidate, classLoader))
+            matches.add(candidate);
+    }
+    return matches;
+}
+
+protected enum ClassNameFilter {
+    PRESENT {
+        // 判断该Class是否存在于类路劲
+        public boolean matches(String className, ClassLoader classLoader) {
+            return isPresent(className, classLoader);
+        }
+    },
+
+    MISSING {
+        // 判断该Class是否不存在于类路劲
+        public boolean matches(String className, ClassLoader classLoader) {
+            return !isPresent(className, classLoader);
+        }
+    };
+
+    abstract boolean matches(String className, ClassLoader classLoader);
+
+    static boolean isPresent(String className, ClassLoader classLoader) {
+        if (classLoader == null)
+            classLoader = ClassUtils.getDefaultClassLoader();
+        
+        try {
+            resolve(className, classLoader);
+            return true;
+        }
+        catch (Throwable ex) {
+            return false;
+        }
+    }
+}
+```
+
+所以判断某类存在则传入PRESENT，不存在则传入MISSING过滤器。
+
+> 注意：此处的判断结果不仅仅用于是否跳过BeanDefinition的注册，在前面分析自动配置类提前过滤也是这种方式。
+
+## OnBeanCondition
+
+对于条件注解`@ConditionalOnBean`和`@ConditionalOnMissingBean`以及`@ConditionalOnSingleCandidate`，都是以`OnBeanCondition`类进行过滤的：
+
+```java
+/**
+ * 检查特定 bean 是否存在的Condition
+ * 对@ConditionalOnBean,@ConditionalOnMissingBean,@ConditionalOnSingleCandidate处理
+ */
+@Order(Ordered.LOWEST_PRECEDENCE)
+class OnBeanCondition extends FilteringSpringBootCondition implements ConfigurationCondition {
+
+    public ConditionOutcome getMatchOutcome(ConditionContext context, AnnotatedTypeMetadata metadata) {
+        ConditionMessage matchMessage = ConditionMessage.empty();
+        MergedAnnotations annotations = metadata.getAnnotations();
+        // 1.对@ConditionalOnBean进行处理
+        if (annotations.isPresent(ConditionalOnBean.class)) {
+            Spec<ConditionalOnBean> spec = new Spec<>(context, metadata, annotations, ConditionalOnBean.class);
+            // 获取匹配结果，具体分析见下面
+            MatchResult matchResult = getMatchingBeans(context, spec);
+            if (!matchResult.isAllMatched()) {
+                String reason = createOnBeanNoMatchReason(matchResult);
+                return ConditionOutcome.noMatch(spec.message().because(reason));
+            }
+            matchMessage = spec.message(matchMessage).found("bean", "beans").items(Style.QUOTE,
+                                                                                   matchResult.getNamesOfAllMatches());
+        }
+        // 2.对@ConditionalOnSingleCandidate进行处理
+        if (metadata.isAnnotated(ConditionalOnSingleCandidate.class.getName())) {
+            // 省略
+        }
+        // 3.对@ConditionalOnMissingBean进行处理
+        if (metadata.isAnnotated(ConditionalOnMissingBean.class.getName())) {
+            // 省略
+        }
+        return ConditionOutcome.match(matchMessage);
+    }   
+}
+```
+
+在对@ConditionalOnBean处理时会对需要的bean类型进行匹配处理：
+
+```java
+protected final MatchResult getMatchingBeans(ConditionContext context, Spec<?> spec) {
+    ClassLoader classLoader = context.getClassLoader();
+    ConfigurableListableBeanFactory beanFactory = context.getBeanFactory();
+    // 省略部分代码
+    
+    MatchResult result = new MatchResult();
+    // 计算排除的beanName
+    Set<String> beansIgnoredByType = getNamesOfBeansIgnoredByType(classLoader, beanFactory, considerHierarchy, spec.getIgnoredTypes(), parameterizedContainers);
+    for (String type : spec.getTypes()) {
+        // 1.关键方法在这里，为需要的bean类型从BeanFactory中找到匹配的beanName
+        Collection<String> typeMatches = getBeanNamesForType(classLoader, considerHierarchy, beanFactory, type, parameterizedContainers);
+        Iterator<String> iterator = typeMatches.iterator();
+        while (iterator.hasNext()) {
+            String match = iterator.next();
+            if (beansIgnoredByType.contains(match) || ScopedProxyUtils.isScopedTarget(match)) {
+                iterator.remove();
+            }
+        }
+        if (typeMatches.isEmpty()) result.recordUnmatchedType(type);
+        else result.recordMatchedType(type, typeMatches);
+    }
+    // 2.从BeanFactory中查出所有指定标注有注解的beanName
+    for (String annotation : spec.getAnnotations()) {
+        Set<String> annotationMatches = getBeanNamesForAnnotation(classLoader, beanFactory, annotation,
+                                                                  considerHierarchy);
+        annotationMatches.removeAll(beansIgnoredByType);
+        if (annotationMatches.isEmpty()) {
+            result.recordUnmatchedAnnotation(annotation);
+        }
+        else {
+            result.recordMatchedAnnotation(annotation, annotationMatches);
+        }
+    }
+    // 3.从BeanFactory中查出指定beanName的集合
+    for (String beanName : spec.getNames()) {
+        if (!beansIgnoredByType.contains(beanName) && containsBean(beanFactory, beanName, considerHierarchy)) {
+            result.recordMatchedName(beanName);
+        }
+        else result.recordUnmatchedName(beanName);
+    }
+    return result;
+}
+```
+
+因为@ConditionOnBean注解呢有多个筛选条件，所以这里会从3个方面去匹配，某一项不满足就将不匹配而无法装配。
+
+看一下@ConditionalOnBean注解：
+
+```java
+// 仅当满足所有指定要求的 bean 已包含在BeanFactory中时才匹配
+// 必须满足所有要求才能匹配条件，但不必由同一个 bean 满足
+@Conditional(OnBeanCondition.class)
+public @interface ConditionalOnBean {
+    // 应该检查的 bean 的Class类型。当所有指定类的 bean 都包含在BeanFactory中时，条件匹配
+    Class<?>[] value() default {};
+
+    // 应检查的 bean 的Class类型名称。当所有指定类的 bean 都包含在BeanFactory中时，条件匹配
+    String[] type() default {};
+
+    // 装饰应检查的 bean 的注释类型。当指定的所有注释都在BeanFactory中的 bean 上定义时，条件匹配
+    Class<? extends Annotation>[] annotation() default {};
+
+    // 要检查的 bean 的名称。当指定的所有 bean 名称都包含在BeanFactory中时，条件匹配。
+    String[] name() default {};
+}
+```
+
+> 注意：该条件只能匹配到目前已由BeanFactory处理的BeanDefinition，因此，强烈建议仅在自动配置类上使用此条件。如果候选 bean 可能由另一个自动配置创建，请确保使用此条件的 bean 在之后运行。
+>
+> 就是BeanDefinition的检查只能检查到目前BeanFactory中已经注册的部分，如果某个条件注解所指向的依赖bean在其之后才会被注册，那就会误判了。
+>
+> 所以自动配置类一定要制定好前后注册顺序，合理利用@AutoConfigureBefore和@AutoConfigureAfter来控制顺序。
+
+对于@ConditionalOnBean解析到这结束，另外两个就不解析了，大同小异。
