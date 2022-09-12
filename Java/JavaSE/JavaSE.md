@@ -4811,3 +4811,367 @@ public class ClientB {
 先启动服务端，再分别启动两个客户端，然后发送和接受消息的结果如下：
 
 ![image-20220525215447713](JavaSE.assets/image-20220525215447713.png)
+
+# 类加载器
+
+资料：https://www.bilibili.com/video/BV1ZY4y1n7tg?spm_id_from=333.337.search-card.all.click&vd_source=720927c3438ca7684ac755bff733f4ff
+
+先分析平常类，即`非数组类`和`接口`。
+
+![image-20220912100734851](JavaSE.assets/image-20220912100734851.png)
+
+```java
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(ArrayList.class.getClassLoader());// null
+        System.out.println(Connection.class.getClassLoader());// PlatformClassLoader
+        System.out.println(Main.class.getClassLoader());// AppClassLoader
+    }
+}
+```
+
+## 3个类加载器
+
+**java9之前的classloader**：
+
+- bootstrap classloader加载rt.jar，jre/lib/endorsed
+- ext classloader加载jre/lib/ext
+- application classloader加载-cp指定的类
+
+**java9以后的classLoader加载规则如下：**
+
+- bootstrap classloader加载lib/modules
+
+```
+java.base                   java.security.sasl
+java.datatransfer           java.xml
+java.desktop                jdk.httpserver
+java.instrument             jdk.internal.vm.ci
+java.logging                jdk.management
+java.management             jdk.management.agent
+java.management.rmi         jdk.naming.rmi
+java.naming                 jdk.net
+java.prefs                  jdk.sctp
+java.rmi                    jdk.unsupported
+```
+
+启动类加载器负责加载JDK核心类库，如String、Integer这些，用C、C++原生实现。打印出来是null。
+
+- ext classloader更名为platform classloader，加载lib/modules
+
+```
+java.activation*            jdk.accessibility
+java.compiler*              jdk.charsets
+java.corba*                 jdk.crypto.cryptoki
+java.scripting              jdk.crypto.ec
+java.se                     jdk.dynalink
+java.se.ee                  jdk.incubator.httpclient
+java.security.jgss          jdk.internal.vm.compiler*
+java.smartcardio            jdk.jsobject
+java.sql                    jdk.localedata
+java.sql.rowset             jdk.naming.dns
+java.transaction*           jdk.scripting.nashorn
+java.xml.bind*              jdk.security.auth
+java.xml.crypto             jdk.security.jgss
+java.xml.ws*                jdk.xml.dom
+java.xml.ws.annotation*     jdk.zipfs
+```
+
+- AppClassLoader加载-cp，-mp指定的类
+
+```
+jdk.aot                     jdk.jdeps
+jdk.attach                  jdk.jdi
+jdk.compiler                jdk.jdwp.agent
+jdk.editpad                 jdk.jlink
+jdk.hotspot.agent           jdk.jshell
+jdk.internal.ed             jdk.jstatd
+jdk.internal.jvmstat        jdk.pack
+jdk.internal.le             jdk.policytool
+jdk.internal.opt            jdk.rmic
+jdk.jartool                 jdk.scripting.nashorn.shell
+jdk.javadoc                 jdk.xml.bind*
+jdk.jcmd                    jdk.xml.ws*
+jdk.jconsole
+```
+
+java9模块化之后，对classloader有所改造，其中一点就是将ext classloader改为platform classloader，另外模块化之后，对应的classloader加载各自对应的模块。
+
+可以通过属性`java.class.path`查看具体的类路劲有哪些：
+
+```java
+for (String s : System.getProperty("java.class.path").split(";")) {
+    System.out.println(s);
+}
+// 结果如下
+// 可以看到第1个目录为编译后的Main.class所在目录，其它的是引入的依赖jar包
+D:\developSoftWare\IDEA_workspace\FirstDemo\leetcode\target\classes
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\jupiter\junit-jupiter\5.8.2\junit-jupiter-5.8.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\jupiter\junit-jupiter-api\5.8.2\junit-jupiter-api-5.8.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\opentest4j\opentest4j\1.2.0\opentest4j-1.2.0.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\platform\junit-platform-commons\1.8.2\junit-platform-commons-1.8.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\jupiter\junit-jupiter-params\5.8.2\junit-jupiter-params-5.8.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\jupiter\junit-jupiter-engine\5.8.2\junit-jupiter-engine-5.8.2.jar
+D:\developLanguage\maven-3.8.5\myRepository\org\junit\platform\junit-platform-engine\1.8.2\junit-platform-engine-1.8.2.jar
+```
+
+## 双亲委派模型
+
+双亲委派模型只某个类加载器加载类时先将其交给父类加载器加载，其返回null或抛出ClassNotFoundException时再由子类加载。
+
+目的是保护核心类库安全，如`java.xxx`库，它们只能有启动类加载器或平台类加载器加载。
+
+![image-20220912103649398](JavaSE.assets/image-20220912103649398.png)
+
+上图是java8的模型，现在java9以后的呢都是依赖于BuiltinClassLoader
+
+```java
+// PlatformClassLoader和APPClassLoader的父类
+// 这个ClassLoader支持从模块加载类和资源
+// 此 ClassLoader 使用的委托模型与常规委托模型不同：
+// 当请求加载一个类时，这个 ClassLoader 首先将类名映射到它的包名，如果为包含此包的 BuiltinClassLoader 定义了一个模块，则类加载器直接委托给该类加载器。
+// 如果没有包含该包的模块，则它将搜索委托给父类加载器，如果在父类中找不到，则搜索类路径。
+// 这与通常的委托模型之间的主要区别在于它允许平台类加载器委托给应用程序类加载器，这对于定义给平台类加载器的升级模块很重要
+public class BuiltinClassLoader extends SecureClassLoader{
+}
+```
+
+### loadClass
+
+一般ClassLoader不会覆盖此方法，如果要打破双亲委派模型则可以覆盖。但是在Java9模块化之后也没必要打破了。
+
+```java
+// ClassLoader.java
+// 加载具有指定二进制名称的类
+protected Class<?> loadClass(String name, boolean resolve)throws ClassNotFoundException
+{
+    synchronized (getClassLoadingLock(name)) {
+        // First, check if the class has already been loaded
+        Class<?> c = findLoadedClass(name);
+        if (c == null) {
+            try {
+                // 有明确父类加载器，则先调用父类
+                if (parent != null) c = parent.loadClass(name, false);
+                // 无明确说明其父类是启动类加载器
+                else c = findBootstrapClassOrNull(name);
+            } catch (ClassNotFoundException e) {
+                // 父类无法加载，即该类不在父类加载路劲上
+            }
+
+            if (c == null) {
+                // 省略一些计时操作
+                c = findClass(name);
+            }
+        }
+        if (resolve) resolveClass(c);
+        return c;
+    }
+}
+```
+
+若父类无法加载，将调用findClass(String)方法进行此类加载的加载，在APPClassLoader和PlatformClassLoader都是直接继承其父类BuiltinClassLoader.java的findClass()实现。
+
+若是父类是启动类加载器，不是调用findClass()方法，而是调用findBootstrapClassOrNull()方法：
+
+```java
+// ClassLoader.java
+// 由引导类加载器加载的类；如果没有找到，则返回 null。
+static Class<?> findBootstrapClassOrNull(String name) {
+    if (!checkName(name)) return null;
+	// 本地native方法，无法找到类则返回null
+    return findBootstrapClass(name);
+}
+```
+
+### findClass
+
+此方法主要是根据类的全限定名找到类的Resource对象，以此获取字节码二进制流：
+
+> 如果遵循双亲委派模型，一般不会覆盖loadClass()方法，而是**覆盖findClass()方法**，在查找类的Resource对象上实现自定义，如从非classpath查找、从网络查找等
+>
+> findClass()方法在获取到Resource对象后将调用defineClass()方法创建Class对象
+>
+> **注意：一个类加载器能否加载某个类的核心就在findClass()方法能否看到这个类，即该类是否在其加载路径上。**
+
+```java
+// BuiltinClassLoader.java
+protected Class<?> findClass(String cn) throws ClassNotFoundException {
+   	// 省略检查
+    
+    
+    
+    
+    
+    // find the candidate module for this class
+    LoadedModule loadedModule = findLoadedModule(cn);
+
+    Class<?> c = null;
+    if (loadedModule != null) {
+        // attempt to load class in module defined to this loader
+        if (loadedModule.loader() == this) 
+            c = findClassInModuleOrNull(loadedModule, cn);
+    } else {
+        // search class path
+        if (hasClassPath()) 
+            c = findClassOnClassPathOrNull(cn);
+    }
+
+    // not found
+    if (c == null) throw new ClassNotFoundException(cn);
+    return c;
+}
+
+// 在类路径上查找具有指定二进制名称的类
+private Class<?> findClassOnClassPathOrNull(String cn) {
+    String path = cn.replace('.', '/').concat(".class");
+    if (System.getSecurityManager() == null) {
+        Resource res = ucp.getResource(path, false);
+        if (res != null) {
+            try {
+                return defineClass(cn, res);
+            } catch (IOException ioe) {
+                // TBD on how I/O errors should be propagated
+            }
+        }
+        return null;
+    } else {
+        // avoid use of lambda here
+        PrivilegedAction<Class<?>> pa = new PrivilegedAction<>() {
+            public Class<?> run() {
+                Resource res = ucp.getResource(path, false);
+                if (res != null) {
+                    try {
+                        return defineClass(cn, res);
+                    } catch (IOException ioe) {
+                        // TBD on how I/O errors should be propagated
+                    }
+                }
+                return null;
+            }
+        };
+        return AccessController.doPrivileged(pa);
+    }
+}
+```
+
+从这个findClass()方法可以得知，它会将类包装为Resource对象，交由defineClass()方法处理。
+
+### defineClass
+
+此方法将字节码的字节流转换为Class对象。
+
+```java
+// 这里的主要目的在于根据Resource对象得到ByteBuffer对象，即字节码流的字节数组
+private Class<?> defineClass(String cn, Resource res) throws IOException {
+    URL url = res.getCodeSourceURL();
+
+    // if class is in a named package then ensure that the package is defined
+    int pos = cn.lastIndexOf('.');
+    if (pos != -1) {
+        String pn = cn.substring(0, pos);
+        Manifest man = res.getManifest();
+        defineOrCheckPackage(pn, man, url);
+    }
+
+    // defines the class to the runtime
+    ByteBuffer bb = res.getByteBuffer();
+    if (bb != null) {
+        CodeSigner[] signers = res.getCodeSigners();
+        CodeSource cs = new CodeSource(url, signers);
+        return defineClass(cn, bb, cs);
+    } else {
+        byte[] b = res.getBytes();
+        CodeSigner[] signers = res.getCodeSigners();
+        CodeSource cs = new CodeSource(url, signers);
+        return defineClass(cn, b, 0, b.length, cs);
+    }
+}
+```
+
+总之它在获得字节码的字节数组后，会调用这个**final方法**，它将字节数组转为Class对象，执行类加载的真正处理：
+
+```java
+// ClassLoader.java
+// 使用给定的ProtectionDomain将字节数组转换为Class的实例
+// 如果指定name以“java.”开头，则只能由平台类加载器或其祖先定义；否则将抛出SecurityException 
+protected final Class<?> defineClass(String name, byte[] b, int off, int len,
+                                     ProtectionDomain protectionDomain)
+    throws ClassFormatError
+{
+    protectionDomain = preDefineClass(name, protectionDomain);
+    String source = defineClassSourceLocation(protectionDomain);
+    // 这个defineClass1是本地方法，由它将字节码数组转为Class对象
+    Class<?> c = defineClass1(this, name, b, off, len, protectionDomain, source);
+    postDefineClass(c, protectionDomain);
+    return c;
+}
+```
+
+> 从这里的安全检查可以知道，即使自定义类加载器打破双亲委派模型，在加载`java.xxx`的类时来到这个defineClass()方法时将抛出SecurityException。
+>
+> **此方法是final的，无法修改，保护了`java.xxx`核心类库的安全**
+
+## 类加载器特性
+
+### 类唯一性
+
+![image-20220912122603221](JavaSE.assets/image-20220912122603221.png)
+
+类相等包含**Object.equals()方法、isAssignableFrom()方法、isInstance()方法**。
+
+### 传递性
+
+若类A是有类加载器L加载，则其依赖的所有类都将有L加载。
+
+即使其依赖的java.xx包下的核心类库，也由L加载，不过最终由双亲委派模型交由启动类加载器加载。
+
+![image-20220912122926059](JavaSE.assets/image-20220912122926059.png)
+
+### 可见性
+
+![image-20220912122118963](JavaSE.assets/image-20220912122118963.png)
+
+## 打破双亲委派模型
+
+为什么要打破呢？
+
+- **JavaSPI机制**打破双亲委派
+
+因为**根据类加载的传递性，一个类所依赖的类也将由其类加载器加载**。
+
+如果某个核心包的类如ServiceLoader，它必然由启动类加载器加载，它若依赖第3方厂商的、部署在classpath的Service Provider类，这些类也将由启动类加载器进行加载，那肯定加载失败啊。
+
+为了解决这个问题，Java提供了线程上下文类加载器，默认是AppClassLoader。
+
+如Spring会将它的自定义类加载器设置为线程上下文加载器。
+
+- **热加载/热部署**打破双亲委派
+
+热加载/热部署：在不停机的情况下，部署新的应用或者模块
+
+实现原理：基于Java的类加载器实现，当模块或应用发生改变时，使用新的ClassLoader加载它们。
+
+如Tomcat不重启情况下，部署新的war包。
+
+## 数组类的加载
+
+Java中所有的数组实例都属于Object，每个数组实例都有对应的Class。
+
+```java
+public static void main(String[] args) {
+    System.out.println((new int[1]).getClass().getClassLoader());// null
+    System.out.println((new Main[1]).getClass().getClassLoader());// AppClassLoader
+    
+    System.out.println((new int[1]).getClass());// class [I
+    System.out.println((new int[1]).getClass().getSuperclass());// Object
+    System.out.println(Arrays.toString((new int[1]).getClass().getInterfaces()));// Cloneable, Serializable
+}
+```
+
+数组类并不通过类加载器加载创建，而是JVM直接创建，JVM指令`newarray`。
+
+如数组类A及其元素类型C，那么数组类A关联的类加载器为：
+
+- C是引用类型，则A关联的类加载器为C的类加载器
+- C是基本类型，则A与启动类加载器关联
