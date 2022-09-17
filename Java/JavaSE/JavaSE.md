@@ -5175,3 +5175,13 @@ public static void main(String[] args) {
 
 - C是引用类型，则A关联的类加载器为C的类加载器
 - C是基本类型，则A与启动类加载器关联
+
+# SPI机制
+
+https://blog.csdn.net/ymb615ymb/article/details/123450610
+
+Java中SPI机制使用的是`ServiceLoader`，而SpringBoot借用SPI思想实现的一个类是`SpringFactoriesLoader`
+
+> 两者区别：
+>
+> 文件路径不同，spring配置放在 `META-INF/spring.factories`中，JavaSPI的配置文件放在`MeTA-INF/services/接口全类名`文件中。

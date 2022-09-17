@@ -5499,3 +5499,783 @@ public @interface ConditionalOnBean {
 > 所以自动配置类一定要制定好前后注册顺序，合理利用@AutoConfigureBefore和@AutoConfigureAfter来控制顺序。
 
 对于@ConditionalOnBean解析到这结束，另外两个就不解析了，大同小异。
+
+# 内嵌Tomcat
+
+SpringBoot的内嵌Tomcat容器，让servlet程序无须放入servlet容器即可运行。
+
+在Spring的ApplicationContext#refresh()方法中有个`onRefresh()回调`，这个默认空实现，而在`ServletWebServerApplicationContext`中重写了该方法，它将去创建一个Servlet容器(默认为Tomcat)，并将IOC容器内的Servlet、Filter、EventListener添加到Servlet上下文中。
+
+## DispatcherServlet自动配置类
+
+onRefresh()方法创建好容器会从ioc容器内查到Servlet这些，可以先看看DispatcherServlet的自动配置类：
+
+```java
+@AutoConfigureOrder(Ordered.HIGHEST_PRECEDENCE)// 最高优先级自动配置类
+@Configuration(proxyBeanMethods = false)
+@ConditionalOnWebApplication(type = Type.SERVLET)// 只有Servlet的Web类型才生效
+@ConditionalOnClass(DispatcherServlet.class) // 必须存在DispatcherServlet类
+@AutoConfigureAfter(ServletWebServerFactoryAutoConfiguration.class)
+public class DispatcherServletAutoConfiguration {
+	// DispatcherServlet的beanName
+	public static final String DEFAULT_DISPATCHER_SERVLET_BEAN_NAME = "dispatcherServlet";
+    // DispatcherServlet的Servlet注册bean的beanName
+	public static final String DEFAULT_DISPATCHER_SERVLET_REGISTRATION_BEAN_NAME = "dispatcherServletRegistration";
+
+	@Configuration(proxyBeanMethods = false)
+	@Conditional(DefaultDispatcherServletCondition.class)
+	@ConditionalOnClass(ServletRegistration.class)
+	@EnableConfigurationProperties(WebMvcProperties.class)
+	protected static class DispatcherServletConfiguration {
+
+        // 注册DispatcherServlet作为bean
+		@Bean(name = DEFAULT_DISPATCHER_SERVLET_BEAN_NAME)
+		public DispatcherServlet dispatcherServlet(WebMvcProperties webMvcProperties) {
+			DispatcherServlet dispatcherServlet = new DispatcherServlet();
+			// 省略配置
+			return dispatcherServlet;
+		}
+
+		@Bean
+		@ConditionalOnBean(MultipartResolver.class)
+		@ConditionalOnMissingBean(name = DispatcherServlet.MULTIPART_RESOLVER_BEAN_NAME)
+		public MultipartResolver multipartResolver(MultipartResolver resolver) {
+			// Detect if the user has created a MultipartResolver but named it incorrectly
+			return resolver;
+		}
+	}
+
+	@Configuration(proxyBeanMethods = false)
+	@Conditional(DispatcherServletRegistrationCondition.class)
+	@ConditionalOnClass(ServletRegistration.class)
+	@EnableConfigurationProperties(WebMvcProperties.class)
+	@Import(DispatcherServletConfiguration.class)
+	protected static class DispatcherServletRegistrationConfiguration {
+
+        // DispatcherServlet的Servlet注册bean的bean
+		@Bean(name = DEFAULT_DISPATCHER_SERVLET_REGISTRATION_BEAN_NAME)
+		@ConditionalOnBean(value = DispatcherServlet.class, name = DEFAULT_DISPATCHER_SERVLET_BEAN_NAME)
+		public DispatcherServletRegistrationBean dispatcherServletRegistration(DispatcherServlet dispatcherServlet,
+				WebMvcProperties webMvcProperties, ObjectProvider<MultipartConfigElement> multipartConfig) {
+			// 省略
+		}
+	}
+    // 省略
+}
+```
+
+这个 `DispatcherServletAutoConfiguration` 自动配置类，会在你引入 `spring-boot-starter-web` 模块后生效，因为该模块引入了 `spring mvc` 和 `tomcat` 相关依赖。
+
+在这里会注入 `DispatcherServletRegistrationBean`（继承 **RegistrationBean** ）对象，它关联着一个 `DispatcherServlet` 对象。 在后面的ApplicationContext#onRefresh()方法创建tomcat容器时会找到所有 **RegistrationBean**对象，然后往 Servlet 上下文中添加 Servlet 或者 Filter。
+
+> 为什么不直接找到Servlet对象，直接添加到Servlet上下文中呢？而是要通过这个RegistrationBean呢？
+
+## refresh()#onRefresh()回调
+
+在SpringBoot启动过程中，应用上下文ApplicationContext创建并初始化之后会调用refresh()上下文刷新操作，该方法在执行完BeanFactoryPostProcessor回调、提前实例化BeanPostProcessor实现bean之后，在预实例化单例bean之前会调用onRefresh()方法，refresh()方法如下：
+
+```java
+public void refresh() throws BeansException, IllegalStateException {
+    // <1> 来个锁，不然 refresh() 还没结束，你又来个启动或销毁容器的操作，那不就乱套了嘛
+    synchronized (this.startupShutdownMonitor) {
+
+        // <2> 刷新上下文环境的准备工作，记录下容器的启动时间、标记'已启动'状态、对上下文环境属性进行校验
+        prepareRefresh();
+
+        // <3> 创建并初始化一个 BeanFactory 对象 `beanFactory`，会加载出对应的 BeanDefinition 元信息们
+        ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+
+        // <4> 为 `beanFactory` 进行一些准备工作，例如添加几个 BeanPostProcessor，手动注册几个特殊的 Bean
+        prepareBeanFactory(beanFactory);
+
+		// 以下代码省略try/catch/finally
+        
+        // <5> 对 `beanFactory` 在进行一些后期的加工，交由子类进行扩展
+        postProcessBeanFactory(beanFactory);
+
+        // <6> 执行 BeanFactoryPostProcessor 处理器，包含 BeanDefinitionRegistryPostProcessor 处理器
+        invokeBeanFactoryPostProcessors(beanFactory);
+
+        // <7> 对 BeanPostProcessor 处理器进行初始化，并添加至 BeanFactory 中
+        registerBeanPostProcessors(beanFactory);
+
+        // <8> 设置上下文的 MessageSource 对象
+        initMessageSource();
+
+        // <9> 设置上下文的 ApplicationEventMulticaster 对象，上下文事件广播器
+        initApplicationEventMulticaster();
+
+        // <10> 刷新上下文时再进行一些初始化工作，交由子类进行扩展
+        onRefresh();
+
+        // <11> 将所有 ApplicationListener 监听器添加至 `applicationEventMulticaster` 事件广播器，如果已有事件则进行广播
+        registerListeners();
+
+        // <12> 设置 ConversionService 类型转换器，**初始化**所有还未初始化的 Bean（不是抽象、单例模式、不是懒加载方式）
+        finishBeanFactoryInitialization(beanFactory);
+
+        // <13> 刷新上下文的最后一步工作，会发布 ContextRefreshedEvent 上下文完成刷新事件
+        finishRefresh();
+    }
+}
+```
+
+onRefresh()方法在ServletWebServerApplicationContext中重写如下：
+
+```java
+// ServletWebServerApplicationContext.java
+protected void onRefresh() {
+    super.onRefresh();
+    try {
+        // 创建Web容器
+        // 如Tomcat，并将ioc容器内所有的Servlet、Filter、EventListener添加到Servlet上下文中。
+        createWebServer();
+    }
+    catch (Throwable ex) {
+        throw new ApplicationContextException("Unable to start web server", ex);
+    }
+}
+```
+
+## createWebServer()
+
+```java
+// ServletWebServerApplicationContext.java
+private void createWebServer() {
+    WebServer webServer = this.webServer;
+    ServletContext servletContext = getServletContext();
+    // 内嵌式Tomcat首次必然为空
+    if (webServer == null && servletContext == null) {
+        // 1.获取ServletWeb服务工厂，默认是TomcatServletWebServerFactory
+        ServletWebServerFactory factory = getWebServerFactory();
+        /* 2.
+		从工厂中创建1个WebServer容器对象，默认是TomcatWebServer
+		在创建过程中会触发TomcatStarter#onStartup()方法，它会调用这个传入的ServletContextInitializer
+		*/
+        this.webServer = factory.getWebServer(getSelfInitializer());
+        
+		// 3.注册webServer的优雅关闭单例bean，这些单例bean实现了SmartLifeCycle接口
+        // 从而在Spring应用停止时能够及时关闭Web容器
+        getBeanFactory().registerSingleton("webServerGracefulShutdown",
+                                           new WebServerGracefulShutdownLifecycle(this.webServer));
+        getBeanFactory().registerSingleton("webServerStartStop",
+                                           new WebServerStartStopLifecycle(this, this.webServer));
+    }
+    // 走到这里说明是外部容器Tomcat
+    else if (servletContext != null) {
+        // 省略try/catch
+        getSelfInitializer().onStartup(servletContext);
+    }
+    initPropertySources();
+}
+
+private org.springframework.boot.web.servlet.ServletContextInitializer getSelfInitializer() {
+    return this::selfInitialize;
+}
+// 这个方法很重要
+private void selfInitialize(ServletContext servletContext) throws ServletException {
+    prepareWebApplicationContext(servletContext);
+    registerApplicationScope(servletContext);
+    WebApplicationContextUtils.registerEnvironmentBeans(getBeanFactory(), servletContext);
+    for (ServletContextInitializer beans : getServletContextInitializerBeans()) {
+        beans.onStartup(servletContext);
+    }
+}
+```
+
+在上面这个createWebServer()方法中，目前最需要关注的就是这个getWebServer()方法和selfInitialize()方法。
+
+### TomcatServletWebServerFactory
+
+在 `spring-boot-autoconfigure` 中有一个 `ServletWebServerFactoryConfiguration` 配置类会注册一个 `TomcatServletWebServerFactory` 对象；加上 `TomcatServletWebServerFactoryCustomizer` 自动配置类，可以将 `server.*` 相关的配置设置到该对象中，这一步不深入分析。
+
+在onRefresh()方法中的createWebServer()方法，通过`ServletWebServerFactory#getWebServer()`方法获取到web容器，默认是`TomcatServletWebServerFactory`创建该容器：
+
+#### 2.1创建Tomcat和Connector
+
+```java
+// 用于创建TomcatWebServer
+// 可以使用 Spring 的ServletContextInitializer或 Tomcat LifecycleListener进行初始化。
+// 默认工厂将创建侦听端口8080上的 HTTP 请求的web容器
+public class TomcatServletWebServerFactory extends AbstractServletWebServerFactory
+    implements ConfigurableTomcatWebServerFactory, ResourceLoaderAware {	
+    public WebServer getWebServer(ServletContextInitializer... initializers) {
+        // 省略部分代码
+        // 1.创建Tomcat对象
+        Tomcat tomcat = new Tomcat();
+        // 2.创建临时目录作为tomcat目录，退出时删除
+        File baseDir = (this.baseDirectory != null) ? this.baseDirectory : createTempDir("tomcat");
+        tomcat.setBaseDir(baseDir.getAbsolutePath());
+        for (LifecycleListener listener : this.serverLifecycleListeners) {
+            tomcat.getServer().addLifecycleListener(listener);
+        }
+        // 3.创建一个 NIO 协议的 Connector 连接器对象并放入tomcat中
+        Connector connector = new Connector(this.protocol);
+        connector.setThrowOnFailure(true);
+        tomcat.getService().addConnector(connector);
+        // 4.对 Connector 进行配置，设置 `server.port` 端口、编码
+        // `server.tomcat.min-spare-threads`最小空闲线程和`server.tomcat.accept-count`最大线程数
+        customizeConnector(connector);
+        tomcat.setConnector(connector);
+        tomcat.getHost().setAutoDeploy(false);
+        configureEngine(tomcat.getEngine());
+        for (Connector additionalConnector : this.additionalTomcatConnectors) {
+            tomcat.getService().addConnector(additionalConnector);
+        }
+        // 5.创建一个 TomcatEmbeddedContext 上下文对象，并进行初始化工作，配置 TomcatStarter 作为启动器
+        // 会将这个上下文对象设置到当前 `tomcat` 中去
+        prepareContext(tomcat.getHost(), initializers);
+
+        // 6.创建TomcatWebServer对象，封装tomcat对象
+        // 启动tomcat
+        return getTomcatWebServer(tomcat);
+    }
+}
+```
+
+在这上面的步骤中：
+
+- 第3步创建了NIO的Connector连接器对象，并放入了Tomcat对象中，**如果要研究真正的请求全流程，则必须从这个Connector对象出发！**
+- 第5步创建了TomcatEmbeddedContext 上下文对象，需要注意`TomcatStarter对象`
+- 第6步创建`TomcatWebServer对象`，对tomcat对象封装，**用于控制其start和stop**，可以看看上面的优雅开始/关闭WebServer是如何控制其生命周期的。
+
+#### 2.5.创建tomcat context
+
+`prepareContext(Host, ServletContextInitializer[])` 方法，**创建一个 TomcatEmbeddedContext 上下文对象**，并进行初始化工作，配置 TomcatStarter 作为启动器，会将这个上下文对象设置到 Tomcat 的 Host 中去，如下：
+
+```java
+// TomcatServletWebServerFactory.java	
+protected void prepareContext(Host host, ServletContextInitializer[] initializers) {
+    File documentRoot = getValidDocumentRoot();
+    // 1.创建TomcatEmbeddedContext上下文对象context
+    TomcatEmbeddedContext context = new TomcatEmbeddedContext();
+    if (documentRoot != null) 
+        context.setResources(new LoaderHidingResourceRoot(context));
+    
+	// 省略一堆配置
+    
+    //  Tomcat 上下文对象设置了 context-path，也就是配置的 server.servlet.context-path 属性值
+    context.setPath(getContextPath());
+    // 省略一堆代码
+    
+    // 2.这里会得到3个ServletContextInitializer
+    ServletContextInitializer[] initializersToUse = mergeInitializers(initializers);
+    host.addChild(context);
+    // 3.对 TomcatEmbeddedContext 进行配置
+    // 例如配置 TomcatStarter 启动器，它是对 ServletContext 上下文对象的初始器 `initializersToUse` 的封装
+    configureContext(context, initializersToUse);
+    postProcessContext(context);
+}
+```
+
+注意第3步调用 `configureContext(..)` 方法，对 `context` 进行配置，例如配置 `TomcatStarter` 启动器，它是对 ServletContext 上下文对象的初始器 `initializersToUse` 的封装
+
+##### 2.5.3创建TomcatStarter
+
+此方法进一步配置tomcat上下文对象`TomcatEmbeddedContext`：创建TomcatStarter启动器并放入tomcat上下文对象TomcatEmbeddedContext中：
+
+```java
+/**
+ * 配置tomcat 上下文
+ * @param context tomcat 上下文
+ * @param initializers 要应用的初始化器
+ */
+protected void configureContext(Context context, ServletContextInitializer[] initializers) {
+    // 1.创建TomcatStarter启动器，将Servlet上下文初始化器传入其中
+    // 并将其设置到tomcat 上下文中
+    TomcatStarter starter = new TomcatStarter(initializers);
+    if (context instanceof TomcatEmbeddedContext) {
+        TomcatEmbeddedContext embeddedContext = (TomcatEmbeddedContext) context;
+        embeddedContext.setStarter(starter);
+        embeddedContext.setFailCtxIfServletStartFails(true);
+    }
+    // 省略部分代码
+    // 2.设置错误页面
+    for (ErrorPage errorPage : getErrorPages()) {
+        org.apache.tomcat.util.descriptor.web.ErrorPage tomcatErrorPage = new org.apache.tomcat.util.descriptor.web.ErrorPage();
+        tomcatErrorPage.setLocation(errorPage.getPath());
+        tomcatErrorPage.setErrorCode(errorPage.getStatusCode());
+        tomcatErrorPage.setExceptionType(errorPage.getExceptionName());
+        context.addErrorPage(tomcatErrorPage);
+    }
+    for (MimeMappings.Mapping mapping : getMimeMappings()) {
+        context.addMimeMapping(mapping.getExtension(), mapping.getMimeType());
+    }
+    // 3.配置 TomcatEmbeddedContext 上下文的 Session 会话，例如超时会话时间
+    configureSession(context);
+    configureCookieProcessor(context);
+
+    // 省略
+}
+```
+
+这个TomcatStarter对象，实现了`javax.servlet.ServletContainerInitializer`接口，目的是用来触发SpringBoot自己的这个`ServletContextInitializer`接口对象。
+
+注意：目前的3个ServletContextInitializer接口实现类有1个很重要的函数式编程产生的对象：`ServletWebServerApplicationContext#selfInitialize(ServletContext)` ，这个在后面分析。
+
+> `javax.servlet.ServletContainerInitializer` 是 Servlet 3.0 新增的一个接口，容器在启动时使用 JAR 服务 API(JAR Service API) 来发现 **ServletContainerInitializer** 的实现类，并且容器将 WEB-INF/lib 目录下 JAR 包中的类都交给该类的 `onStartup(..)` 方法处理，我们通常需要在该实现类上使用 @HandlesTypes 注解来指定希望被处理的类，过滤掉不希望给 `onStartup(..)` 处理的类。
+>
+> 至于为什么这样做，可参考[**《精尽Spring MVC源码分析 - 寻找遗失的 web.xml》**](https://www.cnblogs.com/lifullmoon/p/14122704.html) 这篇文章
+
+#### 2.6.创建TomcatWebServer
+
+在TomcatServletWebServerFactory创建WebServer的最后一步是将已经创建好的Tomcat对象用来创建WebServer对象：
+
+```java
+// 用于创建TomcatWebServer
+// 可以使用 Spring 的ServletContextInitializer或 Tomcat LifecycleListener进行初始化。
+// 默认工厂将创建侦听端口8080上的 HTTP 请求的web容器
+public class TomcatServletWebServerFactory extends AbstractServletWebServerFactory
+    implements ConfigurableTomcatWebServerFactory, ResourceLoaderAware {	
+    public WebServer getWebServer(ServletContextInitializer... initializers) {
+        // 省略部分代码
+        // 1.创建Tomcat对象
+        Tomcat tomcat = new Tomcat();
+        // 2.创建临时目录作为tomcat目录，退出时删除
+
+        // 3.创建一个 NIO 协议的 Connector 连接器对象并放入tomcat中
+
+        // 4.对 Connector 进行配置，设置 `server.port` 端口、编码
+        // `server.tomcat.min-spare-threads`最小空闲线程和`server.tomcat.accept-count`最大线程数
+
+        // 5.创建一个 TomcatEmbeddedContext 上下文对象，并进行初始化工作，配置 TomcatStarter 作为启动器
+        // 会将这个上下文对象设置到当前 `tomcat` 中去
+        prepareContext(tomcat.getHost(), initializers);
+
+        // 6.创建TomcatWebServer对象，封装tomcat对象
+        // 启动tomcat
+        return getTomcatWebServer(tomcat);
+    }
+
+    // 调用工厂方法来创建TomcatWebServer
+    protected TomcatWebServer getTomcatWebServer(Tomcat tomcat) {
+        return new TomcatWebServer(tomcat, getPort() >= 0, getShutdown());
+    }
+}
+```
+
+接下来看看TomcatWebServer的构造器：
+
+```java
+// 可用于控制 Tomcat Web 服务器的WebServer
+public class TomcatWebServer implements WebServer {
+
+    private static final AtomicInteger containerCounter = new AtomicInteger(-1);
+    private final Object monitor = new Object();
+    private final Map<Service, Connector[]> serviceConnectors = new HashMap<>();
+
+    private final Tomcat tomcat;// 持有tomcat服务器
+
+    private final boolean autoStart;
+    private final GracefulShutdown gracefulShutdown;
+    private volatile boolean started;	
+
+    public TomcatWebServer(Tomcat tomcat, boolean autoStart, Shutdown shutdown) {
+        Assert.notNull(tomcat, "Tomcat Server must not be null");
+        this.tomcat = tomcat;
+        this.autoStart = autoStart;
+        this.gracefulShutdown = (shutdown == Shutdown.GRACEFUL) ? new GracefulShutdown(tomcat) : null;
+        // 初始化tomcat web容器，并触发 TomcatStarter#onStartup()方法
+        initialize();
+    }
+
+    public void start() throws WebServerException {
+        // 省略 Web服务器启动
+    }
+
+    public void stop() throws WebServerException {
+        // 省略 Web服务器停止
+    }
+    public void shutDownGracefully(GracefulShutdownCallback callback) {
+        // 省略 Web服务器的正常关闭，它需要在结束时调用给定的callback
+    }
+}
+```
+
+##### 启动Tomcat
+
+```java
+// TomcatWebServer.java	
+private void initialize() throws WebServerException {
+    // 以下代码省略了try/catch
+    synchronized (this.monitor) {
+        addInstanceIdToEngineName();
+
+        // 之前创建的TomcatEmbeddedContext上下文
+        Context context = findContext();
+		// 省略部分代码
+
+        // 启动 Tomcat 容器，这里会触发初始化监听器，
+        // 例如异步触发了 {@link TomcatStarter#onStartup} 方法
+        this.tomcat.start();
+
+       	// 省略部分代码
+    }
+}
+```
+
+可以看到，这个方法的关键在于 `this.tomcat.start()` 这一步，启动 Tomcat 容器，tomcat容器启动流程会触发 `javax.servlet.ServletContainerInitializer` 的 `onStartup(..)` 方法。
+
+关于它的具体start()方法可以之后分析，现在先看看它启动流程中会触发的`javax.servlet.ServletContainerInitializer#onStartup()`方法，在目前打断点发现这个接口实现类仅有TomcatStarter。
+
+##### TomcatStarter#onStartup
+
+> 首先要知道的是，SpringBoot并没有选择沿用servlet规范中启动流程会触发的`javax.servlet.ServletContainerInitializer`接口实现类，而是通过`TomcatStarter`这个实现类来回调SpringBoot自己的`ServletContextInitializer`接口实现类。
+>
+> 至于 `TomcatStarter` 为什么这做，是 Spring Boot **有意**为之，我们在使用 Spring Boot 时，开发阶段一般都是使用内嵌 Tomcat 容器，但部署时却存在两种选择：一种是打成 jar 包，使用 `java -jar` 的方式运行；另一种是打成 war 包，交给外置容器去运行。
+>
+> **前者就会导致容器搜索算法出现问题，因为这是 jar 包的运行策略，不会按照 Servlet 3.0 的策略以SPI机制去加载 ServletContainerInitializer**！
+>
+> 所以 Spring Boot 提供了 Servlet**Context**Initializer 去替代。
+
+```java
+// ServletContainerInitializer用于触发ServletContextInitializers并跟踪启动错误
+class TomcatStarter implements ServletContainerInitializer {	
+    public void onStartup(Set<Class<?>> classes, ServletContext servletContext) throws ServletException {
+		// 省略try/catch
+        for (ServletContextInitializer initializer : this.initializers) {
+            initializer.onStartup(servletContext);
+        }
+    }
+}
+
+@FunctionalInterface
+public interface ServletContextInitializer {
+    // 使用初始化所需的任何servlet、过滤器、侦听器上下文参数和属性配置给定的ServletContext
+    void onStartup(ServletContext servletContext) throws ServletException;
+}
+```
+
+![ServletContextInitializer](springboot.assets/ServletContextInitializer.png)
+
+##### ServletContextInitializer回调
+
+从上面图中可知默认有3个，只需要关注最后1个lambda表达式即可。
+
+先回到最初的ServletWebServerApplicationContext#createWebServer()方法，它在一TomcatServletWebServerFactory工厂创建WebServer时传入了lambda表达式：
+
+```java
+// Servlet的ApplicationContext上下文
+public class ServletWebServerApplicationContext extends GenericWebApplicationContext
+    implements ConfigurableWebServerApplicationContext {
+    private void createWebServer() {
+        WebServer webServer = this.webServer;
+        ServletContext servletContext = getServletContext();
+        // 内嵌式Tomcat首次必然为空
+        if (webServer == null && servletContext == null) {
+            // 1.获取ServletWeb服务工厂，默认是TomcatServletWebServerFactory
+            ServletWebServerFactory factory = getWebServerFactory();
+            /* 2.
+		从工厂中创建1个WebServer容器对象，默认是TomcatWebServer
+		在创建过程中会触发TomcatStarter#onStartup()方法，它会调用这个传入的ServletContextInitializer
+		*/
+            // 注意这里传入的lambda表达式
+            this.webServer = factory.getWebServer(getSelfInitializer());
+
+            // 3.注册webServer的优雅关闭单例bean，这些单例bean实现了SmartLifeCycle接口
+            // 从而在Spring应用停止时能够及时关闭Web容器
+            // 省略
+        }
+        // 省略
+    }
+    // 这里传入lambda表达式
+    private org.springframework.boot.web.servlet.ServletContextInitializer getSelfInitializer() {
+        return this::selfInitialize;
+    }
+
+    // 这个方法很重要
+    private void selfInitialize(ServletContext servletContext) throws ServletException {
+        // 1.将当前Spring应用上下文设置到 ServletContext 上下文的属性中
+        // 同时将 ServletContext 上下文设置到 Spring 应用上下文中
+        prepareWebApplicationContext(servletContext);
+        registerApplicationScope(servletContext);
+        // 2.向Spring应用上下文注册`contextParameters`和`contextAttributes`属性（会先被封装成 Map）
+        WebApplicationContextUtils.registerEnvironmentBeans(getBeanFactory(), servletContext);
+
+        /** 3.【重点】
+     	 * 先从 Spring ioc容器内找到所有的  ServletContextInitializer 实现bean
+     	 * 也就会找到各种 {@link RegistrationBean}，然后依次调用他们的 `onStartup` 方法，向 ServletContext 上下文注册 Servlet、Filter 和 EventListener
+     	 * 例如 DispatcherServletAutoConfiguration中的DispatcherServletRegistrationBean
+     	 * 就会注册DispatcherServlet对象
+     	 * 所以这里执行完了，也就启动了 Tomcat，同时注册了所有的 Servlet，那么 Web 应用准备就绪了
+     	 */
+        for (ServletContextInitializer beans : getServletContextInitializerBeans()) {
+            beans.onStartup(servletContext);
+        }
+    }
+}
+```
+
+也就是说，通过lambda表达式，以selfInitialize方法覆盖了函数式接口ServletContextInitializer的onStartup()方法。
+
+> 同时这个方法会去ioc容器内找到所有的`ServletContextInitializer`接口实现bean并调用其`onStartup()`方法。
+>
+> 需要注意的是这里有个很重要的实现类：`RegistrationBean`。在SpringBoot应用中注册Servlet、Filter、EventListener一般都是去继承这个类。
+
+##### RegistrationBean回调
+
+这里的分析先留着，具体细节看下面。之所以在这里留个标题，目的是知道Servlet、Filter这些放入Tomcat容器内是在哪里执行的。
+
+### 3.优雅开启/关闭WebServer
+
+在第3步中：可以知道Tomcat容器的关闭依赖的是SmartLifyCycle接口的实现类：
+
+> 通过该SmartLifeCycle接口实现bean从而让WebServer和IOC容器的生命周期关联起来。 
+
+```java
+class WebServerStartStopLifecycle implements SmartLifecycle {
+    @Override
+    public void start() {
+        this.webServer.start();
+        this.running = true;
+        this.applicationContext
+            .publishEvent(new ServletWebServerInitializedEvent(this.webServer, this.applicationContext));
+    }
+
+    @Override
+    public void stop() {
+        this.webServer.stop();
+    }
+}
+```
+
+这里的关于WebServer#start()方法里面有很多细节，具体分析看下面的优雅开启/关闭WebServer。
+
+## RegistrationBean注册Servlet/Filter
+
+`org.springframework.boot.web.servlet.RegistrationBean`，基于 Servlet 3.0+，往 ServletContext 注册 Servlet、Filter 和 EventListener。
+
+> 一般在SpringBoot应用中若想往Web容器内添加Servlet、Filter等都要实现这个注册bean，它的回调处理请看上面Tomcat容器启动部分对TomcatStarter的处理。
+
+```java
+// 基于 Servlet 3.0+ 的注册 bean 的基类
+public abstract class RegistrationBean implements ServletContextInitializer, Ordered {
+    @Override
+    public final void onStartup(ServletContext servletContext) throws ServletException {
+        String description = getDescription();
+        register(description, servletContext);
+    }
+
+    // 返回注册的描述，例如“Servlet 资源Servlet”
+    protected abstract String getDescription();
+
+    // 将此 bean 注册到 servlet 上下文。
+    protected abstract void register(String description, ServletContext servletContext);
+}
+```
+
+呃，直接看最经典的实现，在DispatcherServlet自动配置类中注册的关于DispatcherServlet的注册bean的这个实现：
+
+```java
+// DispatcherServlet的Servlet注册bean的bean
+@Bean(name = DEFAULT_DISPATCHER_SERVLET_REGISTRATION_BEAN_NAME)
+@ConditionalOnBean(value = DispatcherServlet.class, name = DEFAULT_DISPATCHER_SERVLET_BEAN_NAME)
+public DispatcherServletRegistrationBean dispatcherServletRegistration(DispatcherServlet dispatcherServlet, WebMvcProperties webMvcProperties, ObjectProvider<MultipartConfigElement> multipartConfig) {
+    // 将DispatcherServlet作为这个Servlet注册bean的属性
+    DispatcherServletRegistrationBean registration = 
+        new DispatcherServletRegistrationBean(
+        dispatcherServlet, webMvcProperties.getServlet().getPath());
+    registration.setName(DEFAULT_DISPATCHER_SERVLET_BEAN_NAME);
+    registration.setLoadOnStartup(webMvcProperties.getServlet().getLoadOnStartup());
+    multipartConfig.ifAvailable(registration::setMultipartConfig);
+    return registration;
+}
+```
+
+然后看看它的onStartup()方法是如何注册到Servlet上下文的：就是直接调用add方法
+
+```java
+public final void onStartup(ServletContext servletContext) throws ServletException {
+    String description = getDescription();
+
+    register(description, servletContext);
+}	
+
+protected final void register(String description, ServletContext servletContext) {
+    D registration = addRegistration(description, servletContext);
+    configure(registration);
+}
+
+protected ServletRegistration.Dynamic addRegistration(String description, ServletContext servletContext) {
+    String name = getServletName();
+    // 调用ServletContext#addServlet添加Servlet
+    return servletContext.addServlet(name, this.servlet);
+}
+
+protected void configure(ServletRegistration.Dynamic registration) {
+    super.configure(registration);
+    // 设置需要拦截的URL，DispatcherServlet默认是"/*"
+    String[] urlMapping = StringUtils.toStringArray(this.urlMappings);
+    if (urlMapping.length == 0 && this.alwaysMapUrl) {
+        urlMapping = DEFAULT_MAPPINGS;
+    }
+    if (!ObjectUtils.isEmpty(urlMapping)) {
+        registration.addMapping(urlMapping);
+    }
+    registration.setLoadOnStartup(this.loadOnStartup);
+    if (this.multipartConfig != null) {
+        registration.setMultipartConfig(this.multipartConfig);
+    }
+}
+```
+
+> 注意：当要自己想要注册一些Filter、Servlet时，就需要类似DispatcherServletRegistrationBean这样**继承RegistrationBean**，才能在回调处理时将其添加到Servlet上下文中。
+
+## 优雅开启/关闭WebServer
+
+在Spring应用上下文的refresh()方法中，onRefresh()回调创建了WebServer，这里面封装有Tomcat容器。
+
+> WebServer是Spring提供来管理Tomcat容器生命周期的。在上面分析的3.优雅开启/关闭WebServer中知道，SmartLifeCycle接口的回调处理会触发WebServer的start()或stop()方法！
+
+而SmartLifeCycle的start()方法回调处理是在Spring应用上下文refresh()方法中的最后：finishRefresh()
+
+```java
+public void refresh() throws BeansException, IllegalStateException {
+    // <1> 来个锁，不然 refresh() 还没结束，你又来个启动或销毁容器的操作，那不就乱套了嘛
+    synchronized (this.startupShutdownMonitor) {
+
+        // <2> 刷新上下文环境的准备工作，记录下容器的启动时间、标记'已启动'状态、对上下文环境属性进行校验
+        prepareRefresh();
+
+        // <3> 创建并初始化一个 BeanFactory 对象 `beanFactory`，会加载出对应的 BeanDefinition 元信息们
+        ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+
+        // <4> 为 `beanFactory` 进行一些准备工作，例如添加几个 BeanPostProcessor，手动注册几个特殊的 Bean
+        prepareBeanFactory(beanFactory);
+
+        // 以下代码省略try/catch/finally
+
+        // <5> 对 `beanFactory` 在进行一些后期的加工，交由子类进行扩展
+        postProcessBeanFactory(beanFactory);
+
+        // <6> 执行 BeanFactoryPostProcessor 处理器，包含 BeanDefinitionRegistryPostProcessor 处理器
+        invokeBeanFactoryPostProcessors(beanFactory);
+
+        // <7> 对 BeanPostProcessor 处理器进行初始化，并添加至 BeanFactory 中
+        registerBeanPostProcessors(beanFactory);
+
+        // <8> 设置上下文的 MessageSource 对象
+        initMessageSource();
+
+        // <9> 设置上下文的 ApplicationEventMulticaster 对象，上下文事件广播器
+        initApplicationEventMulticaster();
+
+        // <10> 刷新上下文时再进行一些初始化工作，交由子类进行扩展
+        onRefresh();
+
+        // <11> 将所有 ApplicationListener 监听器添加至 `applicationEventMulticaster` 事件广播器，如果已有事件则进行广播
+        registerListeners();
+
+        // <12> 设置 ConversionService 类型转换器，**初始化**所有还未初始化的 Bean（不是抽象、单例模式、不是懒加载方式）
+        finishBeanFactoryInitialization(beanFactory);
+
+        // <13> 刷新上下文的最后一步工作，会发布 ContextRefreshedEvent 上下文完成刷新事件
+        finishRefresh();
+    }
+}
+```
+
+这个finishRefresh()方法呢，可以去看我在Spring的分析，总之它会调用SmartLifeCycle#start()方法。
+
+### WebServer#start()
+
+总之，Spring应用上下文的refresh()方法的最后调用的finishRefresh()方法会调用SmartLifeCycle#start()方法，就会来到WebServer#start()方法：
+
+```java
+// TomcatWebServer.java
+public void start() throws WebServerException {
+    synchronized (this.monitor) {
+        if (this.started)  return;
+
+        // 省略了try/catch/finally
+
+        addPreviouslyRemovedConnectors();
+        Connector connector = this.tomcat.getConnector();
+        if (connector != null && this.autoStart) {
+            /**
+             * 对每一个 TomcatEmbeddedContext 中的 Servlet 进行加载并初始化，先找到容器中所有的 {@link org.apache.catalina.Wrapper}
+             * 它是对 {@link javax.servlet.Servlet} 的封装，依次加载并初始化它们
+    		 */
+            performDeferredLoadOnStartup();
+        }
+        checkThatConnectorsHaveStarted();
+        this.started = true;
+    }
+}
+
+private void performDeferredLoadOnStartup() {
+    // 省略try/catch
+    for (Container child : this.tomcat.getHost().findChildren()) {
+        /**
+         * 找到容器中所有的 {@link org.apache.catalina.Wrapper}，它是对 {@link javax.servlet.Servlet} 的封装
+         * 那么这里将依次加载并初始化它们
+         */
+        if (child instanceof TomcatEmbeddedContext) {
+            ((TomcatEmbeddedContext) child).deferredLoadOnStartup();
+        }
+    }
+}
+```
+
+> 我打断点发现：DispatcherServlet的关于Servlet的init()方法未被调用？
+>
+> 不过我又发现，**当请求到来时，Servlet#init()方法才会调用**！
+
+### WebServer#stop()
+
+当Spring容器停止时，回调SmartLifeCycle#stop()，那么Web容器的stop方法也将回调：
+
+```java
+public void stop() throws WebServerException {
+    synchronized (this.monitor) {
+        boolean wasStarted = this.started;
+        try {
+            this.started = false;
+            try {
+                if (this.gracefulShutdown != null) {
+                    this.gracefulShutdown.abort();
+                }
+                // 停止Tomcat容器
+                stopTomcat();
+                // 销毁Tomcat容器
+                this.tomcat.destroy();
+            }
+            catch (LifecycleException ex) {
+                // swallow and continue
+            }
+        }
+        catch (Exception ex) {
+            throw new WebServerException("Unable to stop embedded Tomcat", ex);
+        }
+        finally {
+            if (wasStarted) {
+                containerCounter.decrementAndGet();
+            }
+        }
+    }
+}
+```
+
+## 总结
+
+本文分析了 Spring Boot 内嵌 Tomcat 容器的实现，主要是 Spring Boot 的 Spring 应用上下文（`ServletWebServerApplicationContext`）在 `refresh()` 刷新阶段进行了扩展，分别在 `onRefresh()` 和 `finishRefresh()` 两个地方，分别做了以下事情：
+
+1. 创建一个 WebServer 服务对象，例如 TomcatWebServer 对象，对 Tomcat 的封装，用于优雅控制 Tomcat 服务器启动和关闭
+   1. 先创建一个 `org.apache.catalina.startup.Tomcat` 对象 `tomcat`，使用临时目录作为基础目录（`tomcat.端口号`），退出时删除，同时会设置端口、编码、最小空闲线程和最大线程数
+   2. 为 `tomcat` 创建一个 `TomcatEmbeddedContext` 上下文对象，会添加一个 `TomcatStarter`（实现 `javax.servlet.ServletContainerInitializer` 接口）到这个上下文对象中
+   3. 将 `tomcat` 封装到 TomcatWebServer 对象中，实例化过程会启动 `tomcat`，启动后会触发 `javax.servlet.ServletContainerInitializer` 实现类的回调，也就会触发 `TomcatStarter` 的回调，在其内部会调用 Spring Boot 自己的 `ServletContextInitializer` 初始器，例如 `ServletWebServerApplicationContext#selfInitialize(ServletContext)` 匿名方法
+   4. 在这个匿名方法中会找到所有的 `RegistrationBean`，执行他们的 `onStartup` 方法，将其关联的 Servlet、Filter 和 EventListener 添加至 Servlet 上下文中，包括 Spring MVC 的 DispatcherServlet 对象
+2. 接下来在finishRefresh()方法中会涉及到对SmartLifeCycle接口的start()方法回调处理，**从而优雅的将Tomcat容器生命周期和SpringIOC容器的生命周期绑在了一起！**
+
+> **ServletContainerInitializer** 也是 Servlet 3.0 新增的一个接口，容器在启动时使用 JAR 服务 API(JAR Service API) 来发现 **ServletContainerInitializer** 的实现类，并且容器将 WEB-INF/lib 目录下 JAR 包中的类都交给该类的 `onStartup()` 方法处理，我们通常需要在该实现类上使用 @HandlesTypes 注解来指定希望被处理的类，过滤掉不希望给 `onStartup()` 处理的类。
+
+# Tomcat处理流程
+
+关于Tomcat如何以NIO监听，如何分发到Servlet的流程，这里先不分析。
+
+目前定位到的Selector选择器在`org.apache.tomcat.util.net.NioEndpoint`类中，之后有时间具体分析这个流程。
+
+其入口方法是`NioEndpoint#startInternal()`，它启动了1个线程以Selector监听8080端口。
+
+# DispatcherServlet处理流程
+
