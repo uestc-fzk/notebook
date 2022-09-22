@@ -6271,7 +6271,7 @@ public void stop() throws WebServerException {
 
 # Tomcat处理流程
 
-关于Tomcat如何以NIO监听，如何分发到Servlet的流程，这里先不分析。
+关于Tomcat如何以NIO监听端口，如何分发到Servlet的流程，这里先不分析。
 
 目前定位到的Selector选择器在`org.apache.tomcat.util.net.NioEndpoint`类中，之后有时间具体分析这个流程。
 
@@ -6279,3 +6279,2646 @@ public void stop() throws WebServerException {
 
 # DispatcherServlet处理流程
 
+![SpingMVC-Process](springboot.assets/SpingMVC-Process.jpg)
+
+Spring MVC 处理请求的流程大致如上图所示：
+
+1. 浏览器发送一个请求，Servlet 容器首先接待了这个请求，并将该请求委托给 `DispatcherServlet` 进行处理。
+2. `DispatcherServlet` 将该请求传给了处理器映射组件 `HandlerMapping`，并获取到适合该请求的 HandlerExecutionChain 拦截器和处理器对象。
+3. 在获取到处理器后，`DispatcherServlet` 还不能直接调用处理器的逻辑，需要进行对处理器进行适配。处理器适配成功后，`DispatcherServlet` 通过处理器适配器 `HandlerAdapter` 调用处理器的逻辑，并获取返回值 `ModelAndView` 对象。
+4. 之后，`DispatcherServlet` 需要根据 ModelAndView 解析视图。解析视图的工作由 `ViewResolver` 完成，若能解析成功，`ViewResolver` 会返回相应的 View 视图对象。
+5. 在获取到具体的 View 对象后，最后一步要做的事情就是由 View 渲染视图，并将渲染结果返回给用户。
+
+## WebMVC的重要组件
+
+| 组件                        | 说明                                                         |
+| :-------------------------- | :----------------------------------------------------------- |
+| DispatcherServlet           | Spring MVC 的核心组件，是请求的入口，负责协调各个组件工作    |
+| MultipartResolver           | 内容类型( `Content-Type` )为 `multipart/*` 的请求的解析器，例如解析处理文件上传的请求，便于获取参数信息以及上传的文件 |
+| HandlerMapping              | 请求的处理器匹配器，负责为请求找到合适的 `HandlerExecutionChain` 处理器执行链，包含处理器（`handler`）和拦截器链（`interceptors`） |
+| HandlerAdapter              | 处理器的适配器。因为处理器 `handler` 的类型是 Object 类型，需要有一个调用者来实现 `handler` 是怎么被执行。Spring 中的处理器的实现多变，比如用户处理器可以实现 Controller 接口、HttpRequestHandler 接口，也可以用 `@RequestMapping` 注解将方法作为一个处理器等，这就导致 Spring MVC 无法直接执行这个处理器。所以这里需要一个处理器适配器，由它去执行处理器 |
+| HandlerExceptionResolver    | 处理器异常解析器，将处理器（ `handler` ）执行时发生的异常，解析( 转换 )成对应的 ModelAndView 结果 |
+| RequestToViewNameTranslator | 视图名称转换器，用于解析出请求的默认视图名                   |
+| LocaleResolver              | 本地化（国际化）解析器，提供国际化支持                       |
+| ThemeResolver               | 主题解析器，提供可设置应用整体样式风格的支持                 |
+| ViewResolver                | 视图解析器，根据视图名和国际化，获得最终的视图 View 对象     |
+| FlashMapManager             | FlashMap 管理器，负责重定向时，保存参数至临时存储（默认 Session） |
+
+DispatcherServlet负责协调各个组件完成各自职责。
+
+## FrameworkServlet
+
+### service
+
+FrameworkServlet是DispatcherServlet的父类，它覆盖了`HttpServlet#service()`方法：
+
+```java
+/*
+Spring Web 框架的基本 servlet
+在基于 JavaBean 的整体解决方案中提供与 Spring 应用程序上下文的集成。
+*/
+public abstract class FrameworkServlet extends HttpServletBean implements ApplicationContextAware {
+    // 覆盖父类实现以拦截 PATCH 请求
+    @Override
+    protected void service(HttpServletRequest request, HttpServletResponse response)
+        throws ServletException, IOException {
+		// 对于PATCH请求直接处理
+        HttpMethod httpMethod = HttpMethod.resolve(request.getMethod());
+        if (httpMethod == HttpMethod.PATCH || httpMethod == null) {
+            processRequest(request, response);
+        }
+        // 其它请求类型交由父类进行分发，如分发到doGet()/doPost()
+        else super.service(request, response);
+    }
+}
+```
+
+可以看到`FrameworkServlet#service()`重写的目的就1个，支持PATCH请求，因为 HttpServlet 默认没提供处理 `Patch` 请求类型的请求 ，所以只能通过覆盖父类的 `service` 方法来实现。
+
+其父类`javax.servlet.http.HttpServlet`提供的Service方法将分发请求到各个处理分支：
+
+```java
+// HttpServlet.java
+// 从公共service方法接收标准 HTTP 请求，并将它们分派到此类中定义的do Method方法
+protected void service(HttpServletRequest req, HttpServletResponse resp)
+    throws ServletException, IOException {
+
+    String method = req.getMethod();
+	// 对于条件GET的处理
+    if (method.equals(METHOD_GET)) {
+        long lastModified = getLastModified(req);
+        if (lastModified == -1) {
+            // servlet doesn't support if-modified-since, no reason
+            // to go through further expensive logic
+            doGet(req, resp);
+        } else {
+            long ifModifiedSince;
+            try {
+                ifModifiedSince = req.getDateHeader(HEADER_IFMODSINCE);
+            } catch (IllegalArgumentException iae) {
+                // Invalid date header - proceed as if none was set
+                ifModifiedSince = -1;
+            }
+            if (ifModifiedSince < (lastModified / 1000 * 1000)) {
+                // If the servlet mod time is later, call doGet()
+                // Round down to the nearest second for a proper compare
+                // A ifModifiedSince of -1 will always be less
+                maybeSetLastModified(resp, lastModified);
+                doGet(req, resp);
+            } else {
+                // 上次未修改，返回304状态码
+                resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+            }
+        }
+    } else if (method.equals(METHOD_HEAD)) {
+        long lastModified = getLastModified(req);
+        maybeSetLastModified(resp, lastModified);
+        doHead(req, resp);
+    } else if (method.equals(METHOD_POST)) {
+        doPost(req, resp);
+    } else if (method.equals(METHOD_PUT)) {
+        doPut(req, resp);
+    } else if (method.equals(METHOD_DELETE)) {
+        doDelete(req, resp);
+    } else if (method.equals(METHOD_OPTIONS)) {
+        doOptions(req,resp);
+    } else if (method.equals(METHOD_TRACE)) {
+        doTrace(req,resp);
+    } else {
+        //
+        // Note that this means NO servlet supports whatever
+        // method was requested, anywhere on this server.
+        //
+        String errMsg = lStrings.getString("http.method_not_implemented");
+        Object[] errArgs = new Object[1];
+        errArgs[0] = method;
+        errMsg = MessageFormat.format(errMsg, errArgs);
+        resp.sendError(HttpServletResponse.SC_NOT_IMPLEMENTED, errMsg);
+    }
+}
+```
+
+其中METHOD_OPTIONS使用场景：AJAX 进行跨域请求时的预检，需要向另外一个域名的资源发送一个HTTP OPTIONS请求头，用以判断实际发送的请求是否安全。
+
+### processRequest
+
+在FrameworkServlet中，重写了上面所有的do Method方法，不过它们都直接交由processRequest()方法处理：
+
+```java
+// 将 GET 请求委托给 processRequest/doService
+protected final void doGet(HttpServletRequest request, HttpServletResponse response)
+    throws ServletException, IOException {
+    processRequest(request, response);
+}
+
+// 处理此请求，无论结果如何都发布事件。
+// 实际的事件处理由抽象的doService模板方法执行。
+protected final void processRequest(HttpServletRequest request, HttpServletResponse response)
+    throws ServletException, IOException {
+	// 1.记录当前时间，用于计算请求处理花费时间
+    long startTime = System.currentTimeMillis();
+    Throwable failureCause = null;
+
+    LocaleContext previousLocaleContext = LocaleContextHolder.getLocaleContext();
+    LocaleContext localeContext = buildLocaleContext(request);
+
+    RequestAttributes previousAttributes = RequestContextHolder.getRequestAttributes();
+    ServletRequestAttributes requestAttributes = buildRequestAttributes(request, response, previousAttributes);
+
+    WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+    asyncManager.registerCallableInterceptor(FrameworkServlet.class.getName(), new RequestBindingInterceptor());
+
+    initContextHolders(request, localeContext, requestAttributes);
+
+    try {
+        // 委托给doService方法处理
+        doService(request, response);
+    }
+    catch (ServletException | IOException ex) {
+        failureCause = ex;
+        throw ex;
+    }
+    catch (Throwable ex) {
+        failureCause = ex;
+        throw new NestedServletException("Request processing failed", ex);
+    }
+    finally {
+        resetContextHolders(request, previousLocaleContext, previousAttributes);
+        if (requestAttributes != null)
+            requestAttributes.requestCompleted();
+        
+        logResult(request, response, failureCause, asyncManager);
+        // 发布 ServletRequestHandledEvent 请求处理完成事件
+        publishRequestHandledEvent(request, response, startTime, failureCause);
+    }
+}
+```
+
+processRequest()方法将具体的处理逻辑委托给doService()方法，它由DispatcherServlet实现，而从这里来看的话，processRequest()方法主要用于**统计花费时间**、**发布请求处理完成事件**。
+
+### 自定义请求监听器
+
+根据FrameworkServlet的processRequest()方法最后的通知事件，那么可以自己写一个请求监听器：
+
+```java
+@Component
+@Log4j2
+public class ServletRequestHandledEventListener implements ApplicationListener<ServletRequestHandledEvent>{
+    @Override
+    public void onApplicationEvent(ServletRequestHandledEvent event) {
+        log.info("请求描述：{}", event.getDescription());
+        log.info("请求路径：{}", event.getRequestUrl());
+        log.info("开始时间：{}", event.getTimestamp());
+        log.info("请求耗时：{}", event.getProcessingTimeMillis());
+        log.info("状 态 码：{}", event.getStatusCode());
+        log.info("失败原因：{}", event.getFailureCause());
+    }
+}
+```
+
+## DispatcherServlet
+
+FrameworkServlet#processServlet()方法真正处理逻辑委托给doService()方法，这就来到SpringMVC核心组件DispatcherServlet了：
+
+```java
+/*
+HTTP 请求处理程序/控制器的中央调度程序，分派给已注册的处理程序以处理 Web 请求，提供方便的映射和异常处理设施。
+
+它提供了以下功能，将其与其他请求驱动的 Web MVC 框架区分开来：
+它基于 JavaBeans 配置机制。
+它可以使用任何HandlerMapping实现——预先构建或作为应用程序的一部分提供——来控制请求到处理程序对象的路由。默认是org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping和org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping 。 
+
+默认适配器是org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter ， org.springframework.web.servlet.mvc.SimpleControllerHandlerAdapter ，分别用于 Spring 的org.springframework.web.HttpRequestHandler和org.springframework.web.servlet.mvc.Controller接口。
+
+默认的org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter也将被注册。 HandlerAdapter 对象可以作为bean 添加到应用程序上下文中，覆盖默认的HandlerAdapters。与 HandlerMappings 一样，可以为 HandlerAdapters 指定任何 bean 名称（它们按类型进行测试）。
+
+调度程序的异常解决策略可以通过HandlerExceptionResolver指定，例如将某些异常映射到错误页面。默认为org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver 、 org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver和org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver 。这些 HandlerExceptionResolver 可以通过应用程序上下文覆盖。 HandlerExceptionResolver 可以被赋予任何 bean 名称（它们按类型进行测试）。
+
+它的视图解析策略可以通过ViewResolver实现指定，将符号视图名称解析为视图对象。默认是org.springframework.web.servlet.view.InternalResourceViewResolver 。 ViewResolver 对象可以作为 bean 添加到应用程序上下文中，覆盖默认的 ViewResolver。 ViewResolvers 可以被赋予任何 bean 名称（它们按类型进行测试）。
+
+如果用户未提供View或视图名称，则配置的RequestToViewNameTranslator会将当前请求转换为视图名称。对应的bean名称为“viewNameTranslator”；默认是org.springframework.web.servlet.view.DefaultRequestToViewNameTranslator 。
+
+调度程序解决多部分请求的策略由MultipartResolver实现确定。包括 Apache Commons FileUpload 和 Servlet 3 的实现；典型的选择是org.springframework.web.multipart.commons.CommonsMultipartResolver 。 MultipartResolver bean 名称是“multipartResolver”；默认为无。
+
+其语言环境解析策略由LocaleResolver确定。开箱即用的实现通过 HTTP 接受标头、cookie 或会话工作。 LocaleResolver bean 名称是“localeResolver”；默认是org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver 。
+
+其主题解析策略由ThemeResolver确定。包括固定主题和 cookie 和会话存储的实现。 ThemeResolver bean 名称是“themeResolver”；默认是org.springframework.web.servlet.theme.FixedThemeResolver 。
+
+Web 应用程序可以定义任意数量的 DispatcherServlet。每个 servlet 将在自己的命名空间中运行，使用映射、处理程序等加载自己的应用程序上下文。只有org.springframework.web.context.ContextLoaderListener加载的根应用程序上下文（如果有）将被共享。
+*/
+public class DispatcherServlet extends FrameworkServlet {
+    
+	/**multipart 数据(文件)处理器 */
+	@Nullable
+	private MultipartResolver multipartResolver;
+
+	/** 语言处理器，支持国际化 */
+	@Nullable
+	private LocaleResolver localeResolver;
+
+	/** 主题处理器，设置需要应用的整体样式 */
+	@Nullable
+	private ThemeResolver themeResolver;
+
+	/** 处理器映射器，返回请求对应的处理器和拦截器 */
+	@Nullable
+	private List<HandlerMapping> handlerMappings;
+
+	/** 处理器适配器，用于执行处理器 */
+	@Nullable
+	private List<HandlerAdapter> handlerAdapters;
+
+	/** 异常处理器，用于解析处理器发生的异常 */
+	@Nullable
+	private List<HandlerExceptionResolver> handlerExceptionResolvers;
+
+	/** 视图名称转换器 */
+	@Nullable
+	private RequestToViewNameTranslator viewNameTranslator;
+
+	/** FlashMap管理器，负责重定向时保存参数到临时存储(默认是session) */
+	@Nullable
+	private FlashMapManager flashMapManager;
+
+	/** 视图解析器，根据视图名称、语言获取View视图 */
+	@Nullable
+	private List<ViewResolver> viewResolvers;
+}
+```
+
+### Servlet#init()
+
+当请求到达端口，tomcat的Connector监听到连接后，交由指定的Servlet处理时，**若Servlet还未初始化init()，则先执行Servlet的init()方法**。
+
+**DispatcherServlet的init()初始化方法主要是初始化各个组件**。
+
+> 关于Servlet在Servlet容器的生命周期，可以直接看Servlet类的注释：
+>
+> init()---> service() --> destroy()
+
+```java
+// HttpServletBean.java
+// 将配置参数映射到此 servlet 的 bean 属性，并调用子类初始化
+public final void init() throws ServletException {
+    // Set bean properties from init parameters.
+    PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+    if (!pvs.isEmpty()) {
+        // 省略
+    }
+
+    // 让子类自定义初始化
+    initServletBean();
+}
+
+// FrameworkServlet.java
+@Override
+protected final void initServletBean() throws ServletException {
+    // 省略
+    // 初始化web应用上下文，会初始化DispatcherServlet的各个组件
+    this.webApplicationContext = initWebApplicationContext();
+    initFrameworkServlet();// 这个目前是空实现
+}
+
+protected WebApplicationContext initWebApplicationContext() {
+    WebApplicationContext rootContext =
+        WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+    WebApplicationContext wac = null;
+    
+    // 省略部分代码
+
+    if (!this.refreshEventReceived) {
+        // Either the context is not a ConfigurableApplicationContext with refresh
+        // support or the context injected at construction time had already been
+        // refreshed -> trigger initial onRefresh manually here.
+        synchronized (this.onRefreshMonitor) {
+            onRefresh(wac);
+        }
+    }
+	// 省略部分代码
+    return wac;
+}
+```
+
+可以看到Servlet的init()方法，主要是调用onRefresh()方法：
+
+```java
+protected void onRefresh(ApplicationContext context) {
+    initStrategies(context);
+}
+// 初始化DispatcherServlet的各个组件
+protected void initStrategies(ApplicationContext context) {
+    initMultipartResolver(context);
+    initLocaleResolver(context);
+    initThemeResolver(context);
+    initHandlerMappings(context);
+    initHandlerAdapters(context);
+    initHandlerExceptionResolvers(context);
+    initRequestToViewNameTranslator(context);
+    initViewResolvers(context);
+    initFlashMapManager(context);
+}
+```
+
+### doService
+
+`FrameworkServlet#processServlet()`方法真正处理逻辑委托给`doService()`方法：
+
+```java
+// DispatcherServlet.java
+protected void doService(HttpServletRequest request, HttpServletResponse response) throws Exception {
+    // 1.保存当前请求属性的快照
+    Map<String, Object> attributesSnapshot = null;
+    if (WebUtils.isIncludeRequest(request)) {
+        attributesSnapshot = new HashMap<>();
+        Enumeration<?> attrNames = request.getAttributeNames();
+        while (attrNames.hasMoreElements()) {
+            String attrName = (String) attrNames.nextElement();
+            if (this.cleanupAfterInclude || attrName.startsWith(DEFAULT_STRATEGIES_PREFIX)) {
+                attributesSnapshot.put(attrName, request.getAttribute(attrName));
+            }
+        }
+    }
+
+	// 省略杂七杂八的属性设置
+
+    try {
+        // 2.执行请求的分派
+        doDispatch(request, response);
+    }
+    finally {
+        if (!WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
+            // Restore the original attribute snapshot, in case of an include.
+            if (attributesSnapshot != null) {
+                restoreAttributesAfterInclude(request, attributesSnapshot);
+            }
+        }
+        if (this.parseRequestPath) 
+            ServletRequestPathUtils.setParsedRequestPath(previousRequestPath, request);
+    }
+}
+```
+
+这就来到了最最重要的`doDispatch()`请求分派处理方法。
+
+## doDispatch
+
+```java
+/*
+处理对处理程序的实际调度
+将通过依次应用 servlet 的 HandlerMappings 来获取处理程序
+HandlerAdapter 将通过查询 servlet 已安装的 HandlerAdapter 来找到第一个支持该处理程序类的
+*/
+protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+    HttpServletRequest processedRequest = request;
+    HandlerExecutionChain mappedHandler = null;
+    boolean multipartRequestParsed = false;
+    // 1.获取异步管理器
+    WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+
+    try {
+        ModelAndView mv = null;
+        Exception dispatchException = null;
+
+        try {
+            // 2.检测请求是否为上传请求，如果是则通过 multipartResolver 将其封装成 MultipartHttpServletRequest 对象
+            processedRequest = checkMultipart(request);
+            multipartRequestParsed = (processedRequest != request);
+
+            // 3.获得请求对应的 HandlerExecutionChain 对象（HandlerMethod 和 HandlerInterceptor 拦截器们）
+            mappedHandler = getHandler(processedRequest);
+            if (mappedHandler == null) {
+                // 3.1 如果获取不到，返回 404 错误，一般是不支持该url
+                noHandlerFound(processedRequest, response);
+                return;
+            }
+
+            // 4.获得当前handler的HandlerAdapter
+            HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+            // 4.1 处理有Last-Modified请求头的场景
+            String method = request.getMethod();
+            boolean isGet = HttpMethod.GET.matches(method);
+            if (isGet || HttpMethod.HEAD.matches(method)) {
+                // 获取请求中服务器端最后被修改时间
+                long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
+                if (new ServletWebRequest(request, response).checkNotModified(lastModified) 
+                    && isGet) {
+                    return;
+                }
+            }
+
+            // 5.拦截器链 前置拦截 回调
+            // 注意：如果某个拦截器返回false，会立刻回调执行已经拦截过的拦截器的afterCompletion回调
+            if (!mappedHandler.applyPreHandle(processedRequest, response))
+                return;
+
+            // 6.HandlerAdapter真正调用handler方法，即执行controller对应的方法，并返回视图mv
+            mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+
+            if (asyncManager.isConcurrentHandlingStarted())
+                return;
+            
+            // 无视图的情况下设置默认视图名称
+            applyDefaultViewName(processedRequest, mv);
+
+            // 7.倒序执行拦截器链 后置拦截 回调
+            mappedHandler.applyPostHandle(processedRequest, response, mv);
+        }
+        catch (Exception ex) {
+            dispatchException = ex;
+        }
+        catch (Throwable err) {
+            // As of 4.3, we're processing Errors thrown from handler methods as well,
+            // making them available for @ExceptionHandler methods and other scenarios.
+            dispatchException = new NestedServletException("Handler dispatch failed", err);
+        }
+        
+        // 8.处理请求结果，页面渲染
+        // 这里会包含请求处理成功时的 拦截器链的 afterCompletion完成回调
+        processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+    }
+    // 9.如果出现异常，则倒序执行已经执行过前置拦截但未执行afterCompletion回调的拦截器
+    catch (Exception ex) {
+        triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
+    }
+    catch (Throwable err) {
+        triggerAfterCompletion(processedRequest, response, mappedHandler,
+                               new NestedServletException("Handler processing failed", err));
+    }
+    finally {
+        if (asyncManager.isConcurrentHandlingStarted()) {
+            // Instead of postHandle and afterCompletion
+            if (mappedHandler != null) {
+                mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
+            }
+        }
+        // 10.如果是上传请求则清理资源
+        else if (multipartRequestParsed) cleanupMultipart(processedRequest);
+    }
+}
+```
+
+从doDispatch()方法得知大概的请求处理流程为：
+
+- 若`Content-type`为`multipart/*`，则将 `HttpServletRequest` 封装成 `MultipartHttpServletRequest` 对象，便于获取参数信息以及上传的文件
+- 根据HandlerMapping处理器映射器获得请求对应的handler，没有-->404
+- 获取HandlerAdapter
+- 拦截器链前置处理回调，**若某拦截器返回false，则从它开始将逆序执行之前拦截器的afterCompletion回调**
+- HandlerAdapter调用目标handler方法，即controller方法，得到ModelAndView对象
+- 拦截器链后置处理回调
+- 处理请求结果：
+  - 有异常：由HandlerExceptionResolver组件处理异常，得到新的ModelAndView对象
+  - ViewResolver组件根据ModelAndView得到View，渲染视图
+  - 回调拦截器链的afterCompletion回调
+
+## HandlerMapping
+
+HandlerMapping组件是`处理器映射器`，负责为请求找到合适的`HandlerExecutionChain处理器执行链`，包含`处理器handler`和`拦截器链interceptors`。
+
+- `handler` 处理器是 Object 类型，可以将其理解成 HandlerMethod 对象（例如使用最多的 `@RequestMapping` 注解所标注的方法会解析成该对象），包含了方法的所有信息，通过该对象能够执行该方法
+- `HandlerInterceptor` 拦截器对处理请求进行**增强处理**，可用于在执行方法前、成功执行方法后、处理完成后进行一些逻辑处理
+
+### 接口实现体系
+
+HandlerMapping接口实现体系如下：
+
+![HandlerMapping](springboot.assets/HandlerMapping.png)
+
+- 蓝色框 **AbstractHandlerMapping** 抽象类，实现了“为请求找到合适的 `HandlerExecutionChain` 处理器执行链”对应的的骨架逻辑，而暴露 `getHandlerInternal(HttpServletRequest request)` 抽象方法，交由子类实现。
+- AbstractHandlerMapping 的子类，分成两派，分别是：
+  - 黄色框 **AbstractUrlHandlerMapping** 系，基于 URL 进行匹配。例如 [《基于 XML 配置的 Spring MVC 简单的 HelloWorld 实例应用》](https://www.cnblogs.com/liuhongfeng/p/4769076.html)，当然，目前这种方式已经基本不用了，被 `@RequestMapping` 等注解的方式所取代。不过，Spring MVC 内置的一些路径匹配，还是使用这种方式。
+  - 红色框 **AbstractHandlerMethodMapping** 系，基于 Method 进行匹配。例如，我们所熟知的 `@RequestMapping` 等注解的方式。
+- 绿色框的 MatchableHandlerMapping 接口，定义了**判断请求和指定 `pattern` 路径是否匹配的match()方法**。
+
+```java
+public interface MatchableHandlerMapping extends HandlerMapping {
+    @Nullable
+    default PathPatternParser getPatternParser() {
+        return null;
+    }
+
+    /**
+	 * 确定请求是否与给定正则pattern匹配。
+	 * 当getPatternParser()返回null时使用此方法，这意味着HandlerMapping正在使用字符串模式匹配。
+	 */
+    @Nullable
+    RequestMatchResult match(HttpServletRequest request, String pattern);
+}
+```
+
+
+
+### 初始化
+
+在DispatcherServlet的init()方法中会调用onRefresh()方法初始化其所用到的各个组件，包括HandlerMapping组件：
+
+```java
+// DispatcherServlet.java
+protected void initStrategies(ApplicationContext context) {
+    initMultipartResolver(context);
+    initLocaleResolver(context);
+    initThemeResolver(context);
+    initHandlerMappings(context);// 初始化HandlerMapping组件
+    initHandlerAdapters(context);
+    initHandlerExceptionResolvers(context);
+    initRequestToViewNameTranslator(context);
+    initViewResolvers(context);
+    initFlashMapManager(context);
+}
+// 初始化此类使用的 HandlerMappings
+private void initHandlerMappings(ApplicationContext context) {
+    this.handlerMappings = null;
+
+    if (this.detectAllHandlerMappings) {
+        // 从容器内找到所有HandlerMapping实现bean
+        Map<String, HandlerMapping> matchingBeans =
+            BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class, true, false);
+        if (!matchingBeans.isEmpty()) {
+            this.handlerMappings = new ArrayList<>(matchingBeans.values());
+            // bean组件排序
+            AnnotationAwareOrderComparator.sort(this.handlerMappings);
+        }
+    }
+    // 省略
+}
+```
+
+### getHandler
+
+在doDispatch()方法中，先对请求找到其handler和Interceptor，并包装为HandlerExecutionChain处理器执行链：
+
+```java
+// AbstractHandlerMapping.java
+// 查找给定请求的处理程序链
+public final HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+    // 1.获得handler处理器
+    Object handler = getHandlerInternal(request);
+    if (handler == null)// 没找到则用默认的
+        handler = getDefaultHandler();
+    if (handler == null) return null;
+
+    // 省略
+
+    // 2.包装为HandlerExecutionChain对象(包含处理器和拦截器)
+    // 会将拦截器与请求路劲匹配从而判断是否需要加入拦截器
+    HandlerExecutionChain executionChain = getHandlerExecutionChain(handler, request);
+
+    // 3.判断是否需要更新 HandlerExecutionChain 以进行 CORS 相关处理
+    if (hasCorsConfigurationSource(handler) || CorsUtils.isPreFlightRequest(request)) {
+        CorsConfiguration config = getCorsConfiguration(handler, request);
+        if (getCorsConfigurationSource() != null) {
+            CorsConfiguration globalConfig = getCorsConfigurationSource().getCorsConfiguration(request);
+            config = (globalConfig != null ? globalConfig.combine(config) : config);
+        }
+        if (config != null) {
+            config.validateAllowCredentials();
+        }
+        executionChain = getCorsHandlerExecutionChain(request, executionChain, config);
+    }
+
+    return executionChain;
+}
+// 查找匹配的Interceptor并与handler封装为HandlerExecutionChain处理器执行链
+protected HandlerExecutionChain getHandlerExecutionChain(Object handler, HttpServletRequest request) {
+    HandlerExecutionChain chain = (handler instanceof HandlerExecutionChain ?
+	 (HandlerExecutionChain) handler : new HandlerExecutionChain(handler));
+	// 检查各个拦截器是否匹配该请求，若匹配则加入到处理器执行链
+    for (HandlerInterceptor interceptor : this.adaptedInterceptors) {
+        if (interceptor instanceof MappedInterceptor) {
+            MappedInterceptor mappedInterceptor = (MappedInterceptor) interceptor;
+            if (mappedInterceptor.matches(request)) {
+                chain.addInterceptor(mappedInterceptor.getInterceptor());
+            }
+        }
+        else chain.addInterceptor(interceptor);
+    }
+    return chain;
+}
+```
+
+## HandlerInterceptor
+
+HandlerMapping处理器映射器中得到的HandlerExecutionChain中不仅有Handler，还有匹配的Interceptor，它有3个回调点：
+
+```java
+public interface HandlerInterceptor {
+    /**
+	 * handler执行前的拦截器前置回调
+	 * @return true-->执行链继续向下执行；false--> 不再向后执行，直接返回
+	 */
+    default boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        return true;
+    }
+
+    /**
+	 * handler成功执行后的拦截器后置回调
+	 * 注意：后置拦截是逆序调用的，这样才符合拦截器逻辑
+	 */
+    default void postHandle(HttpServletRequest request, HttpServletResponse response, 
+                            Object handler, @Nullable ModelAndView mv) throws Exception {
+    }
+
+    /**
+	 * 请求处理完成后的回调，即渲染视图后。
+	 * 注意：仅当此拦截器的preHandle方法成功完成并返回true时才会调用！
+	 * 与postHandle方法一样，逆序调用
+	 */
+    default void afterCompletion(HttpServletRequest request, HttpServletResponse response,
+                                 Object handler,@Nullable Exception ex) throws Exception {
+    }
+}
+```
+
+注意：**后置回调只有在handler成功执行后才能执行**，而afterCompletion完成回调**只要其前置回调执行并返回true，则它必执行。**
+
+> 使用场景：可以用拦截器实现**登录授权**、**记录请求耗时**、**请求异常率**等
+
+### 添加自定义拦截器
+
+在项目中如何添加自定义拦截器呢：
+
+```java
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        // 添加拦截器，并制定拦截路径和排除路径
+        registry.addInterceptor(new JwtInterceptor()).addPathPatterns("/**").excludePathPatterns("/hello2");
+    }
+
+    static class JwtInterceptor implements HandlerInterceptor {
+        @Override
+        public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+            System.out.println("前置拦截：" + request.getRequestURI());
+
+            HandlerMethod handlerMethod = (HandlerMethod) handler;
+            // 获取controller方法上的注解
+            MyNeedLogin annotation = handlerMethod.getMethod().getAnnotation(MyNeedLogin.class);
+            // 判断是否登录
+            if (annotation != null) {
+                System.out.println("用户未登录");
+                return false;// 这里可以选择抛出未登录异常，从而附带上401消息
+            }
+            return true;
+        }
+
+        @Override
+        public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler, ModelAndView modelAndView) throws Exception {
+            System.out.println("后置拦截：" + response.getStatus());
+        }
+
+        @Override
+        public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+            System.out.println("完成拦截：exception=" + ex);
+        }
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    public @interface MyNeedLogin { // 需要登录的注解
+    }
+}
+```
+
+### 拦截器放入HandlerMapping
+
+拦截器的添加如上所示，那它是如何添加到HandlerMapping中的呢？比如最常用的`RequestMappingHandlerMapping`
+
+在spring-webmvc的自动配置类`WebMvcAutoConfiguration.java`中引入了这个bean：
+
+```java
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(WebProperties.class)
+public static class EnableWebMvcConfiguration extends DelegatingWebMvcConfiguration implements ResourceLoaderAware {
+    // 省略
+}
+
+@Configuration(proxyBeanMethods = false)
+public class DelegatingWebMvcConfiguration extends WebMvcConfigurationSupport {
+
+    private final WebMvcConfigurerComposite configurers = new WebMvcConfigurerComposite();
+
+    // 1.这里通过@Autowired注解将容器内所有的WebMvcConfigurer实现bean都注入
+    @Autowired(required = false)
+    public void setConfigurers(List<WebMvcConfigurer> configurers) {
+        if (!CollectionUtils.isEmpty(configurers)) {
+            this.configurers.addWebMvcConfigurers(configurers);
+        }
+    }
+
+    // 2.依次执行 WebMvcConfigurer 实现类的 addInterceptors 方法，将对应的拦截器添加至 registry 中
+    protected void addInterceptors(InterceptorRegistry registry) {
+        this.configurers.addInterceptors(registry);
+    }
+}
+public class WebMvcConfigurationSupport implements ApplicationContextAware, ServletContextAware {
+
+    @Bean
+    @SuppressWarnings("deprecation")
+    public RequestMappingHandlerMapping requestMappingHandlerMapping(
+        @Qualifier("mvcContentNegotiationManager") ContentNegotiationManager contentNegotiationManager,
+        @Qualifier("mvcConversionService") FormattingConversionService conversionService,
+        @Qualifier("mvcResourceUrlProvider") ResourceUrlProvider resourceUrlProvider) {
+        RequestMappingHandlerMapping mapping = createRequestMappingHandlerMapping();
+        mapping.setOrder(0);
+        // 3.在构建RequestMappingHandlerMapping这个bean的时候会获取拦截器
+        mapping.setInterceptors(getInterceptors(conversionService, resourceUrlProvider));
+        // 省略其它参数设置
+        return mapping;
+    }
+    protected final Object[] getInterceptors(
+        FormattingConversionService mvcConversionService,
+        ResourceUrlProvider mvcResourceUrlProvider) {
+		// 若无拦截器会触发加载
+        if (this.interceptors == null) {
+            InterceptorRegistry registry = new InterceptorRegistry();
+            // 2.依次执行 WebMvcConfigurer 实现类的 addInterceptors 方法，将对应的拦截器添加至 registry 中
+            addInterceptors(registry);
+            registry.addInterceptor(new ConversionServiceExposingInterceptor(mvcConversionService));
+            registry.addInterceptor(new ResourceUrlProviderExposingInterceptor(mvcResourceUrlProvider));
+            this.interceptors = registry.getInterceptors();
+        }
+        return this.interceptors.toArray();
+    }
+}
+```
+
+- 首先通过**@Autowired注解将容器内所有的WebMvcConfigurer实现bean都注入**
+- 依次执行 WebMvcConfigurer 实现类的 addInterceptors 方法，将对应的拦截器添加至 registry 中
+- **在构建RequestMappingHandlerMapping这个bean的时候会获取拦截器**
+
+原理很简单，就是过程有点绕了。
+
+## RequestMappingHandlerMapping
+
+在上面可以看到webmvc的自动配置类中引入了`RequestMappingHandlerMapping`这个bean：
+
+```java
+// 从@Controller类中的类型和方法级别的@RequestMapping注释创建RequestMappingInfo实例
+public class RequestMappingHandlerMapping extends RequestMappingInfoHandlerMapping
+    implements MatchableHandlerMapping, EmbeddedValueResolverAware {
+    // 内容协商管理器
+    private ContentNegotiationManager contentNegotiationManager = new ContentNegotiationManager();
+
+    // 注意这个InitializingBean的初始化回调
+    public void afterPropertiesSet() {
+        this.config = new RequestMappingInfo.BuilderConfiguration();
+        this.config.setTrailingSlashMatch(useTrailingSlashMatch());
+        this.config.setContentNegotiationManager(getContentNegotiationManager());
+
+        if (getPatternParser() != null) {
+            this.config.setPatternParser(getPatternParser());
+            Assert.isTrue(!this.useSuffixPatternMatch && !this.useRegisteredSuffixPatternMatch,
+                          "Suffix pattern matching not supported with PathPatternParser.");
+        }
+        else {
+            this.config.setSuffixPatternMatch(useSuffixPatternMatch());
+            this.config.setRegisteredSuffixPatternMatch(useRegisteredSuffixPatternMatch());
+            this.config.setPathMatcher(getPathMatcher());
+        }
+
+        super.afterPropertiesSet();
+    }
+}
+```
+
+### 探测HandlerMethod
+
+这个类的父类实现了`InitializingBean`的初始化回调`afterPropertiesSet()`，在其父类方法中去ioc容器内探测handler并将其构建为HandlerMethod对象：
+
+```java
+//HandlerMapping实现的抽象基类，它定义了请求和HandlerMethod之间的映射
+public abstract class AbstractHandlerMethodMapping<T> extends AbstractHandlerMapping implements InitializingBean {
+
+    public void afterPropertiesSet() {
+        initHandlerMethods();
+    }
+    // 遍历容器内所有beanName，探测handler
+    protected void initHandlerMethods() {
+        for (String beanName : getCandidateBeanNames()) {
+            if (!beanName.startsWith(SCOPED_TARGET_NAME_PREFIX)) {
+                // 探测handler
+                processCandidateBean(beanName);
+            }
+        }
+        handlerMethodsInitialized(getHandlerMethods());
+    }
+
+    // 判断beanName的Class类型上是否标有@Controller或@RequestMapping注解
+    // 若有则探测其中的handler
+    protected void processCandidateBean(String beanName) {
+        Class<?> beanType = null;
+        beanType = obtainApplicationContext().getType(beanName);
+        // 若标有@Controller或@RequestMapping注解则探测handler
+        if (beanType != null && isHandler(beanType)) 
+            detectHandlerMethods(beanName);
+    }
+
+    // 查找handler并注册
+    protected void detectHandlerMethods(Object handler) {
+        // 1.获取Class对象
+        Class<?> handlerType = (handler instanceof String ?
+                                obtainApplicationContext().getType((String) handler) : handler.getClass());
+        // 2.获得真实的 Class 对象，因为`handlerType`可能是cglib代理类
+        if (handlerType != null) {
+            Class<?> userType = ClassUtils.getUserClass(handlerType);
+            // 3.这一步就是找到所有标注有@RequestMapping注解的方法及其元数据
+            Map<Method, T> methods = MethodIntrospector.selectMethods(userType, (MethodIntrospector.MetadataLookup<T>) method -> {  
+                return getMappingForMethod(method, userType);  });
+
+            // 4.将找到method注册为HandlerMethod
+            methods.forEach((method, mapping) -> {
+                Method invocableMethod = AopUtils.selectInvocableMethod(method, userType);
+                registerHandlerMethod(handler, invocableMethod, mapping);
+            });
+        }
+    }
+	// 注册HandlerMethod，下面分析
+    protected void registerHandlerMethod(Object handler, Method method, RequestMappingInfo mapping) {
+        super.registerHandlerMethod(handler, method, mapping);
+        updateConsumesCondition(mapping, method);
+    }
+}
+```
+
+第3步的lambda表达式有点绕，但是它的目的就是找到`@RequestMapping`标注的方法及其元数据封装为Map对象；交由第4步去生成HandlerMethod并注册。
+
+### 注册HandlerMethod
+
+在上面已经成功探测到了每个@Controller或@ReqeustMapping标注的Bean的标注有@RequestMapping的方法，接下来要将这些方法封装为HandlerMethod并注册：
+
+```java
+// RequestMappingHandlerMapping.java
+// @param handler bean或者beanName
+// @param method 处理器方法
+// @param mapping 方法上的@RequestMapping注解的元信息等
+protected void registerHandlerMethod(Object handler, Method method, RequestMappingInfo mapping) {
+    super.registerHandlerMethod(handler, method, mapping);
+    // 标记是否有@RequestBody注解解析请求体的需求
+    updateConsumesCondition(mapping, method);
+}
+// 标记该method是否需要解析请求体到参数中，即是否存在@RequestBody注解
+private void updateConsumesCondition(RequestMappingInfo info, Method method) {
+    ConsumesRequestCondition condition = info.getConsumesCondition();
+    if (!condition.isEmpty()) {
+        for (Parameter parameter : method.getParameters()) {
+            MergedAnnotation<RequestBody> annot = MergedAnnotations.from(parameter).get(RequestBody.class);
+            if (annot.isPresent()) {
+                condition.setBodyRequired(annot.getBoolean("required"));
+                break;
+            }
+        }
+    }
+}
+
+// AbstractHandlerMethodMapping.java
+protected void registerHandlerMethod(Object handler, Method method, T mapping) {
+    // 将handler和method注册到注册表
+    this.mappingRegistry.register(mapping, handler, method);
+}
+```
+
+### MappingRegistry注册表
+
+在上面注册handler和method可以知道会调用此类进行注册：
+
+```java
+// 一个注册表，它维护到处理程序方法的所有映射，公开方法以执行查找并提供并发访问。
+// 它是AbstractHandlerMethodMapping内部类
+class MappingRegistry {
+    /**
+     * 注册表
+     *
+     * Key: Mapping
+     * Value：{@link MappingRegistration}（Mapping + HandlerMethod）
+     */
+    private final Map<T, MappingRegistration<T>> registry = new HashMap<>();
+    /**
+     * 注册表2
+     *
+     * Key：Mapping
+     * Value：{@link HandlerMethod}
+     */
+    private final Map<T, HandlerMethod> mappingLookup = new LinkedHashMap<>();
+    /**
+     * 直接 URL 的映射
+     *
+     * Key：直接 URL（就是固定死的路径，而非多个）
+     * Value：Mapping 数组
+     */
+    private final MultiValueMap<String, T> urlLookup = new LinkedMultiValueMap<>();
+    /**
+     * Mapping 的名字与 HandlerMethod 的映射
+     *
+     * Key：Mapping 的名字
+     * Value：HandlerMethod 数组
+     */
+    private final Map<String, List<HandlerMethod>> nameLookup = new ConcurrentHashMap<>();
+
+    private final Map<HandlerMethod, CorsConfiguration> corsLookup = new ConcurrentHashMap<>();
+	// 读写锁
+    private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
+}
+```
+
+#### register
+
+```java
+// MappingRegistry.java
+public void register(T mapping, Object handler, Method method) {
+    this.readWriteLock.writeLock().lock();
+    try {
+        // 1.创建HandlerMethod对象
+        HandlerMethod handlerMethod = createHandlerMethod(handler, method);
+        validateMethodMapping(handlerMethod, mapping);
+
+        // 2.获取直接url路径数组
+        Set<String> directPaths = AbstractHandlerMethodMapping.this.getDirectPaths(mapping);
+        for (String path : directPaths) {
+            this.pathLookup.add(path, mapping);
+        }
+
+        String name = null;
+        if (getNamingStrategy() != null) {
+            name = getNamingStrategy().getName(handlerMethod, mapping);
+            addMappingName(name, handlerMethod);
+        }
+
+        CorsConfiguration corsConfig = initCorsConfiguration(handler, method, mapping);
+        if (corsConfig != null) {
+            corsConfig.validateAllowCredentials();
+            this.corsLookup.put(handlerMethod, corsConfig);
+        }
+
+        // 3.创建 MappingRegistration 对象
+        // 并与 mapping 映射添加到 registry 注册表中
+        this.registry.put(mapping, new MappingRegistration<>(mapping, handlerMethod, directPaths, name, corsConfig != null));
+    }
+    finally {
+        this.readWriteLock.writeLock().unlock();
+    }
+}
+```
+
+第2步的直接url是指非模式url：
+
+- 例如，`@RequestMapping("/user/login")` 注解对应的路径，就是直接路径
+- 例如，`@RequestMapping("/user/${id}")` 注解对应的路径，不是直接路径，因为不确定性
+
+
+
+### getHandlerInternal
+
+在DispatcherServlet#doDispatch()方法中，首先要获得请求对应的 HandlerExecutionChain 对象（HandlerMethod 和 HandlerInterceptor 拦截器们），而其中获得HandlerMethod是通过getHandlerInternal()方法获得：
+
+```java
+// AbstractHandlerMethodMapping.java
+// 查找给定请求的HandlerMethod
+protected HandlerMethod getHandlerInternal(HttpServletRequest request) throws Exception {
+    // 1.获取请求url路径
+    String lookupPath = initLookupPath(request);
+    this.mappingRegistry.acquireReadLock();
+    try {
+        // 2.查找当前请求的最佳匹配HandlerMethod
+        HandlerMethod handlerMethod = lookupHandlerMethod(lookupPath, request);
+        return (handlerMethod != null ? handlerMethod.createWithResolvedBean() : null);
+    }
+    finally {
+        this.mappingRegistry.releaseReadLock();
+    }
+}
+// 查找当前请求的最佳匹配处理程序方法。如果找到多个匹配项，则选择最佳匹配项。
+protected HandlerMethod lookupHandlerMethod(String lookupPath, HttpServletRequest request) throws Exception {
+    List<Match> matches = new ArrayList<>();
+    // 1.优先基于直接URL匹配
+    List<T> directPathMatches = this.mappingRegistry.getMappingsByDirectPath(lookupPath);
+    if (directPathMatches != null) 
+        addMatchingMappings(directPathMatches, matches, request);
+    
+    // 2.直接URL没有匹配的情况下，再基于注册表的其它Mapping进行匹配，如路径变量、HTTP方法匹配等
+    if (matches.isEmpty()) 
+        addMatchingMappings(this.mappingRegistry.getRegistrations().keySet(), matches, request);
+    
+    // 3.若有多个匹配则排序，选择最佳匹配
+    if (!matches.isEmpty()) {
+        Match bestMatch = matches.get(0);
+        if (matches.size() > 1) {
+            Comparator<Match> comparator = new MatchComparator(getMappingComparator(request));
+            matches.sort(comparator);
+            bestMatch = matches.get(0);
+
+            // 省略
+        }
+        request.setAttribute(BEST_MATCHING_HANDLER_ATTRIBUTE, bestMatch.getHandlerMethod());
+        handleMatch(bestMatch.mapping, lookupPath, request);
+        return bestMatch.getHandlerMethod();
+    }
+    // 4.没找到匹配的，可能抛出404
+    else return handleNoMatch(this.mappingRegistry.getRegistrations().keySet(), lookupPath, request);
+}
+```
+
+### RequestMappingInfo
+
+在上面的getHandlerInternal()方法获取HandlerMethod时，**除了直接URL匹配的情况，其它如路径变量、参数匹配、HTTP请求方法匹配是在哪做的呢？**
+
+在getHandlerInternal()第2步时进行处理的，它调用各个注册表内所有Mapping映射去匹配：
+
+```java
+// AbstractHandlerMethodMapping.java
+private void addMatchingMappings(Collection<T> mappings, List<Match> matches, HttpServletRequest request) {
+    for (T mapping : mappings) {
+        T match = getMatchingMapping(mapping, request);
+        if (match != null) {
+            matches.add(new Match(match, this.mappingRegistry.getRegistrations().get(mapping)));
+        }
+    }
+}
+
+// RequestMappingInfoHandlerMapping.java
+protected RequestMappingInfo getMatchingMapping(RequestMappingInfo info, HttpServletRequest request) {
+    return info.getMatchingCondition(request);
+}
+```
+
+那么此时匹配的细节就来到了RequestMappingInfo对象了：
+
+```java
+public final class RequestMappingInfo implements RequestCondition<RequestMappingInfo> {
+ 
+	private final String name;
+	/**
+	 * 请求路径的条件
+	 */
+	private final PatternsRequestCondition patternsCondition;
+	/**
+	 * 请求方法的条件
+	 */
+	private final RequestMethodsRequestCondition methodsCondition;
+	/**
+	 * 请求参数的条件
+	 */
+	private final ParamsRequestCondition paramsCondition;
+	/**
+	 * 请求头的条件
+	 */
+	private final HeadersRequestCondition headersCondition;
+	/**
+	 * 可消费的 Content-Type 的条件
+	 */
+	private final ConsumesRequestCondition consumesCondition;
+	/**
+	 * 可生产的 Content-Type 的条件
+	 */
+	private final ProducesRequestCondition producesCondition;
+	/**
+	 * 自定义的条件
+	 */
+	private final RequestConditionHolder customConditionHolder;
+}
+```
+
+这些属性和@RequestMapping注解是一一对应的。
+
+#### getMatchingCondition
+
+```java
+public RequestMappingInfo getMatchingCondition(HttpServletRequest request) {
+    // 匹配 methodsCondition、paramsCondition、headersCondition、consumesCondition、producesCondition
+    // 如果任一为空，则返回 null ，表示匹配失败
+    RequestMethodsRequestCondition methods = this.methodsCondition.getMatchingCondition(request);
+    if (methods == null) {
+        return null;
+    }
+    ParamsRequestCondition params = this.paramsCondition.getMatchingCondition(request);
+    if (params == null) {
+        return null;
+    }
+    HeadersRequestCondition headers = this.headersCondition.getMatchingCondition(request);
+    if (headers == null) {
+        return null;
+    }
+    ConsumesRequestCondition consumes = this.consumesCondition.getMatchingCondition(request);
+    if (consumes == null) {
+        return null;
+    }
+    ProducesRequestCondition produces = this.producesCondition.getMatchingCondition(request);
+    if (produces == null) {
+        return null;
+    }
+    PatternsRequestCondition patterns = this.patternsCondition.getMatchingCondition(request);
+    if (patterns == null) {
+        return null;
+    }
+    RequestConditionHolder custom = this.customConditionHolder.getMatchingCondition(request);
+    if (custom == null) {
+        return null;
+    }
+    /*
+     * 创建匹配的 RequestMappingInfo 对象
+     * 为什么要创建 RequestMappingInfo 对象呢？
+     *
+     * 因为当前 RequestMappingInfo 对象，一个 methodsCondition 可以配置 GET、POST、DELETE 等等条件，
+     * 但是实际就匹配一个请求类型，此时 methods 只代表其匹配的那个。
+     */
+    return new RequestMappingInfo(this.name, patterns,
+            methods, params, headers, consumes, produces, custom.getCondition());
+}
+```
+
+可能你会疑惑，如果一个 `@RequestMapping(value = "user/login")` 注解，并未写 **RequestMethod** 的条件，岂不是会报空？
+
+实际上不会。在这种情况下，会创建一个 RequestMethodsRequestCondition 对象，并且在匹配时，直接返回自身，代码如下：
+
+```java
+public RequestMethodsRequestCondition getMatchingCondition(HttpServletRequest request) {
+    if (CorsUtils.isPreFlightRequest(request)) {
+        return matchPreFlight(request);
+    }
+    // 空的情况下，就返回自身
+    if (getMethods().isEmpty()) {
+        if (RequestMethod.OPTIONS.name().equals(request.getMethod()) &&
+                !DispatcherType.ERROR.equals(request.getDispatcherType())) {
+            return null; // No implicit match for OPTIONS (we handle it)
+        }
+        return this;
+    }
+    // 非空，逐个匹配
+    return matchRequestMethod(request.getMethod());
+}
+```
+
+也就是说，没有 **RequestMethod** 的条件，则一定匹配成功，且结果就是自身 RequestMethodsRequestCondition 对象
+
+**总结**：就是根据配置的 `@RequestMapping` 注解，如果所有条件都满足，则创建一个 RequestMappingInfo 对象返回，如果某个条件不满足则直接返回 `null`，表示不匹配
+
+## HandlerAdapter
+
+HandlerAdapter 组件，处理器的适配器。因为处理器 `handler` 的类型是 Object 类型，需要有一个调用者来实现 `handler` 是怎么被执行。Spring 中的处理器的实现多变，比如用户的处理器可以实现 Controller 接口或者 HttpRequestHandler 接口，也可以用 `@RequestMapping` 注解将方法作为一个处理器等，这就导致 Spring MVC 无法直接执行这个处理器。所以这里需要一个处理器适配器，由它去执行处理器
+
+在DispatcherServlet#doDispatch()方法中获取到HandlerMethod和Interceptor并将其包装为HandlerExecutionChain后，就会去获取HandlerAdapter：
+
+```java
+// 返回此Handler的HandlerAdapter
+protected HandlerAdapter getHandlerAdapter(Object handler) throws ServletException {
+    if (this.handlerAdapters != null) {
+        for (HandlerAdapter adapter : this.handlerAdapters) {
+            if (adapter.supports(handler)) {
+                return adapter;
+            }
+        }
+    }
+    throw new ServletException("No adapter for handler [" + handler +
+                               "]: The DispatcherServlet configuration needs to include a HandlerAdapter that supports this handler");
+}
+```
+
+通过遍历 HandlerAdapter 组件们，判断是否支持处理该 `handler` 处理器，支持则返回该 HandlerAdapter 组件。**注意**，这里是通过一个一个的 HandlerAdapter 组件去判断是否支持该处理器，如果支持则直接返回这个 HandlerAdapter 组件，不会继续下去，所以获取处理器对应 HandlerAdapter 组件是有一定的先后顺序的，默认是HttpRequestHandlerAdapter -> SimpleControllerHandlerAdapter -> RequestMappingHandlerAdapter
+
+其中 `RequestMappingHandlerAdapter` 就是基于`@RequestMapping` 等注解的 HandlerMethod 的 HandlerMethodAdapter 实现类，名字都差不多。
+
+HttpRequestHandlerAdapter 直接忽略，SimpleControllerHandlerAdapter 用来处理实现了Controller接口的处理器handler：也可以忽略。
+
+```java
+@FunctionalInterface
+public interface Controller {
+	/**
+	 * 处理请求
+	 */
+	@Nullable
+	ModelAndView handleRequest(HttpServletRequest request, HttpServletResponse response) throws Exception;
+}
+```
+
+所以还是只需要关注`RequestMappingHandlerAdapter`即可。
+
+先看下HandlerAdapter接口：
+
+```java
+public interface HandlerAdapter {
+	// 此HandlerAdapter是否支持该handler
+    boolean supports(Object handler);
+
+    // 调用适配该handler的处理方法进行处理
+    @Nullable
+    ModelAndView handle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception;
+
+    @Deprecated
+    long getLastModified(HttpServletRequest request, Object handler);
+}
+```
+
+### AbstractHandlerMethodAdapter
+
+RequestMappingHandlerAdapter的父类是AbstractHandlerMethodAdapter，提供了对HandlerAdapter的上述几个方法的实现：
+
+```java
+public abstract class AbstractHandlerMethodAdapter extends WebContentGenerator implements HandlerAdapter, Ordered {
+    public final boolean supports(Object handler) {
+        // 后面那个默认返回true
+        return (handler instanceof HandlerMethod && supportsInternal((HandlerMethod) handler));
+    }
+    
+    public final ModelAndView handle(HttpServletRequest request, HttpServletResponse response, Object handler)
+        throws Exception {
+        // 由子类RequestMappingHandlerAdapter实现
+        return handleInternal(request, response, (HandlerMethod) handler);
+    }
+}
+```
+
+可以看到该Adapter支持的HandlerMethod 处理器，也就是@RequestMapping注解标注产生的HandlerMethod对象。
+
+### RequestMappingHandlerAdapter
+
+```java
+// AbstractHandlerMethodAdapter的扩展，支持@RequestMapping注释的HandlerMethod
+public class RequestMappingHandlerAdapter extends AbstractHandlerMethodAdapter
+    implements BeanFactoryAware, InitializingBean {
+
+    @Nullable
+    private List<HandlerMethodArgumentResolver> customArgumentResolvers;
+    // 参数解析器
+    private HandlerMethodArgumentResolverComposite argumentResolvers;
+    
+    // HTTP消息转换器集合
+    private List<HttpMessageConverter<?>> messageConverters;
+    // RequestResponseAdvice 集合对象
+    private final List<Object> requestResponseBodyAdvice = new ArrayList<>();
+
+    public RequestMappingHandlerAdapter() {
+        this.messageConverters = new ArrayList<>(4);
+        this.messageConverters.add(new ByteArrayHttpMessageConverter());
+        this.messageConverters.add(new StringHttpMessageConverter());
+        if (!shouldIgnoreXml) {
+            this.messageConverters.add(new SourceHttpMessageConverter<>());
+        }
+        this.messageConverters.add(new AllEncompassingFormHttpMessageConverter());
+    }
+}
+
+```
+
+在构造方法中默认会添加了四个 HttpMessageConverter 对象，当然，默认还会添加其他的，例如 MappingJackson2HttpMessageConverter 为 JSON 消息格式的转换器
+
+#### 初始化
+
+这个Adapter实现了 InitializingBean 接口，在 Sping 初始化该 Bean 的时候，会调用该afterPropertiesSet()方法：
+
+```java
+public void afterPropertiesSet() {
+    // Do this first, it may add ResponseBody advice beans
+    // 1.初始化ControllerAdvice相关，如@ResponseBody
+    initControllerAdviceCache();
+	
+    // 2.初始化 参数解析器 属性
+    if (this.argumentResolvers == null) {
+        List<HandlerMethodArgumentResolver> resolvers = getDefaultArgumentResolvers();
+        this.argumentResolvers = new HandlerMethodArgumentResolverComposite().addResolvers(resolvers);
+    }
+    // 3.初始化 参数绑定器 属性
+    if (this.initBinderArgumentResolvers == null) {
+        List<HandlerMethodArgumentResolver> resolvers = getDefaultInitBinderArgumentResolvers();
+        this.initBinderArgumentResolvers = new HandlerMethodArgumentResolverComposite().addResolvers(resolvers);
+    }
+    // 4.初始化 返回值处理器 属性
+    if (this.returnValueHandlers == null) {
+        List<HandlerMethodReturnValueHandler> handlers = getDefaultReturnValueHandlers();
+        this.returnValueHandlers = new HandlerMethodReturnValueHandlerComposite().addHandlers(handlers);
+    }
+}
+```
+
+##### 初始化ControllerAdvice相关
+
+```java
+private void initControllerAdviceCache() {
+    if (getApplicationContext() == null) {
+        return;
+    }
+
+    // 1.扫描 @ControllerAdvice 注解的 Bean 们，生成对应的 ControllerAdviceBean 对象，并将进行排序
+    List<ControllerAdviceBean> adviceBeans = ControllerAdviceBean.findAnnotatedBeans(getApplicationContext());
+    AnnotationAwareOrderComparator.sort(adviceBeans);
+
+    List<Object> requestResponseBodyAdviceBeans = new ArrayList<>();
+
+    // 2.遍历 ControllerAdviceBean 数组
+    for (ControllerAdviceBean adviceBean : adviceBeans) {
+        Class<?> beanType = adviceBean.getBeanType();
+        if (beanType == null) {
+            throw new IllegalStateException("Unresolvable type for ControllerAdviceBean: " + adviceBean);
+        }
+        // 2.1 扫描有 `@ModelAttribute` ，无 `@RequestMapping` 注解的方法，添加到 `modelAttributeAdviceCache` 属性中
+		// 该类方法用于在执行方法前修改 Model 对象
+        Set<Method> attrMethods = MethodIntrospector.selectMethods(beanType, MODEL_ATTRIBUTE_METHODS);
+        if (!attrMethods.isEmpty()) {
+            this.modelAttributeAdviceCache.put(adviceBean, attrMethods);
+        }
+        // 2.2 扫描有 `@InitBinder` 注解的方法，添加到 `initBinderAdviceCache` 属性中
+		// 该类方法用于在执行方法前初始化数据绑定器
+        Set<Method> binderMethods = MethodIntrospector.selectMethods(beanType, INIT_BINDER_METHODS);
+        if (!binderMethods.isEmpty()) {
+            this.initBinderAdviceCache.put(adviceBean, binderMethods);
+        }
+        // 2.3 如果是 RequestBodyAdvice 或 ResponseBodyAdvice 的子类，添加到 requestResponseBodyAdviceBeans 中
+        if (RequestBodyAdvice.class.isAssignableFrom(beanType) || ResponseBodyAdvice.class.isAssignableFrom(beanType)) {
+            requestResponseBodyAdviceBeans.add(adviceBean);
+        }
+    }
+
+    // 3.将 requestResponseBodyAdviceBeans 添加到 this.requestResponseBodyAdvice 属性种
+    if (!requestResponseBodyAdviceBeans.isEmpty()) {
+        this.requestResponseBodyAdvice.addAll(0, requestResponseBodyAdviceBeans);
+    }
+}
+```
+
+`@ControllerAdvice` 注解：用于 Controller 类的增强类，其中可定义多种增强的方法，例如 `@ExceptionHandler` 注解的方法用于处理器 Controller 抛出的异常
+
+遍历 `1` 中生成 ControllerAdviceBean 数组
+
+1. 扫描**有** `@ModelAttribute` ，**无** `@RequestMapping` 注解的方法，添加到 `modelAttributeAdviceCache` 属性中，该类方法用于在执行方法前修改 Model 对象
+2. 扫描**有** `@InitBinder` 注解的方法，添加到 `initBinderAdviceCache` 属性中，该类方法用于在执行方法前初始化数据绑定器
+3. 如果是 RequestBodyAdvice 或 ResponseBodyAdvice 的子类，保存至 requestResponseBodyAdviceBeans 临时变量中
+
+##### 参数解析器
+
+```java
+// 返回要使用的参数解析器列表，包括内置解析器和通过setCustomArgumentResolvers提供的自定义解析器
+private List<HandlerMethodArgumentResolver> getDefaultArgumentResolvers() {
+   List<HandlerMethodArgumentResolver> resolvers = new ArrayList<>(30);
+
+   // Annotation-based argument resolution
+   resolvers.add(new RequestParamMethodArgumentResolver(getBeanFactory(), false));
+   resolvers.add(new RequestParamMapMethodArgumentResolver());
+   resolvers.add(new PathVariableMethodArgumentResolver());
+   resolvers.add(new PathVariableMapMethodArgumentResolver());
+   resolvers.add(new MatrixVariableMethodArgumentResolver());
+   resolvers.add(new MatrixVariableMapMethodArgumentResolver());
+   resolvers.add(new ServletModelAttributeMethodProcessor(false));
+   resolvers.add(new RequestResponseBodyMethodProcessor(getMessageConverters(), this.requestResponseBodyAdvice));
+   resolvers.add(new RequestPartMethodArgumentResolver(getMessageConverters(), this.requestResponseBodyAdvice));
+   resolvers.add(new RequestHeaderMethodArgumentResolver(getBeanFactory()));
+   resolvers.add(new RequestHeaderMapMethodArgumentResolver());
+   resolvers.add(new ServletCookieValueMethodArgumentResolver(getBeanFactory()));
+   resolvers.add(new ExpressionValueMethodArgumentResolver(getBeanFactory()));
+   resolvers.add(new SessionAttributeMethodArgumentResolver());
+   resolvers.add(new RequestAttributeMethodArgumentResolver());
+
+   // Type-based argument resolution
+   resolvers.add(new ServletRequestMethodArgumentResolver());
+   resolvers.add(new ServletResponseMethodArgumentResolver());
+   resolvers.add(new HttpEntityMethodProcessor(getMessageConverters(), this.requestResponseBodyAdvice));
+   resolvers.add(new RedirectAttributesMethodArgumentResolver());
+   resolvers.add(new ModelMethodProcessor());
+   resolvers.add(new MapMethodProcessor());
+   resolvers.add(new ErrorsMethodArgumentResolver());
+   resolvers.add(new SessionStatusMethodArgumentResolver());
+   resolvers.add(new UriComponentsBuilderMethodArgumentResolver());
+   if (KotlinDetector.isKotlinPresent()) {
+      resolvers.add(new ContinuationHandlerMethodArgumentResolver());
+   }
+
+   // Custom arguments
+   if (getCustomArgumentResolvers() != null) {
+      resolvers.addAll(getCustomArgumentResolvers());
+   }
+
+   // Catch-all
+   resolvers.add(new PrincipalMethodArgumentResolver());
+   resolvers.add(new RequestParamMethodArgumentResolver(getBeanFactory(), true));
+   resolvers.add(new ServletModelAttributeMethodProcessor(true));
+
+   return resolvers;
+}
+```
+
+##### 参数绑定器
+
+添加默认的参数绑定器
+
+```java
+// 返回要用于@InitBinder方法的参数解析器列表，包括内置和自定义解析器
+private List<HandlerMethodArgumentResolver> getDefaultInitBinderArgumentResolvers() {
+    List<HandlerMethodArgumentResolver> resolvers = new ArrayList<>(20);
+
+    // Annotation-based argument resolution
+    resolvers.add(new RequestParamMethodArgumentResolver(getBeanFactory(), false));
+    resolvers.add(new RequestParamMapMethodArgumentResolver());
+    resolvers.add(new PathVariableMethodArgumentResolver());
+    resolvers.add(new PathVariableMapMethodArgumentResolver());
+    resolvers.add(new MatrixVariableMethodArgumentResolver());
+    resolvers.add(new MatrixVariableMapMethodArgumentResolver());
+    resolvers.add(new ExpressionValueMethodArgumentResolver(getBeanFactory()));
+    resolvers.add(new SessionAttributeMethodArgumentResolver());
+    resolvers.add(new RequestAttributeMethodArgumentResolver());
+
+    // Type-based argument resolution
+    resolvers.add(new ServletRequestMethodArgumentResolver());
+    resolvers.add(new ServletResponseMethodArgumentResolver());
+
+    // Custom arguments
+    if (getCustomArgumentResolvers() != null) {
+        resolvers.addAll(getCustomArgumentResolvers());
+    }
+
+    // Catch-all
+    resolvers.add(new PrincipalMethodArgumentResolver());
+    resolvers.add(new RequestParamMethodArgumentResolver(getBeanFactory(), true));
+
+    return resolvers;
+}
+```
+
+##### 返回值处理器
+
+添加默认的返回值处理器对象。
+
+```java
+// 返回要使用的返回值处理程序列表，包括通过setReturnValueHandlers提供的内置和自定义处理程序。
+private List<HandlerMethodReturnValueHandler> getDefaultReturnValueHandlers() {
+    List<HandlerMethodReturnValueHandler> handlers = new ArrayList<>(20);
+
+    // Single-purpose return value types
+    handlers.add(new ModelAndViewMethodReturnValueHandler());
+    handlers.add(new ModelMethodProcessor());
+    handlers.add(new ViewMethodReturnValueHandler());
+    handlers.add(new ResponseBodyEmitterReturnValueHandler(getMessageConverters(),
+                                                           this.reactiveAdapterRegistry, this.taskExecutor, this.contentNegotiationManager));
+    handlers.add(new StreamingResponseBodyReturnValueHandler());
+    handlers.add(new HttpEntityMethodProcessor(getMessageConverters(),
+                                               this.contentNegotiationManager, this.requestResponseBodyAdvice));
+    handlers.add(new HttpHeadersReturnValueHandler());
+    handlers.add(new CallableMethodReturnValueHandler());
+    handlers.add(new DeferredResultMethodReturnValueHandler());
+    handlers.add(new AsyncTaskMethodReturnValueHandler(this.beanFactory));
+
+    // Annotation-based return value types
+    handlers.add(new ServletModelAttributeMethodProcessor(false));
+    handlers.add(new RequestResponseBodyMethodProcessor(getMessageConverters(),
+                                                        this.contentNegotiationManager, this.requestResponseBodyAdvice));
+
+    // Multi-purpose return value types
+    handlers.add(new ViewNameMethodReturnValueHandler());
+    handlers.add(new MapMethodProcessor());
+
+    // Custom return value types
+    if (getCustomReturnValueHandlers() != null) {
+        handlers.addAll(getCustomReturnValueHandlers());
+    }
+
+    // Catch-all
+    if (!CollectionUtils.isEmpty(getModelAndViewResolvers())) {
+        handlers.add(new ModelAndViewResolverMethodReturnValueHandler(getModelAndViewResolvers()));
+    }
+    else {
+        handlers.add(new ServletModelAttributeMethodProcessor(true));
+    }
+
+    return handlers;
+}
+```
+
+#### handleInternal
+
+在DispatcherServlet#doDispatch()方法中，执行完拦截器前置回调后，就以适配器Adapter#handle()方法去执行处理器。在RequestMappingHandlerMapping会调用handlerInternal()方法去执行处理器：
+
+```java
+protected ModelAndView handleInternal(HttpServletRequest request,
+                                      HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
+
+    ModelAndView mav;
+    checkRequest(request);
+	// 1.调用HandlerMethod的执行方法
+    // Execute invokeHandlerMethod in synchronized block if required.
+    if (this.synchronizeOnSession) {
+        HttpSession session = request.getSession(false);
+        if (session != null) {
+            Object mutex = WebUtils.getSessionMutex(session);
+            synchronized (mutex) {
+                mav = invokeHandlerMethod(request, response, handlerMethod);
+            }
+        }
+        else {
+            // No HttpSession available -> no mutex necessary
+            mav = invokeHandlerMethod(request, response, handlerMethod);
+        }
+    }
+    else {
+        // No synchronization on session demanded at all...
+        mav = invokeHandlerMethod(request, response, handlerMethod);
+    }
+
+    // 2.session缓存处理
+    if (!response.containsHeader(HEADER_CACHE_CONTROL)) {
+        if (getSessionAttributesHandler(handlerMethod).hasSessionAttributes())
+            applyCacheSeconds(response, this.cacheSecondsForSessionAttributeHandlers);
+        else prepareResponse(response);
+    }
+
+    return mav;
+}
+```
+
+这里会判断 `synchronizeOnSession` 属性，控制是否**同步相同 Session** 的逻辑，其中 `WebUtils#getSessionMutex(session)` 方法，获得用来锁的对象，方法如下：
+
+```java
+public static Object getSessionMutex(HttpSession session) {
+    Assert.notNull(session, "Session must not be null");
+    Object mutex = session.getAttribute(SESSION_MUTEX_ATTRIBUTE);
+    if (mutex == null) mutex = session;
+    return mutex;
+}
+```
+
+当然，因为锁是通过 `synchronized` 是 JVM 进程级，所以在分布式环境下，无法达到**同步相同 Session** 的功能。
+
+默认情况下，`synchronizeOnSession` 为 `false`
+
+#### 调用HandlerMethod方法
+
+```java
+// RequestMappingHandlerAdapter.java
+@Nullable
+protected ModelAndView invokeHandlerMethod(HttpServletRequest request, HttpServletResponse response,  HandlerMethod handlerMethod) throws Exception {
+    try{	
+        // 省略部分代码
+        // 1.执行调用
+        invocableMethod.invokeAndHandle(webRequest, mavContainer);
+
+        // 省略部分代码
+
+        // 2.获得 ModelAndView 对象
+        return getModelAndView(mavContainer, modelFactory, webRequest);
+    }
+    finally {
+        // 3.标记请求完成
+        webRequest.requestCompleted();
+    }
+}
+```
+
+这里暂时先不管ModelAndView对象，先分析执行调用处理：
+
+```java
+// ServletInvocableHandlerMethod.java
+public void invokeAndHandle(ServletWebRequest webRequest, ModelAndViewContainer mavContainer,
+                            Object... providedArgs) throws Exception {
+    // 1.执行调用
+    Object returnValue = invokeForRequest(webRequest, mavContainer, providedArgs);
+    // 2.设置响应状态码
+    setResponseStatus(webRequest);
+
+    // 若无返回值则直接设置请求已处理并返回
+    if (returnValue == null) {
+        if (isRequestNotModified(webRequest) || getResponseStatus() != null || mavContainer.isRequestHandled()) {
+            disableContentCachingIfNecessary(webRequest);
+            mavContainer.setRequestHandled(true);
+            return;
+        }
+    }
+    else if (StringUtils.hasText(getResponseStatusReason())) {
+        mavContainer.setRequestHandled(true);
+        return;
+    }
+
+    mavContainer.setRequestHandled(false);
+    Assert.state(this.returnValueHandlers != null, "No return value handlers");
+
+    // 3.由返回值处理器处理返回值
+    this.returnValueHandlers.handleReturnValue(
+        returnValue, getReturnValueType(returnValue), mavContainer, webRequest);
+}
+
+
+public Object invokeForRequest(NativeWebRequest request, @Nullable ModelAndViewContainer mavContainer, Object... providedArgs) throws Exception {
+    // 1.由参数解析器解析参数
+    Object[] args = getMethodArgumentValues(request, mavContainer, providedArgs);
+
+    // 2.传入参数并反射调用
+    return doInvoke(args);
+}
+```
+
+设置响应状态码就是response.setStatus()调用。
+
+**核心步骤就是解析参数，然后反射调用，处理返回值**，接下来分析如何解析参数：
+
+##### 参数解析
+
+在HandlerMethod的调用中，核心步骤是**解析参数-->反射调用-->结果处理**，先分析参数解析：
+
+```java
+// 获取当前请求的方法参数值，检查提供的参数值并回退到配置的参数解析器。
+// 结果数组将被传递到doInvoke(args)
+protected Object[] getMethodArgumentValues(NativeWebRequest request, @Nullable ModelAndViewContainer mavContainer, Object... providedArgs) throws Exception {
+    // 1.获取处理器方法的参数列表
+    MethodParameter[] parameters = getMethodParameters();
+    // 不需要参数的就不解析参数了，一般controller层方法都会有参数
+    if (ObjectUtils.isEmpty(parameters)) 
+        return EMPTY_ARGS;
+
+    Object[] args = new Object[parameters.length];
+    for (int i = 0; i < parameters.length; i++) {
+        MethodParameter parameter = parameters[i];
+        parameter.initParameterNameDiscovery(this.parameterNameDiscoverer);
+        // 先从 providedArgs 中获得参数。
+        // 如果获得到，则进入下一个参数的解析，默认情况 providedArgs 不会传参
+        args[i] = findProvidedArgument(parameter, providedArgs);
+        if (args[i] != null) {
+            continue;
+        }
+        if (!this.resolvers.supportsParameter(parameter)) {
+            throw new IllegalStateException(formatArgumentError(parameter, "No suitable resolver"));
+        }
+        // 2.委托参数解析器链去解析每个参数
+        args[i] = this.resolvers.resolveArgument(parameter, mavContainer, request, this.dataBinderFactory);
+    }
+    return args;
+}
+```
+
+这里又是策略模式、责任链模式的体现了。
+**解析器链中找到合适的参数解析器并解析参数值**：
+
+```java
+// 遍历已注册的参数解析器，调用支持该参数的解析器进行参数解析
+public Object resolveArgument(MethodParameter parameter, @Nullable ModelAndViewContainer mavContainer, NativeWebRequest webRequest, @Nullable WebDataBinderFactory binderFactory) throws Exception {
+    // 1.找到匹配的参数解析器
+    HandlerMethodArgumentResolver resolver = getArgumentResolver(parameter);
+    // 全部参数解析器都无法解析则抛异常
+    if (resolver == null) {
+        throw new IllegalArgumentException("Unsupported parameter type [" +
+                                           parameter.getParameterType().getName() + "]. supportsParameter should be called first.");
+    }
+    // 2.该参数解析器解析参数
+    return resolver.resolveArgument(parameter, mavContainer, webRequest, binderFactory);
+}
+
+// 寻找匹配的参数解析器就是遍历所有解析器，依次调用其supportsParameter()方法判断是否支持解析
+private HandlerMethodArgumentResolver getArgumentResolver(MethodParameter parameter) {
+    HandlerMethodArgumentResolver result = this.argumentResolverCache.get(parameter);
+    if (result == null) {
+        for (HandlerMethodArgumentResolver resolver : this.argumentResolvers) {
+            if (resolver.supportsParameter(parameter)) {
+                result = resolver;
+                this.argumentResolverCache.put(parameter, result);
+                break;
+            }
+        }
+    }
+    return result;
+}
+```
+
+> 注意：关于参数解析器的如何支持参数解析的分析这里不具体深入，后面进行分析。
+
+##### 返回值处理
+
+在HandlerMethod的掉用中，核心步骤是**解析参数-->反射调用-->结果处理**，接下来分析返回结果处理：
+
+```java
+// 遍历已注册的HandlerMethodReturnValueHandlers并调用支持它的那个
+public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+                              ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+	// 1.查找结果处理器
+    HandlerMethodReturnValueHandler handler = selectHandler(returnValue, returnType);
+	// 省略没找到的报错
+    // 2.结果处理器进行结果处理
+    handler.handleReturnValue(returnValue, returnType, mavContainer, webRequest);
+}
+```
+
+> 注意：这里关于结果处理器如何处理结果不作具体分析，后面进行分析。
+
+### 总结
+
+Spring MVC 通过 `HandlerMapping` 组件会为请求找到合适的 `HandlerExecutionChain` 处理器执行链，包含处理器（`handler`）和拦截器（`interceptors`）。其中处理器的实现有多种，例如通过实现 Controller 接口、HttpRequestHandler 接口，或者使用 `@RequestMapping` 注解将方法作为一个处理器等。这就导致 Spring MVC 无法直接执行这个处理器，所以这里需要一个处理器适配器，由它去执行处理器。(**适配器模式**)
+
+`HandlerAdapter` 处理器适配器对应的也有多种，那种适配器支持处理这种类型的处理器，则由该适配器去执行，如下：
+
+- `HttpRequestHandlerAdapter`：执行实现了 HttpRequestHandler 接口的处理器
+- `SimpleControllerHandlerAdapter`：执行实现了 Controller 接口的处理器
+- `SimpleServletHandlerAdapter`：执行实现了 Servlet 接口的处理器
+- `RequestMappingHandlerAdapter`：执行 HandlerMethod 类型的处理器，也就是通过 `@RequestMapping` 等注解标注的方法
+
+重点分析 **RequestMappingHandlerAdapter** 对象，因为这种方式是目前使用最普遍的，其他类型的 `HandlerAdapter` 处理器适配器做了解即可。
+
+**RequestMappingHandlerAdapter** 处理执行器的整个流程，大致逻辑如下：
+
+1. 通过 `ServletInvocableHandlerMethod`（`HandlerMethod` 处理器的封装）对象去执行
+2. 需要通过 `HandlerMethodArgumentResolver` 对象进行**参数解析**
+3. 通过**反射执行**对应的 Method 方法对象
+4. 需要通过 `HandlerMethodReturnValueHandler` 对象对执行**结果进行处理**，设置到 `response` 响应中，生成对应的 ModelAndView 对象
+
+上面涉及到的三个组件分别在后续的文档中进行解析。
+
+## 参数解析器
+
+在HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+参数解析时将controller方法中需要的参数委托给**参数解析器**进行解析，先查找匹配的解析器，再调用解析。
+
+先看下参数解析器接口的两个方法：
+
+```java
+// 将方法参数解析为参数值的策略接口
+public interface HandlerMethodArgumentResolver {
+	// 此解析器是否支持该方法参数类型
+	boolean supportsParameter(MethodParameter parameter);
+
+	/** 
+	 * 从给定请求中解析出该方法参数的值参形：
+	 * @param parameter 要解析的方法参数
+	 * @param mavContainer 当前请求的 ModelAndViewContainer
+	 * @param webRequest 当前请求
+	 * @param binderFactory 用于创建WebDataBinder实例的工厂
+	 * @return 解析的参数值，如果不可解析，则返回null
+	 */
+	Object resolveArgument(MethodParameter parameter, @Nullable ModelAndViewContainer mavContainer, NativeWebRequest webRequest, @Nullable WebDataBinderFactory binderFactory) throws Exception;
+}
+```
+
+请求参数需要解析的类型非常多：
+
+- `@RequestParam`注解标注普通请求参数--->`RequestParamMethodArgumentResolver`
+- `@PathVariable`注解标注的路径变量参数-->`PathVariableMethodArgumentResolver`
+- `@RequestHeader`注解标注的请求头参数-->`RequestHeaderMethodArgumentResolver`
+- `@RequestBody`注解标注的请求体参数-->`RequestResponseBodyMethodProcessor`
+
+因为前3者都是以参数名方式获取参数，所有它们有1个共同的父类抽象类`AbstractNamedValueMethodArgumentResolver`提供一些公有实现。
+
+所以先分析这个抽象类，再分析这3者的实现，最后分析请求头参数的解析。
+
+### 名称参数解析抽象类
+
+此抽象类主要提供了
+
+```java
+// 用于从命名值解析方法参数的抽象基类。如请求参数、请求头和路径变量
+// 子类定义如何执行以下操作：
+// 1.获取方法参数的命名值信息
+// 2.将名称解析为参数值
+// 3.在需要参数值时处理缺失的参数值
+
+// 默认值字符串可以包含 ${...} 占位符和 Spring Expression Language #{...} 表达式。为此，必须将ConfigurableBeanFactory提供给类构造函数。
+
+// 如果解析的参数值与方法参数类型不匹配，则会创建一个WebDataBinder以将类型转换应用于解析的参数值
+public abstract class AbstractNamedValueMethodArgumentResolver implements HandlerMethodArgumentResolver {
+    public final Object resolveArgument(MethodParameter parameter, @Nullable ModelAndViewContainer mavContainer,  NativeWebRequest webRequest, @Nullable WebDataBinderFactory binderFactory) throws Exception {
+
+        // 1.获取参数的NamedValueInfo消息
+        NamedValueInfo namedValueInfo = getNamedValueInfo(parameter);
+        MethodParameter nestedParameter = parameter.nestedIfOptional();
+        // 2.如果给定参数名是${...} 占位符形式，则进一步解析
+        Object resolvedName = resolveEmbeddedValuesAndExpressions(namedValueInfo.name);
+        if (resolvedName == null) { /* 省略解析失败抛异常*/ }
+
+        // 3.从请求的不同来源解析出参数值，交由子类实现
+        Object arg = resolveName(resolvedName.toString(), nestedParameter, webRequest);
+        // 3.1 如果请求中该参数不存在
+        if (arg == null) {
+            // 3.2 尝试使用默认值
+            if (namedValueInfo.defaultValue != null)
+                arg = resolveEmbeddedValuesAndExpressions(namedValueInfo.defaultValue);
+
+            // 3.3 若该参数是必须的，交由子类去实现自定义异常抛出
+            else if (namedValueInfo.required && !nestedParameter.isOptional())
+                handleMissingValue(namedValueInfo.name, nestedParameter, webRequest);
+
+            arg = handleNullValue(namedValueInfo.name, arg, nestedParameter.getNestedParameterType());
+        }
+        // 4.如果参数是空串""，则尝试使用默认值
+        else if ("".equals(arg) && namedValueInfo.defaultValue != null) {
+            arg = resolveEmbeddedValuesAndExpressions(namedValueInfo.defaultValue);
+        }
+
+        // 5.参数类型转换
+        if (binderFactory != null) {
+            WebDataBinder binder = binderFactory.createBinder(webRequest, null, namedValueInfo.name);
+            // 将解析的值转换为需要的参数类型
+            arg = binder.convertIfNecessary(arg, parameter.getParameterType(), parameter);
+
+            // 参数转换之后，若参数为null，则判断是否需要抛异常
+            if (arg == null && namedValueInfo.defaultValue == null &&
+                namedValueInfo.required && !nestedParameter.isOptional()) {
+                handleMissingValueAfterConversion(namedValueInfo.name, nestedParameter, webRequest);
+            }
+        }
+
+        // 6.值解析完成的回调
+        handleResolvedValue(arg, namedValueInfo.name, parameter, mavContainer, webRequest);
+        return arg;
+    }
+
+    private NamedValueInfo getNamedValueInfo(MethodParameter parameter) {
+        // 1.从 namedValueInfoCache 缓存中，获得 NamedValueInfo 对象
+        NamedValueInfo namedValueInfo = this.namedValueInfoCache.get(parameter);
+        if (namedValueInfo == null) {
+            // 2.获得不到，则创建 namedValueInfo 对象。这是一个抽象方法，子类来实现
+            namedValueInfo = createNamedValueInfo(parameter);
+            namedValueInfo = updateNamedValueInfo(parameter, namedValueInfo);
+            this.namedValueInfoCache.put(parameter, namedValueInfo);
+        }
+        return namedValueInfo;
+    }
+}
+```
+
+这个抽象类提供了公共代码，如对于NamedValueInfo的缓存处理，参数名的占位符处理，参数值的类型转换等。
+
+而从参数注解中获取NamedValueInfo和从请求中获取参数值则交由子类来实现。
+
+这个**NamedValueInfo是内部类，封装了请求参数注解的一些属性**：
+
+比如`@RequestParam(name = "id", required = false, defaultValue = "1")`
+
+```java
+protected static class NamedValueInfo {
+    private final String name;
+    private final boolean required;
+    @Nullable
+    private final String defaultValue;
+
+    public NamedValueInfo(String name, boolean required, @Nullable String defaultValue) {
+        this.name = name;
+        this.required = required;
+        this.defaultValue = defaultValue;
+    }
+}
+```
+
+### 请求参数解析
+
+对于请求参数的解析由`RequestParamMethodArgumentResolver`完成，它将从url参数中解析参数值：
+
+```java
+public class RequestParamMethodArgumentResolver extends AbstractNamedValueMethodArgumentResolver implements UriComponentsContributor {
+    /*
+	支持以下内容：
+		@RequestParam 注释的方法参数。
+		MultipartFile类型的参数，除非使用RequestPart注释。
+		Part类型的参数，除非用RequestPart注释。
+		在默认解析模式下，即使不使用RequestParam也是简单的类型参数。
+	*/
+    public boolean supportsParameter(MethodParameter parameter) {
+        // 1.如果有@RequestParam注解
+        if (parameter.hasParameterAnnotation(RequestParam.class)) {
+            // 这里是指如果接受类型为Map，则必须@RequestParam(name="必须有值?")
+            if (Map.class.isAssignableFrom(parameter.nestedIfOptional().getNestedParameterType())) {
+                RequestParam requestParam = parameter.getParameterAnnotation(RequestParam.class);
+                return (requestParam != null && StringUtils.hasText(requestParam.name()));
+            }
+            else return true;
+        }
+        else {
+            if (parameter.hasParameterAnnotation(RequestPart.class)) {
+                return false;
+            }
+            parameter = parameter.nestedIfOptional();
+            // 2.如果参数是MultipartFile类型也支持
+            if (MultipartResolutionDelegate.isMultipartArgument(parameter)) {
+                return true;
+            }
+            // 3.若为标记@RequestParam时，若参数类型是简单类型，也支持
+            else if (this.useDefaultResolution) {
+                return BeanUtils.isSimpleProperty(parameter.getNestedParameterType());
+            }
+            else return false;
+        }
+    }
+
+    protected NamedValueInfo createNamedValueInfo(MethodParameter parameter) {
+        // 解析参数上标注的@RequestParam注解的属性并封装到NamedValueInfo
+        RequestParam ann = parameter.getParameterAnnotation(RequestParam.class);
+        return (ann != null ? new RequestParamNamedValueInfo(ann) : new RequestParamNamedValueInfo());
+    }
+}
+```
+
+可以看到这个`RequestParamMethodArgumentResolver`参数解析器不仅仅支持`@RequestParam`参数注解，还支持MultipartFile类型的参数。
+
+默认不标参数注解，也支持简单参数类型，如基本数据类型及其包装类、字符串、日期时间、URL等类。
+
+接下来分析该解析器的`resolveName()`方法从请求中获取参数值：
+
+```java
+// RequestParamMethodArgumentResolver.java
+protected Object resolveName(String name, MethodParameter parameter, NativeWebRequest request) throws Exception {
+    HttpServletRequest servletRequest = request.getNativeRequest(HttpServletRequest.class);
+	// 1.HttpServletRequest 情况下的 MultipartFile 和 Part 的情况
+    if (servletRequest != null) {
+        Object mpArg = MultipartResolutionDelegate.resolveMultipartArgument(name, parameter, servletRequest);
+        if (mpArg != MultipartResolutionDelegate.UNRESOLVABLE) {
+            return mpArg;
+        }
+    }
+	// 2.MultipartHttpServletRequest 情况下的 MultipartFile 的情况
+    Object arg = null;
+    MultipartRequest multipartRequest = request.getNativeRequest(MultipartRequest.class);
+    if (multipartRequest != null) {
+        List<MultipartFile> files = multipartRequest.getFiles(name);
+        if (!files.isEmpty()) {
+            arg = (files.size() == 1 ? files.get(0) : files);
+        }
+    }
+    // 3.直接调用request.getParametreValues()
+    if (arg == null) {
+        String[] paramValues = request.getParameterValues(name);
+        if (paramValues != null) {
+            arg = (paramValues.length == 1 ? paramValues[0] : paramValues);
+        }
+    }
+    return arg;
+}
+```
+
+所谓参数值的获取其实就是直接调用`request.getParameterValues()`方法.
+
+- 情况一、二，是处理参数类型为**文件** `org.springframework.web.multipart.MultipartFile` 和 `javax.servlet.http.Part` 的参数的获取，例如我们常用到 MultipartFile 作为参数就是在这里处理的
+
+### 路劲变量解析
+
+这个解析器主要是支持@PathVariable注解标注的参数，处理逻辑类似上一个解析器：
+
+```java
+public class PathVariableMethodArgumentResolver extends AbstractNamedValueMethodArgumentResolver implements UriComponentsContributor {
+    // 只支持标注了@PathVariable注解的参数
+    // 若参数类型为Map，则必须指定注解的value属性
+    public boolean supportsParameter(MethodParameter parameter) {
+        if (!parameter.hasParameterAnnotation(PathVariable.class))
+            return false;
+
+        if (Map.class.isAssignableFrom(parameter.nestedIfOptional().getNestedParameterType())) {
+            PathVariable pathVariable = parameter.getParameterAnnotation(PathVariable.class);
+            return (pathVariable != null && StringUtils.hasText(pathVariable.value()));
+        }
+        return true;
+    }
+
+    // 解析uri路径上的变量，转换为Map对象
+    protected Object resolveName(String name, MethodParameter parameter, NativeWebRequest request) throws Exception {
+        Map<String, String> uriTemplateVars = (Map<String, String>) request.getAttribute(
+            HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE, RequestAttributes.SCOPE_REQUEST);
+        return (uriTemplateVars != null ? uriTemplateVars.get(name) : null);
+    }
+}
+```
+
+这个解析转换懒得看了。
+
+
+
+### 请求头参数解析
+
+请求头参数解析器`RequestHeaderMethodArgumentResolver.java`想都不用想，肯定和前两个解析大差不差，最后肯定是来到了原生的`request.getHeaders()`。
+
+### 请求体参数解析
+
+**请求体参数解析器是`RequestResponseBodyMethodProcessor`，处理`@RequestBody`注解标注的参数；同时它也是`@ResponseBody`注解的返回值处理器。**
+
+```java
+/*
+解析使用@RequestBody注释的方法参数，并通过使用@ResponseBody读取和写入请求或响应的主体来处理使用HttpMessageConverter注释的方法的返回值。
+如果@RequestBody方法参数被任何触发验证的注释所注释，它也会被验证。在验证失败的情况下，如果配置了DefaultHandlerExceptionResolver ，则会引发MethodArgumentNotValidException并导致 HTTP 400 响应状态代码。
+*/
+public class RequestResponseBodyMethodProcessor extends AbstractMessageConverterMethodProcessor {
+    // 支持对@RequestBody注解标注的参数解析
+    public boolean supportsParameter(MethodParameter parameter) {
+        return parameter.hasParameterAnnotation(RequestBody.class);
+    }
+    // 支持对@ResonseBody注解标注的方法或controller类的返回值处理
+    public boolean supportsReturnType(MethodParameter returnType) {
+        return (AnnotatedElementUtils.hasAnnotation(returnType.getContainingClass(), ResponseBody.class) ||
+                returnType.hasMethodAnnotation(ResponseBody.class));
+    }
+}
+```
+
+接下来看看它如何将请求体转换为需要的参数类型，在此之前先了解HttpServletRequest如何获取请求体数据：
+
+```java
+    String contentType = request.getContentType();// 常用的有application/json
+    byte[] buf = request.getInputStream().readAllBytes();// 将请求体二进制数据读入缓存
+    // 接下来要做的就是根据content-type进行二进制数据转换了
+```
+
+那么可以合理的猜测请求体参数的解析就是根据请求内容类型，如json，对二进制数据进行解析，并解析到参数类型对象中。
+
+> **因为Content-type类型非常多，所以肯定得有专门的转换器来做这件事。在SpringMVC中`HttpMessageConverter`消息转换器接口就是做这件事的。**
+
+看一下该参数解析器的解析参数方法：
+
+```java
+// RequestResponseBodyMethodProcessor.java
+public Object resolveArgument(MethodParameter parameter, @Nullable ModelAndViewContainer mavContainer, NativeWebRequest webRequest, @Nullable WebDataBinderFactory binderFactory) throws Exception {
+
+    parameter = parameter.nestedIfOptional();
+    // 1.以消息转换器读取数据并解析到参数类型对象中
+    Object arg = readWithMessageConverters(webRequest, parameter, parameter.getNestedGenericParameterType());
+    String name = Conventions.getVariableNameForParameter(parameter);
+	// 2.数据绑定校验，即@Validated注解处理
+    if (binderFactory != null) {
+		// 省略
+    }
+    return adaptArgumentIfNecessary(arg, parameter);
+}
+```
+
+这个以消息转换器读取数据的方法最终会来到这里：
+
+```java
+// AbstractMessageConverterMethodArgumentResolver#readWithMessageConverters()
+// 以下为部分关键代码
+
+// 1.又tm包一层，包得有请求体的InputStream
+message = new EmptyBodyCheckingHttpInputMessage(inputMessage);
+// 2.遍历所有消息转换器，能支持该content-type的转换器进行解析处理
+for (HttpMessageConverter<?> converter : this.messageConverters) {
+    Class<HttpMessageConverter<?>> converterType = (Class<HttpMessageConverter<?>>) converter.getClass();
+    GenericHttpMessageConverter<?> genericConverter =
+        (converter instanceof GenericHttpMessageConverter ? (GenericHttpMessageConverter<?>) converter : null);
+    // 3.找到能支持读取该content-type的转换器
+    if (genericConverter != null ? genericConverter.canRead(targetType, contextClass, contentType) :
+        (targetClass != null && converter.canRead(targetClass, contentType))) {
+        if (message.hasBody()) {
+            // 3.1 消息体读取-前置处理
+            HttpInputMessage msgToUse =
+                getAdvice().beforeBodyRead(message, parameter, targetType, converterType);
+            // 3.2 消息转换器读取并转换并解析到参数对象
+            body = (genericConverter != null ? genericConverter.read(targetType, contextClass, msgToUse) :  ((HttpMessageConverter<T>) converter).read(targetClass, msgToUse));
+            // 3.3 消息体读取-后置处理
+            body = getAdvice().afterBodyRead(body, msgToUse, parameter, targetType, converterType);
+        }
+        else {
+            body = getAdvice().handleEmptyBody(null, message, parameter, targetType, converterType);
+        }
+        break;
+    }
+}
+```
+
+所以这个@RequestBody注解的处理关键步骤又转移到消息转换器了。同时返回值处理也需要消息转换器。这里暂时不分析这个转换器，后面专门来分析。
+
+### 总结
+
+在处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+解析参数这里吧，就是根据不同的参数注解如`@RequestParam`以不同的参数解析器进行值的获取，**最后都是来到`request.getXxx(name)`，**这个name一般由参数注解value属性指定，没指定则是参数名称。
+
+这里面关于`@RequestBody`注解的参数解析器`RequestResponseBodyMethodProcessor`需要注意，它对于请求体的二进制数据的处理实际交付给了`消息转换器HttpMessageConverter`进行处理。同时它也是`@ResponseBody`的结果处理器，当然也是委托给消息转换器处理的。
+
+对于请求体的解析具体看后面的关于消息转换器的分析吧。
+
+## 返回值处理器
+
+在处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+前面分析了参数解析器，反射调用没啥好说的，接下来分析结果处理器对于结果的处理过程。主要分析`@ResponseBody`注解的处理过程吧。
+
+返回值处理器接口如下：
+
+```java
+// 用于处理从处理程序方法调用返回的值的策略接口
+public interface HandlerMethodReturnValueHandler {
+    // 此处理器是否支持该返回值类型
+    boolean supportsReturnType(MethodParameter returnType);
+
+    /**
+	 * 通过向模型添加属性并设置视图
+	 * 或将ModelAndViewContainer.setRequestHandled标志设置为true以指示已直接处理响应来处理给定的返回值
+	 * @param returnValue 处理器方法返回值
+	 * @param returnType 返回值类型
+	 * @param mavContainer 当前请求的 ModelAndViewContainer
+	 * @param webRequest 当前请求
+	 */
+    void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+                           ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception;
+}
+```
+
+![HandlerMethodReturnValueHandler](springboot.assets/HandlerMethodReturnValueHandler.png)
+
+返回值处理器有很多实现类，图中仅仅列出了最常用的`@ResponseBody`注解标注情况下的返回值处理器`RequestResponseBodyMethodProcessor`。
+
+在上面分析的处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**，结果处理调用的方法是：
+
+```java
+// HandlerMethodReturnValueHandlerComposite.java
+// 遍历已注册的HandlerMethodReturnValueHandlers并调用支持它的那个
+public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+                              ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+	// 1.查找结果处理器
+    HandlerMethodReturnValueHandler handler = selectHandler(returnValue, returnType);
+	// 省略没找到的报错
+    // 2.结果处理器进行结果处理
+    handler.handleReturnValue(returnValue, returnType, mavContainer, webRequest);
+}
+
+```
+
+这个选择结果处理器的过程肯定是遍历结果处理器并根据其support方法判断能否支持，能支持则返回处理器并进行处理。
+
+### ResponseBody
+
+在上面的返回值处理器的具体选择过程就不分析了，接下来直接分析`@ResponseBody`注解的返回值处理器：
+
+```java
+/*
+解析使用@RequestBody注释的方法参数，并通过使用@ResponseBody读取和写入请求或响应的主体来处理使用HttpMessageConverter注释的方法的返回值。
+如果@RequestBody方法参数被任何触发验证的注释所注释，它也会被验证。在验证失败的情况下，如果配置了DefaultHandlerExceptionResolver ，则会引发MethodArgumentNotValidException并导致 HTTP 400 响应状态代码。
+*/
+public class RequestResponseBodyMethodProcessor extends AbstractMessageConverterMethodProcessor {
+    // 若controller类上或者方法上标注了@ResponseBody注解则支持
+    public boolean supportsReturnType(MethodParameter returnType) {
+        return (AnnotatedElementUtils.hasAnnotation(returnType.getContainingClass(), ResponseBody.class) ||  returnType.hasMethodAnnotation(ResponseBody.class));
+    }
+
+    @Override
+    public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+                                  ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws IOException, HttpMediaTypeNotAcceptableException, HttpMessageNotWritableException {
+		// 设置已处理
+        mavContainer.setRequestHandled(true);
+        // 这tm又包一层，把请求和响应都包一层
+        // 传入请求request目的在于获取Accept请求头，进行内容协商
+        ServletServerHttpRequest inputMessage = createInputMessage(webRequest);
+        ServletServerHttpResponse outputMessage = createOutputMessage(webRequest);
+
+        // 将给定的返回值写入给定的输出
+        writeWithMessageConverters(returnValue, returnType, inputMessage, outputMessage);
+    }
+}
+```
+
+这里又将具体的内容协商、响应输出委托给其它类去实现了，而这个实现又大致可以分为内容协商和返回值写入response。
+
+其具体的返回值写入过程如下：
+
+```java
+/**
+ * 将返回值写入响应response
+ * @param value 要写的返回值
+ * @param returnType 返回值类型
+ * @param inputMessage request的包装，用于获取Accept请求头
+ * @param outputMessage response的包装
+ * @throws HttpMediaTypeNotAcceptableException 当消息转换器无法满足请求中Accept标头指示的条件时抛出
+ */
+protected <T> void writeWithMessageConverters(@Nullable T value, MethodParameter returnType,
+                                              ServletServerHttpRequest inputMessage, ServletServerHttpResponse outputMessage)
+    throws IOException, HttpMediaTypeNotAcceptableException, HttpMessageNotWritableException {
+
+    Object body;
+    Class<?> valueType;
+    Type targetType;
+
+    // 1.如果返回值类型是String则直接写
+    if (value instanceof CharSequence) {
+        body = value.toString();
+        valueType = String.class;
+        targetType = String.class;
+    }
+    else {
+        body = value;
+        valueType = getReturnValueType(body, returnType);
+        targetType = GenericTypeResolver.resolveType(getGenericType(returnType), returnType.getContainingClass());
+    }
+    // 2.对Resource类型处理，比如资源文件HTML等
+    if (isResourceType(value, returnType)) {
+        outputMessage.getHeaders().set(HttpHeaders.ACCEPT_RANGES, "bytes");
+        if (value != null && inputMessage.getHeaders().getFirst(HttpHeaders.RANGE) != null &&
+            outputMessage.getServletResponse().getStatus() == 200) {
+            Resource resource = (Resource) value;
+            try {
+                List<HttpRange> httpRanges = inputMessage.getHeaders().getRange();
+                outputMessage.getServletResponse().setStatus(HttpStatus.PARTIAL_CONTENT.value());
+                body = HttpRange.toResourceRegions(httpRanges, resource);
+                valueType = body.getClass();
+                targetType = RESOURCE_REGION_LIST_TYPE;
+            }
+            catch (IllegalArgumentException ex) {
+                outputMessage.getHeaders().set(HttpHeaders.CONTENT_RANGE, "bytes */" + resource.contentLength());
+                outputMessage.getServletResponse().setStatus(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE.value());
+            }
+        }
+    }
+
+    // 3.内容协商：选择响应的MediaType
+    MediaType selectedMediaType = null;
+    // 省略内容协商部分
+   
+    // 4.返回值写入response
+    // 选出最合适的MediaType后，选择支持该MediaType的消息转换器把返回值写入response
+    if (selectedMediaType != null) {
+        selectedMediaType = selectedMediaType.removeQualityValue();
+        for (HttpMessageConverter<?> converter : this.messageConverters) {
+            /* 省略
+			大致逻辑是：
+			遍历所有消息转换器：
+			调用转换器canWrite()判断是否支持该返回值类型和MediaType
+			若支持则调用其write()方法写入response
+			*/
+        }
+    }
+
+    if (body != null) {
+        // 没有找到合适的消息转换器，报异常
+    }
+}
+```
+
+大致步骤为：
+
+- **内容协商：根据请求头Accept和消息转换器支持的选出最佳的响应MediaType**
+- **消息写入：将MediaType、返回值、返回值类型传入消息转换器，委托其将返回值以该MediaType类型写入response**
+
+#### 内容协商MediaType
+
+**内容协商：根据请求头Accept和消息转换器支持的选出最佳的响应MediaType**，如`application/json`
+
+```java
+/**
+ * 将返回值写入响应response
+ * @param value 要写的返回值
+ * @param returnType 返回值类型
+ * @param inputMessage request的包装，用于获取Accept请求头
+ * @param outputMessage response的包装
+ * @throws HttpMediaTypeNotAcceptableException 当消息转换器无法满足请求中Accept标头指示的条件时抛出
+ */
+protected <T> void writeWithMessageConverters(@Nullable T value, MethodParameter returnType,
+                                              ServletServerHttpRequest inputMessage, ServletServerHttpResponse outputMessage)
+    throws IOException, HttpMediaTypeNotAcceptableException, HttpMessageNotWritableException {
+
+    Object body;
+    Class<?> valueType;
+    Type targetType;
+
+    // 1.如果返回值类型是String则直接写
+
+    // 2.对Resource类型处理，比如资源文件HTML等
+
+
+    // 3.内容协商：选择响应的MediaType
+    MediaType selectedMediaType = null;
+
+    HttpServletRequest request = inputMessage.getServletRequest();
+    List<MediaType> acceptableTypes;
+    try {
+        // 内容协商1：根据request的请求头Accept字段解析需要的响应MediaType类型
+        acceptableTypes = getAcceptableMediaTypes(request);
+    }
+    catch (HttpMediaTypeNotAcceptableException ex) {
+        int series = outputMessage.getServletResponse().getStatus() / 100;
+        if (body == null || series == 4 || series == 5) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Ignoring error response content (if any). " + ex);
+            }
+            return;
+        }
+        throw ex;
+    }
+    // 内容协商2：返回支持的响应MediaType类型
+    // 遍历所有消息转换器能支持的MediaType类型
+    List<MediaType> producibleTypes = getProducibleMediaTypes(request, valueType, targetType);
+
+    if (body != null && producibleTypes.isEmpty()) {
+        throw new HttpMessageNotWritableException(
+            "No converter found for return value of type: " + valueType);
+    }
+    // 内容协商3：找到request请求头Accept字段需要的且消息转换器能支持的MediaType
+    List<MediaType> mediaTypesToUse = new ArrayList<>();
+    for (MediaType requestedType : acceptableTypes) {
+        for (MediaType producibleType : producibleTypes) {
+            if (requestedType.isCompatibleWith(producibleType)) {
+                mediaTypesToUse.add(getMostSpecificMediaType(requestedType, producibleType));
+            }
+        }
+    }
+    if (mediaTypesToUse.isEmpty()) {
+        // 如果没有支持的MediaType，省略报错
+    }
+    // 按作为主要标准的特异性和次要标准的质量值对给定的MediaType对象列表进行排序。
+    MediaType.sortBySpecificityAndQuality(mediaTypesToUse);
+
+    // 选出最合适的MediaType
+    for (MediaType mediaType : mediaTypesToUse) {
+        if (mediaType.isConcrete()) {
+            selectedMediaType = mediaType;
+            break;
+        }
+        else if (mediaType.isPresentIn(ALL_APPLICATION_MEDIA_TYPES)) {
+            selectedMediaType = MediaType.APPLICATION_OCTET_STREAM;
+            break;
+        }
+    }
+
+    // 4.返回值写入response
+    // 选出最合适的MediaType后，选择支持该MediaType的消息转换器把返回值写入response
+}
+```
+
+内容协商过程就是根据请求头Accept中需要的响应类型，从服务端消息转换器支持的MediaType中选择最合适的那个。
+
+#### 消息转换器将写入response
+
+在内容协商之后，选出响应的MediaType了，就可以将返回值以该MediaType形式写入response，这个过程交由消息转换器去实现：
+
+```java
+// 4.返回值写入response
+// 选出最合适的MediaType后，选择支持该MediaType的消息转换器把返回值写入response
+if (selectedMediaType != null) {
+    selectedMediaType = selectedMediaType.removeQualityValue();
+    for (HttpMessageConverter<?> converter : this.messageConverters) {
+        /* 省略
+			大致逻辑是：
+			遍历所有消息转换器：
+			调用转换器canWrite()判断是否支持该返回值类型和MediaType
+			若支持则调用其write()方法写入response
+			*/
+    }
+}
+```
+
+遍历所有消息转换器，找到能支持该MediaType和返回值类型的转化器，委托该转换器去写入。
+
+> 关于消息转换器如何写入返回值到response，具体分析看后面消息转换器部分。
+
+### 总结
+
+在处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+结果处理这一块，先找到合适的结果处理器，再让结果处理器去处理结果。
+
+现在一般都是用`@ResponseBody`注解将结果以json形式响应给前端，所以这里仅仅分析了`RequestResponseBodyMethodProcessor`这一个处理器。
+
+这个处理器如何处理结果：
+
+- **内容协商：根据请求头Accept和消息转换器支持的选出最佳的响应MediaType**，如`application/json`
+
+- **消息写入：将MediaType、返回值、返回值类型传入消息转换器，委托其将返回值以该MediaType类型写入response**
+
+## 消息转换器
+
+在处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+在解析参数和结果处理过程中，最关键核心的部分都交由了消息转换器去**获取请求体二进制数据并解析到参数类型**和**处理返回值并将其序列化为二进制数据输出到响应流**中。
+
+消息转换器是个策略接口，提供参数的读入解析和响应的打印输出。
+
+![HttpMessageConcerter-Process](springboot.assets/HttpMessageConcerter-Process.png)
+
+```java
+// 转换HTTP的request输入和response输出的策略接口
+public interface HttpMessageConverter<T> {
+
+	/**
+	 * 此转换器能否解析MediaType类型请求体到到指定的参数类型
+	 * @param clazz 该类是否可读
+	 * @param mediaType 要读取的媒体类型（如果未指定，可以为null）,通常是请求头Content-Type值
+	 */
+    boolean canRead(Class<?> clazz, @Nullable MediaType mediaType);
+
+    /**
+	 * 此转换器能否将该clazz类型结果输出为MediaType类型响应体
+	 * @param clazz 结果类型
+	 * @param mediaType 要写入的媒体类型（如果未指定，可以为null）,通常是请求头Accept的值。
+	 */
+    boolean canWrite(Class<?> clazz, @Nullable MediaType mediaType);
+
+    // 返回此消息转换器支持的MediaType
+    List<MediaType> getSupportedMediaTypes();
+
+    /**
+	 * 从request请求体中读取数据并转换为指定参数类型
+	 * @param clazz 解析并返回的参数类型
+	 * @param inputMessage 对request的封装
+	 */
+    T read(Class<? extends T> clazz, HttpInputMessage inputMessage)
+        throws IOException, HttpMessageNotReadableException;
+
+    /**
+	 * 将返回值以给定MediaType写入response响应体
+	 * @param t 返回值
+	 * @param contentType 内容协商得到的MediaType
+	 * @param outputMessage response的封装
+	 */
+    void write(T t, @Nullable MediaType contentType, HttpOutputMessage outputMessage)
+        throws IOException, HttpMessageNotWritableException;
+}
+```
+
+消息转换器的实现类有很多，这里仅列出三个经典的消息转换器官：
+
+- `StringHttpMessageConverter`：支持所有媒体类型` (*/*)`，并使用`text/plain`的Content-Type进行写入
+- `ByteArrayHttpMessageConverter`：此转换器支持所有媒体类型 `(*/*)`，并使用Content-Type的`application/octet-stream`进行写入
+- `MappingJackson2HttpMessageConverter`：支持UTF-8字符集的`application/json`和`application/*+json`
+
+一般情况下用的是后者，后者默认使用`Jackson 2.x` 的 ObjectMapper读写JSON。
+
+### StringHttpMessageConverter
+
+```java
+// 默认情况下，此转换器支持所有媒体类型 (*/*)，并使用text/plain的Content-Type进行写入
+// 这可以通过设置supportedMediaTypes属性来覆盖。
+public class StringHttpMessageConverter extends AbstractHttpMessageConverter<String> {
+	// 支持String类型参数解析和返回值输出
+    public boolean supports(Class<?> clazz) {
+        return String.class == clazz;
+    }
+
+    // 从请求体读数据并解析为String类型参数
+    protected String readInternal(Class<? extends String> clazz, HttpInputMessage inputMessage) throws IOException {
+        // 从request的content-type判断字符集，默认是UTF_8
+        Charset charset = getContentTypeCharset(inputMessage.getHeaders().getContentType());
+        // 将流拷贝到字符串中
+        return StreamUtils.copyToString(inputMessage.getBody(), charset);
+    }
+
+
+    
+    protected void writeInternal(String str, HttpOutputMessage outputMessage) throws IOException {
+        // 设置字符集到响应头
+        HttpHeaders headers = outputMessage.getHeaders();
+        if (this.writeAcceptCharset && headers.get(HttpHeaders.ACCEPT_CHARSET) == null) {
+            headers.setAcceptCharset(getAcceptedCharsets());
+        }
+        Charset charset = getContentTypeCharset(headers.getContentType());
+        // 以该字符集将字符串写入响应流中
+        StreamUtils.copy(str, charset, outputMessage.getBody());
+    }
+}
+```
+
+String类型的消息转换器就很简单，直接将请求体的二进制流转为String字符串，而打印输出到响应流时也是直接将字符串以某个字符集转换为二进制数据。
+
+最后都是调用的request和response原生的输入流和输出流：
+
+```java
+    ServletInputStream inputStream = request.getInputStream();
+    ServletOutputStream outputStream = response.getOutputStream();
+```
+
+### ByteArrayHttpMessageConverter
+
+分析过前面的String类型的消息转换器后，这个byte数组类型的实现基本差不多：
+
+```java
+/**
+ * Implementation of {@link HttpMessageConverter} that can read and write byte arrays.
+ *
+ * <p>By default, this converter supports all media types (<code>&#42;/&#42;</code>), and
+ * writes with a {@code Content-Type} of {@code application/octet-stream}. This can be
+ * overridden by setting the {@link #setSupportedMediaTypes supportedMediaTypes} property.
+ *
+ * @author Arjen Poutsma
+ * @author Juergen Hoeller
+ * @since 3.0
+ */
+public class ByteArrayHttpMessageConverter extends AbstractHttpMessageConverter<byte[]> {
+	// 支持字节数组的参数类型解析和返回值类型输出
+    public boolean supports(Class<?> clazz) {
+        return byte[].class == clazz;
+    }
+
+    @Override
+    public byte[] readInternal(Class<? extends byte[]> clazz, HttpInputMessage inputMessage) throws IOException {
+        long contentLength = inputMessage.getHeaders().getContentLength();
+        ByteArrayOutputStream bos =
+            new ByteArrayOutputStream(contentLength >= 0 ? (int) contentLength : StreamUtils.BUFFER_SIZE);
+        StreamUtils.copy(inputMessage.getBody(), bos);
+        return bos.toByteArray();
+    }
+    @Override
+    protected void writeInternal(byte[] bytes, HttpOutputMessage outputMessage) throws IOException {
+        StreamUtils.copy(bytes, outputMessage.getBody());
+    }
+}
+```
+
+这个实现甚至比String类型消息转化器更简单。
+
+### MappingJackson2HttpMessageConverter
+
+前面两个都比较简单，这个JSON格式的稍微复杂一点，它需要将请求体中的二进制数据转为字符串后再**以JSON格式反序列化为相应的参数类型**，输出到响应流时则**将对象序列化为JSON字符串**再输出到流中。
+
+```java
+/**
+ * 默认使用jackson 2.x的ObjectMapper读写JSON
+ *
+ * 默认情况下，此转换器支持UTF-8字符集的application/json和application/*+json 。这可以通过设置supportedMediaTypes属性来覆盖。
+ */
+public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMessageConverter {
+    @Override
+    protected Object readInternal(Class<?> clazz, HttpInputMessage inputMessage)
+        throws IOException, HttpMessageNotReadableException {
+
+        JavaType javaType = getJavaType(clazz, null);
+        return readJavaType(javaType, inputMessage);
+    }
+
+    private Object readJavaType(JavaType javaType, HttpInputMessage inputMessage) throws IOException {
+        MediaType contentType = inputMessage.getHeaders().getContentType();
+        Charset charset = getCharset(contentType);
+
+        ObjectMapper objectMapper = selectObjectMapper(javaType.getRawClass(), contentType);
+        Assert.state(objectMapper != null, "No ObjectMapper for " + javaType);
+
+        boolean isUnicode = ENCODINGS.containsKey(charset.name()) ||
+            "UTF-16".equals(charset.name()) ||
+            "UTF-32".equals(charset.name());
+        try {
+            InputStream inputStream = StreamUtils.nonClosing(inputMessage.getBody());
+            if (inputMessage instanceof MappingJacksonInputMessage) {
+                Class<?> deserializationView = ((MappingJacksonInputMessage) inputMessage).getDeserializationView();
+                if (deserializationView != null) {
+                    ObjectReader objectReader = objectMapper.readerWithView(deserializationView).forType(javaType);
+                    if (isUnicode) {
+                        return objectReader.readValue(inputStream);
+                    }
+                    else {
+                        Reader reader = new InputStreamReader(inputStream, charset);
+                        return objectReader.readValue(reader);
+                    }
+                }
+            }
+            if (isUnicode) {
+                return objectMapper.readValue(inputStream, javaType);
+            }
+            else {
+                Reader reader = new InputStreamReader(inputStream, charset);
+                return objectMapper.readValue(reader, javaType);
+            }
+        }
+        catch (InvalidDefinitionException ex) {
+            throw new HttpMessageConversionException("Type definition error: " + ex.getType(), ex);
+        }
+        catch (JsonProcessingException ex) {
+            throw new HttpMessageNotReadableException("JSON parse error: " + ex.getOriginalMessage(), ex, inputMessage);
+        }
+    }
+
+    @Override
+    protected void writeInternal(Object object, @Nullable Type type, HttpOutputMessage outputMessage)
+        throws IOException, HttpMessageNotWritableException {
+
+        MediaType contentType = outputMessage.getHeaders().getContentType();
+        JsonEncoding encoding = getJsonEncoding(contentType);
+
+        Class<?> clazz = (object instanceof MappingJacksonValue ?
+                          ((MappingJacksonValue) object).getValue().getClass() : object.getClass());
+        ObjectMapper objectMapper = selectObjectMapper(clazz, contentType);
+        Assert.state(objectMapper != null, "No ObjectMapper for " + clazz.getName());
+
+        OutputStream outputStream = StreamUtils.nonClosing(outputMessage.getBody());
+        try (JsonGenerator generator = objectMapper.getFactory().createGenerator(outputStream, encoding)) {
+            writePrefix(generator, object);
+
+            Object value = object;
+            Class<?> serializationView = null;
+            FilterProvider filters = null;
+            JavaType javaType = null;
+
+            if (object instanceof MappingJacksonValue) {
+                MappingJacksonValue container = (MappingJacksonValue) object;
+                value = container.getValue();
+                serializationView = container.getSerializationView();
+                filters = container.getFilters();
+            }
+            if (type != null && TypeUtils.isAssignable(type, value.getClass())) {
+                javaType = getJavaType(type, null);
+            }
+
+            ObjectWriter objectWriter = (serializationView != null ?
+                                         objectMapper.writerWithView(serializationView) : objectMapper.writer());
+            if (filters != null) {
+                objectWriter = objectWriter.with(filters);
+            }
+            if (javaType != null && javaType.isContainerType()) {
+                objectWriter = objectWriter.forType(javaType);
+            }
+            SerializationConfig config = objectWriter.getConfig();
+            if (contentType != null && contentType.isCompatibleWith(MediaType.TEXT_EVENT_STREAM) &&
+                config.isEnabled(SerializationFeature.INDENT_OUTPUT)) {
+                objectWriter = objectWriter.with(this.ssePrettyPrinter);
+            }
+            objectWriter.writeValue(generator, value);
+
+            writeSuffix(generator, object);
+            generator.flush();
+        }
+        catch (InvalidDefinitionException ex) {
+            throw new HttpMessageConversionException("Type definition error: " + ex.getType(), ex);
+        }
+        catch (JsonProcessingException ex) {
+            throw new HttpMessageNotWritableException("Could not write JSON: " + ex.getOriginalMessage(), ex);
+        }
+    }
+}
+```
+
+### 总结
+
+在处理器适配器HandlerAdapter调用HandlerMethod中，核心步骤是**解析参数-->反射调用-->结果处理**。
+
+在参数解析器解析参数和返回值处理器处理结果过程中，最关键核心的部分都交由了消息转换器去**获取请求体二进制数据并解析到参数类型**和**处理返回值并将其序列化为二进制数据输出到响应流**中。
+
+Spring MVC 默认的 JSON 消息格式的转换器是 `MappingJackson2HttpMessageConverter` 这个类，不过它仅定义了一个 JSON 前缀属性，主要的实现在其父类 `AbstractJackson2HttpMessageConverter` 完成的
