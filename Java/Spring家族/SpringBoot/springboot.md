@@ -6269,7 +6269,11 @@ public void stop() throws WebServerException {
 
 > **ServletContainerInitializer** 也是 Servlet 3.0 新增的一个接口，容器在启动时使用 JAR 服务 API(JAR Service API) 来发现 **ServletContainerInitializer** 的实现类，并且容器将 WEB-INF/lib 目录下 JAR 包中的类都交给该类的 `onStartup()` 方法处理，我们通常需要在该实现类上使用 @HandlesTypes 注解来指定希望被处理的类，过滤掉不希望给 `onStartup()` 处理的类。
 
-# Tomcat处理流程
+# Tomcat
+
+> 注意：这里将根据源码直接分析嵌入式Tomcat
+>
+> 极客时间资料：https://time.geekbang.org/column/article/95480
 
 关于Tomcat如何以NIO监听端口，如何分发到Servlet的流程，这里先不分析。
 
@@ -6277,7 +6281,389 @@ public void stop() throws WebServerException {
 
 其入口方法是`NioEndpoint#startInternal()`，它启动了1个线程以Selector监听8080端口。
 
-# DispatcherServlet处理流程
+## Servlet规范
+
+**Servlet接口和Servlet容器这一整套规范称为Servlet规范。**
+
+面向接口编程是解决耦合问题的法宝，于是有一伙人就定义了一个接口，各种业务类都必须实现这个接口，这个接口就叫 Servlet 接口，有时我们也把实现了 Servlet 接口的业务类叫作 Servlet。
+
+对于特定的请求，HTTP 服务器如何知道由哪个 Servlet 来处理呢？Servlet 又是由谁来实例化呢？显然 HTTP 服务器不适合做这个工作，否则又和业务类耦合了。于是，还是那伙人又发明了 Servlet 容器，Servlet 容器用来加载和管理业务类。HTTP 服务器不直接跟业务类打交道，而是把请求交给 Servlet 容器去处理，Servlet 容器会将请求转发到具体的 Servlet，如果这个 Servlet 还没创建，就加载并实例化这个 Servlet，然后调用这个 Servlet 的接口方法。因此 Servlet 接口其实是 Servlet 容器跟具体业务类之间的接口。下面我们通过一张图来加深理解：
+
+![servlet分发](springboot.assets/servlet分发.png)
+
+Servlet 接口和 Servlet 容器这一整套规范叫作 Servlet 规范。Tomcat 和 Jetty 都按照 Servlet 规范的要求实现了 Servlet 容器，同时它们也具有 HTTP 服务器的功能。
+
+### Servlet接口
+
+Servlet接口如下：
+
+```java
+/*
+servlet 是在 Web 服务器中运行的小型 Java 程序。 Servlet 接收和响应来自 Web 客户端的请求
+生命周期方法，并按以下顺序调用：
+1.构建 servlet，然后使用init()方法进行初始化。
+2.处理来自客户端对service()方法的任何调用。
+3.servlet 停止服务，然后使用destroy()方法销毁，然后进行垃圾收集并完成。
+
+除了生命周期方法之外，该接口还提供了getServletConfig方法，servlet 可以使用该方法获取任何启动信息，以及getServletInfo方法，该方法允许 servlet 返回有关自身的基本信息，例如作者、版本和版权。
+*/
+public interface Servlet {
+    /**
+     * 由 servlet 容器调用以向 servlet 指示 servlet 正在投入使用
+     */
+    public void init(ServletConfig config) throws ServletException;
+
+    /**
+     * 返回一个ServletConfig对象，其中包含此 servlet 的初始化和启动参数
+     */
+    public ServletConfig getServletConfig();
+
+    /**
+     * 由 servlet 容器调用以允许 servlet 响应请求
+     */
+    public void service(ServletRequest req, ServletResponse res)
+        throws ServletException, IOException;
+
+    public String getServletInfo();
+
+    /**
+     * 由 servlet 容器调用以向 servlet 指示 servlet 正在停止服务。
+     * 只有在 servlet 的service方法中的所有线程都退出或经过超时时间之后，才会调用此方法。 
+     */
+    public void destroy();
+}
+```
+
+最重要的是service()方法，每个请求到达Servlet后都是进入这个service()方法由子类进行处理。这个方法有两个参数：ServletRequest 和 ServletResponse。
+
+- ServletRequest 用来封装请求信息
+- ServletResponse 用来封装响应信息
+
+因此本质上**这两个类是对通信协议的封装**。
+
+其它的init()和destroy()方法是生命周期方法，比如SpringMVC的DispatcherServlet的init()方法中初始化了MVC的各个组件如处理器映射器、参数解析器等。
+
+有接口一般就有抽象类，抽象类用来实现接口和封装通用的逻辑，因此 Servlet 规范提供了 GenericServlet 抽象类，我们可以通过扩展它来实现 Servlet。
+
+虽然 Servlet 规范并不在乎通信协议是什么，但是大多数的 Servlet 都是在 HTTP 环境中处理的，因此 Servet 规范还提供了 HttpServlet 来继承 GenericServlet，并且加入了 HTTP 特性。HttpServlet的service()方法根据http请求方法分派请求到不同方法进行处理，只需要重写各个请求方法的处理逻辑如：doGet()、doPost()等。
+
+### Servlet容器
+
+Servlet 容器会实例化和调用 Servlet，那 Servlet 是怎么注册到 Servlet 容器中的呢？一般来说，我们是以 Web 应用程序的方式来部署 Servlet 的，而根据 Servlet 规范，Web 应用程序有一定的目录结构，在这个目录下分别放置了 Servlet 的类文件、配置文件以及静态资源，Servlet 容器通过读取配置文件，就能找到并加载 Servlet。Web 应用的目录结构大概是下面这样的：
+
+```
+| -  MyWebApp
+      | -  WEB-INF/web.xml        -- 配置文件，用来配置Servlet等
+      | -  WEB-INF/lib/           -- 存放Web应用所需各种JAR包
+      | -  WEB-INF/classes/       -- 存放你的应用类，比如Servlet类
+      | -  META-INF/              -- 目录存放工程的一些信息
+```
+
+Servlet 规范里定义了`ServletContext`接口来对应一个 Web 应用。
+
+Web 应用部署好后，Servlet 容器在启动时会加载 Web 应用，并为每个 Web 应用创建唯一的 ServletContext 对象。你可以把 ServletContext 看成是一个全局对象，一个 Web 应用可能有多个 Servlet，这些 Servlet 可以通过全局的 ServletContext 来共享数据，这些数据包括 Web 应用的初始化参数、Web 应用目录下的文件资源等。
+
+### 扩展机制
+
+引入Servlet规范后，程序员不需要关心Socket网络通信、HTTP协议解析，只关心业务逻辑。
+
+但是规范不一定能满足个性化需求，因此Servlet规范提供了`Filter`和`Listener`两种扩展机制。
+
+- Filter：过滤器，可以对请求和响应做一些定制化操作，如对不同国家对响应进行本地化。
+- Listener：监听器，Servlet容器运行时的各种事件发生时回调监听器，如web应用的启动停止、请求到达等。 比如 Spring 就实现了自己的监听器，来监听 ServletContext 的启动事件，目的是当 Servlet 容器启动时，创建并初始化全局的 Spring 容器。
+
+## Tomcat总体架构
+
+### 重要组件
+
+Tomcat要实现的**2个核心组件及核心功能**：
+
+- `Connector`：**处理Socket连接**，负责网络字节流和Request、Response对象转化。
+- `Container`：**Servlet容器**，加载管理Servlet，具体处理Request请求。
+
+**Tomcat支持的I/O模型有：**
+
+- NIO：非阻塞IO，采用Java NIO库实现
+- NIO2：异步IO，采用Jdk7最新的NIO2库实现
+- APR：采用Apache可移植运行库实现，是C/C++编写的本地库
+
+**Tomcat支持的应用层协议有**：
+
+- HTTP/1.1：目前大部分Web应用访问协议
+- HTTP/2：HTTP协议2.0大幅提升了Web性能
+- AJP：用于和Web服务器继承如Apache
+
+因此，Tomcat为了实现支持多种IO模型和应用层协议，一个`Container容器`会对接多个`Connector连接器`，将两者组装在一起整体叫做`Service组件`。Tomcat服务器内可以有多个Service，监听不同端口来访问不同应用。
+
+从下图可以得知：
+
+- `Server`：最顶层组件，即**Tomcat服务器实例**，Server中含多个Service
+- `Service`：即**应用服务**，每个Service含1个Container容器和多个Connector连接器
+- `Container`：即**Servlet容器**，加载管理Servlet，具体处理Request请求。
+- `Connector`：即**Socket连接处理器**，负责网络字节流和Request、Response对象转化。
+
+![tomcat总体架构](springboot.assets/tomcat总体架构.png)
+
+**其中Container容器和Connector连接器是实现功能的核心组件，外层的都是包装！**
+
+### Connector连接器
+
+Connector连接器屏蔽了应用层协议和IO模型等，无论HTTP还是AJP，都能返回一个标准的ServletRequest对象给容器。它的请求处理流程大致如下：
+
+- 监听网络端口
+- 接受Socket连接请求
+- 读取网络请求字节流
+- 根据具体应用层协议(HTTP/AJP)解析字节流，统一生成Tomcat Request对象
+- 将Tomcat Request对象转换为标准的ServletRequest对象
+- 将ServletRequest对象交由Servlet容器处理后得到ServletResponse对象
+- 将ServletResponse对象转回Tomcat Response对象，再转成网络字节流
+- 将响应字节流写回浏览器
+
+其实上面这一堆就3个核心功能：
+
+- 网络通信
+- 应用层协议解析
+- Tomcat Request/Response 与 ServletRequest/ServletResponse 的转化
+
+因为Tomcat设计了2个组件来做这3件事：
+
+- `ProtocolHandler`：抽象的应用层协议处理器
+  - `Endpoint`：解决网络通信，获得字节流
+  - `Processor`：解析协议字节流转换为Tomcat Request对象
+- `Adapter`：提供ServletRequest对象给Servlet容器
+
+Endpoint 负责提供字节流给 Processor，Processor 负责提供 Tomcat Request 对象给 Adapter，Adapter 负责提供 ServletRequest 对象给容器。
+
+由于 I/O 模型和应用层协议可以自由组合，比如 NIO + HTTP 或者 NIO.2 + AJP。Tomcat 的设计者**将网络通信和应用层协议解析放在一起考虑**，设计了一个叫 `ProtocolHandler` 的接口来封装这两种变化点。各种协议和通信模型的组合有相应的具体实现类。比如：Http11NioProtocol 和 AjpNioProtocol。
+
+Connector的几个核心组件关系如下：
+
+![Connector](springboot.assets/Connector.png)
+
+Connector类的属性如下：
+
+```java
+// Coyote 连接器的实现
+public class Connector extends LifecycleMBeanBase  {
+    /**
+     * Coyote 协议处理器
+     */
+    protected final ProtocolHandler protocolHandler;
+
+    /**
+     * Coyote 适配器.
+     */
+    protected Adapter adapter = null;
+    
+    // 默认使用 HTTP/1.1 NIO 实现
+    public Connector() {
+        this("HTTP/1.1");
+    }
+
+    public Connector(String protocol) {
+        boolean apr = AprStatus.getUseAprConnector() && AprStatus.isInstanceCreated()
+            && AprLifecycleListener.isAprAvailable();
+        ProtocolHandler p = null;
+        // 创建协议处理器，默认是Http11NioProtocol
+        p = ProtocolHandler.create(protocol, apr);
+        // 省略部分代码
+    }
+
+    // 此Connector所在的Service应用服务
+    protected Service service = null;
+
+    // 将对通过此连接器接收的所有请求设置的请求方案。
+    protected String scheme = "http";
+
+    // 容器自己解析的最大参数数量(GET和POST)，默认10000
+    protected int maxParameterCount = 10000;
+
+    // 将由容器自动解析的 POST 的最大大小。默认为 2MB
+    protected int maxPostSize = 2 * 1024 * 1024;
+	// 默认解析/编码URI的字符集
+    private Charset uriCharset = StandardCharsets.UTF_8;
+}
+```
+
+#### ProtocolHandler组件
+
+上面分析得知ProtocolHandler用来处理网络连接和应用层协议解析，包含了2个重要组件：`Endpoint`和`Processor`。
+
+![ProtocolHandler](springboot.assets/ProtocolHandler.png)
+
+Connector默认创建的协议处理器是`Http11NioProtocol`，目前阶段只需要关注这一个实现即可，它使用 `HTTP/1.1协议以及Java NIO `实现。
+
+> `Http11NioProtocol`的`NioEndpoint`的`acceptor线程`会将新到来的Socket连接注册到Selector复用器上，Selector复用器的监听`poller线程`则会将新到来的Socket请求包装为`SocketProcessor处理任务`提交到线程池，该任务的run()方法会调用协议解析组件`Processor`解析Socket请求，将字节流解析为Tomcat Request对象和Response对象。
+
+![ProtocolHandler](springboot.assets/ProtocolHandler-16640305471103.png)
+
+##### Endpoint组件
+
+Endpoint是通信端点，处理Socket的接收和发送，是对传输层的抽象，因此 Endpoint 是用来实现 TCP/IP 协议的。
+
+不过没有Endpoint接口，只有AbstractEndpoint抽象类：
+
+![NioEndpoint](springboot.assets/NioEndpoint.png)
+
+默认使用的是NioEndpoint，其含有2个重要的子组件：
+
+- `Acceptor`：以ServerSocketChannel#accept()方法监听Socket连接请求
+- `SocketProcessor`：实现了Runnable接口，用来处理接收到的Socket请求，其run()方法中将调用协议解析组件`Processor`进行解析；每个连接请求被包装为SocketProcessor后会放入线程池，有线程池去解析请求协议。
+
+> `NioEndpoint组件`很重要，这里是Socket连接请求的起点，有`acceptor`线程监听端口的socket连接，然后注册到Selector复用器上；有`poller`线程在selector复用器上监听连接事件，会将新到来的Socket请求包装为`SocketProcessor处理任务`提交到线程池，该任务的run()方法会调用协议解析组件`Processor`解析Socket请求，将字节流解析为Tomcat Request对象和Response对象。
+
+##### Processor组件
+
+Endpoint是实现TCP/IP协议的socket连接处理的，而Processor组件是解析应用层协议的，根据Socket连接得到的请求数据解析成不同的协议信息。由上面分析得知解析过程以线程池进行的并发处理。
+
+```java
+// 所有应用层协议处理的通用接口
+public interface Processor {
+    /**
+     * 处理连接。只要发生允许对当前未处理的连接继续处理的事件（例如，更多数据到达），就会调用此方法。
+     *
+     * @param socketWrapper 要处理的连接
+     * @param status 触发此附加处理的连接状态
+     * @return 此方法返回时调用者应将套接字置于的状态
+     */
+    SocketState process(SocketWrapperBase<?> socketWrapper, SocketEvent status) throws IOException;
+}
+```
+
+![Processor](springboot.assets/Processor.png)
+
+具体的协议解析部分在其实现类如Http11Processor解析HTTP/1.1。
+
+#### Adapter组件
+
+由于应用层协议不同，Tomcat定义了自己的Request类存放这些请求信息，ProtocolHandler负责接受请求并解析协议生成Tomcat的Request对象，但这并不是Servlet规范标准的ServletRequest，所以引入了CoyoteAdapter适配器，Connector连接器调用CoyoteAdapter的service()方法将Tomcat Request对象转换成ServletRequest，再去调用Servlet容器的service()方法。
+
+```java
+// 将Tomcat的request对象转换为HttpServletRequest
+public class CoyoteAdapter implements Adapter {
+
+    public void service(org.apache.coyote.Request req, org.apache.coyote.Response res)
+        throws Exception {
+        // 这个Request是HttpServletRequest的子类...
+        Request request = (Request) req.getNote(ADAPTER_NOTES);
+        Response response = (Response) res.getNote(ADAPTER_NOTES);
+
+        if (request == null) {
+            // 说白了就是以子类继承HttpServletRequest，同时将coyote.Request对象包装进去
+            request = connector.createRequest();
+            request.setCoyoteRequest(req);
+            response = connector.createResponse();
+            response.setCoyoteResponse(res);
+
+            // Link objects
+            request.setResponse(response);
+            response.setRequest(request);
+
+            // Set as notes
+            req.setNote(ADAPTER_NOTES, request);
+            res.setNote(ADAPTER_NOTES, response);
+
+            // Set query string encoding
+            req.getParameters().setQueryStringCharset(connector.getURICharset());
+        }
+        
+        // 2.省略：将request和response放入Tomcat的Service的Servlet容器中进行调用处理
+    }
+}
+```
+
+这个转换操作是适配器模式的经典实现：
+
+两个模块：
+
+- Connector模块产生的coyote.Request对象；
+- Servlet容器模块需要的是ServletRequest对象。
+
+实现：于是以子类继承需要的Servlet规范的HttpServletRequest，然后将目前提供的coyote.Request对象包装进去作为一个属性。
+
+这就是适配器模式！
+
+#### 一些问题
+
+问题1：为什么Connector连接器产生的是coyote.Request对象，而不直接产生ServletRequest对象呢，为什么宁愿去多用1层Adapter进行转换呢？
+
+> 答：这里的考虑是，如果连接器直接创建ServletRequest和ServletResponse对象的话，就和Servlet协议耦合了，设计者认为连接器尽量保持独立性，它不一定要跟Servlet容器工作的。
+>
+> 另外对象转化的性能消耗还是比较少的，Tomcat对HTTP请求体采取了延迟解析的策略，也就是说，TomcatRequest对象转化成ServletRequest的时候，请求体的内容都还没读取呢，直到容器处理这个请求的时候才读取的。
+
+问题2：tomcat和netty有什么区别呢？为什么netty常常用做底层通讯模块，而tomcat作为web容器呢？
+
+> 答：你可以把Netty理解成Tomcat中的连接器，它们都负责网络通信，都利用了Java NIO非阻塞特性。但Netty素以高性能高并发著称，为什么Tomcat不把连接器替换成Netty呢？
+>
+> 第一个原因是Tomcat的连接器性能已经足够好了，同样是Java NIO编程，套路都差不多。
+>
+> 第二个原因是Tomcat做为Web容器，需要考虑到Servlet规范，Servlet规范规定了对HTTP Body的读写是阻塞的，因此即使用到了Netty，也不能充分发挥它的优势。所以Netty一般用在非HTTP协议和Servlet的场景下。
+
+问题3：ajp也是指一种网络协议么，类似于http这种，processor里面是根据什么来判定请求的协议类型，比如浏览器里面请求的header里面的内容吗？
+
+> AJP可以理解为应用层协议，它是用二进制的方式来传输文本，比如HTTP的请求头“accept-language”有15个字符，如果用二进制0xA004表示只有2个字节，效率大大提升。
+
+### Servlet容器
+
+上面分析的Connector连接器处理Socket通信和应用层协议解析，并经过Adapter转换为ServletRequest对象和ServletResponse对象，然后将这两个对象交由Servlet容器的某个Servlet进行业务处理。
+
+#### 容器层次架构
+
+```java
+/*
+Container是一个对象，它可以执行从客户端接收到的请求，并根据这些请求返回响应。
+通过实现Pipeline接口，Container 可以选择支持 Valve 管道，这些管道按照运行时配置的顺序处理请求。
+
+容器将存在于 Catalina 中的多个概念级别。以下示例代表常见情况：
+Engine- 整个 Catalina servlet 引擎的表示，很可能包含一个或多个子容器，它们是Host或Context实现，或其他自定义组。
+Host- 包含多个Context的虚拟主机的表示。
+Context- 单个 ServletContext 的表示，通常包含一个或多个受支持 servlet 的包装器。
+Wrapper - 单个 servlet 定义的表示（如果 servlet 本身实现 SingleThreadModel，它可能支持多个 servlet 实例）
+ */
+public interface Container extends Lifecycle {
+}
+```
+
+![容器的层次结构](springboot.assets/容器的层次结构.png)
+
+**为什么Servlet容器设计为分层架构呢？**
+
+Tomcat 通过一种分层的架构，使得 Servlet 容器具有很好的灵活性。
+
+Context 表示一个 Web 应用程序；Wrapper 表示一个 Servlet，一个 Web 应用程序中可能会有多个 Servlet；Host 代表的是一个虚拟主机，或者说一个站点，可以给 Tomcat 配置多个虚拟主机地址，而一个虚拟主机下可以部署多个 Web 应用程序；Engine 表示引擎，用来管理多个虚拟站点，一个 Service 最多只能有一个 Engine。
+
+#### 请求定位Servlet
+
+设计了这么多层次的容器，Tomcat如何定位到具体哪个Wrapper里的Servlet来处理的呢？
+
+通过Mapping组件，将用户请求的URL定位到一个Servlet，它的工作原理是：Mapper 组件里保存了 Web 应用的配置信息，其实就是容器组件与访问路径的映射关系，比如 Host 容器里配置的域名、Context 容器里的 Web 应用路径，以及 Wrapper 容器里 Servlet 映射的路径，你可以想象这些配置信息就是一个多层次的 Map。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# SpringMVC处理流程
 
 ![SpingMVC-Process](springboot.assets/SpingMVC-Process.jpg)
 
@@ -6607,14 +6993,14 @@ protected void onRefresh(ApplicationContext context) {
 }
 // 初始化DispatcherServlet的各个组件
 protected void initStrategies(ApplicationContext context) {
-    initMultipartResolver(context);
+    initMultipartResolver(context);// 初始化文件解析器
     initLocaleResolver(context);
     initThemeResolver(context);
-    initHandlerMappings(context);
-    initHandlerAdapters(context);
-    initHandlerExceptionResolvers(context);
+    initHandlerMappings(context);// 初始化HandlerMapping
+    initHandlerAdapters(context);// 初始化HandlerAdapter
+    initHandlerExceptionResolvers(context);// 初始化异常解析器
     initRequestToViewNameTranslator(context);
-    initViewResolvers(context);
+    initViewResolvers(context);// 初始化页面解析器
     initFlashMapManager(context);
 }
 ```
@@ -8800,21 +9186,23 @@ public class ByteArrayHttpMessageConverter extends AbstractHttpMessageConverter<
 
 前面两个都比较简单，这个JSON格式的稍微复杂一点，它需要将请求体中的二进制数据转为字符串后再**以JSON格式反序列化为相应的参数类型**，输出到响应流时则**将对象序列化为JSON字符串**再输出到流中。
 
+先看看该转换器的父类，其主要逻辑都是在父类中实现的：
+
 ```java
 /**
  * 默认使用jackson 2.x的ObjectMapper读写JSON
  *
  * 默认情况下，此转换器支持UTF-8字符集的application/json和application/*+json 。这可以通过设置supportedMediaTypes属性来覆盖。
  */
-public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMessageConverter {
-    @Override
+public abstract class AbstractJackson2HttpMessageConverter extends AbstractGenericHttpMessageConverter<Object> {
+
     protected Object readInternal(Class<?> clazz, HttpInputMessage inputMessage)
         throws IOException, HttpMessageNotReadableException {
-
         JavaType javaType = getJavaType(clazz, null);
         return readJavaType(javaType, inputMessage);
     }
 
+    // 这里的处理逻辑就是调用jackson的ObjectMapper将二进制数据读取并解析到参数类型对象中
     private Object readJavaType(JavaType javaType, HttpInputMessage inputMessage) throws IOException {
         MediaType contentType = inputMessage.getHeaders().getContentType();
         Charset charset = getCharset(contentType);
@@ -8825,41 +9213,35 @@ public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMes
         boolean isUnicode = ENCODINGS.containsKey(charset.name()) ||
             "UTF-16".equals(charset.name()) ||
             "UTF-32".equals(charset.name());
-        try {
-            InputStream inputStream = StreamUtils.nonClosing(inputMessage.getBody());
-            if (inputMessage instanceof MappingJacksonInputMessage) {
-                Class<?> deserializationView = ((MappingJacksonInputMessage) inputMessage).getDeserializationView();
-                if (deserializationView != null) {
-                    ObjectReader objectReader = objectMapper.readerWithView(deserializationView).forType(javaType);
-                    if (isUnicode) {
-                        return objectReader.readValue(inputStream);
-                    }
-                    else {
-                        Reader reader = new InputStreamReader(inputStream, charset);
-                        return objectReader.readValue(reader);
-                    }
+
+        // 省略try/catch
+        InputStream inputStream = StreamUtils.nonClosing(inputMessage.getBody());
+        if (inputMessage instanceof MappingJacksonInputMessage) {
+            Class<?> deserializationView = ((MappingJacksonInputMessage) inputMessage).getDeserializationView();
+            if (deserializationView != null) {
+                ObjectReader objectReader = objectMapper.readerWithView(deserializationView).forType(javaType);
+                if (isUnicode) {
+                    return objectReader.readValue(inputStream);
+                }
+                else {
+                    Reader reader = new InputStreamReader(inputStream, charset);
+                    return objectReader.readValue(reader);
                 }
             }
-            if (isUnicode) {
-                return objectMapper.readValue(inputStream, javaType);
-            }
-            else {
-                Reader reader = new InputStreamReader(inputStream, charset);
-                return objectMapper.readValue(reader, javaType);
-            }
         }
-        catch (InvalidDefinitionException ex) {
-            throw new HttpMessageConversionException("Type definition error: " + ex.getType(), ex);
+        if (isUnicode) {
+            return objectMapper.readValue(inputStream, javaType);
         }
-        catch (JsonProcessingException ex) {
-            throw new HttpMessageNotReadableException("JSON parse error: " + ex.getOriginalMessage(), ex, inputMessage);
+        else {
+            Reader reader = new InputStreamReader(inputStream, charset);
+            return objectMapper.readValue(reader, javaType);
         }
     }
 
-    @Override
+	
     protected void writeInternal(Object object, @Nullable Type type, HttpOutputMessage outputMessage)
         throws IOException, HttpMessageNotWritableException {
-
+        // 1.获取Content-type和编码方式，例如 `application/json;charset=UTF-8`
         MediaType contentType = outputMessage.getHeaders().getContentType();
         JsonEncoding encoding = getJsonEncoding(contentType);
 
@@ -8870,6 +9252,7 @@ public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMes
 
         OutputStream outputStream = StreamUtils.nonClosing(outputMessage.getBody());
         try (JsonGenerator generator = objectMapper.getFactory().createGenerator(outputStream, encoding)) {
+            // 1.在主体内容之前写前缀内容，由子类实现
             writePrefix(generator, object);
 
             Object value = object;
@@ -8900,9 +9283,12 @@ public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMes
                 config.isEnabled(SerializationFeature.INDENT_OUTPUT)) {
                 objectWriter = objectWriter.with(this.ssePrettyPrinter);
             }
+            // 2.将结果序列化并写入到输出流
             objectWriter.writeValue(generator, value);
 
+            // 3.在主体内容之后写后缀内容，由子类实现
             writeSuffix(generator, object);
+            // 4.写完刷输出流
             generator.flush();
         }
         catch (InvalidDefinitionException ex) {
@@ -8922,3 +9308,243 @@ public class MappingJackson2HttpMessageConverter extends AbstractJackson2HttpMes
 在参数解析器解析参数和返回值处理器处理结果过程中，最关键核心的部分都交由了消息转换器去**获取请求体二进制数据并解析到参数类型**和**处理返回值并将其序列化为二进制数据输出到响应流**中。
 
 Spring MVC 默认的 JSON 消息格式的转换器是 `MappingJackson2HttpMessageConverter` 这个类，不过它仅定义了一个 JSON 前缀属性，主要的实现在其父类 `AbstractJackson2HttpMessageConverter` 完成的
+
+## 异常解析器
+
+有两种方式配置异常处理方法：
+
+- @Controller类以@ExceptionHandler配置本地异常处理器方法
+- @ControllerAdvice以@ExceptionHandler配置全局异常处理器方法
+
+在Dispatch#doDispatch()方法中，若出现了异常则将交由异常处理器进行处理，异常解析器接口如下：
+
+```java
+// 由可以解决处理程序映射或执行期间抛出的异常的对象实现的接口，在典型情况下是错误视图。实现者通常在应用程序上下文中注册为 bean
+public interface HandlerExceptionResolver {
+
+	/**
+	 * 尝试解决在处理程序执行期间引发的给定异常，如果合适，返回表示特定错误页面的ModelAndView 。
+返回的ModelAndView可能为空，表示异常已成功解决，但不应呈现视图，例如通过设置状态代码
+     * @param handler 处理器
+	 * @param ex handler执行期间产生的异常
+	 * @return 用于转发的页面或null用于解析链中的默认处理
+	 */
+	@Nullable
+	ModelAndView resolveException(
+			HttpServletRequest request, HttpServletResponse response, @Nullable Object handler, Exception ex);
+}
+```
+
+![HandlerExceptionResolver](springboot.assets/HandlerExceptionResolver.png)
+
+`org.springframework.web.servlet.handler.HandlerExceptionResolverComposite`，实现 HandlerExceptionResolver、Ordered 接口，复合的 HandlerExceptionResolver 实现类。
+
+Spring Boot 默认配置下 HandlerExceptionResolverComposite 包含三个实现类：
+
+1. `org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver`
+2. `org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver`
+3. `org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver`
+
+这里需要注意第1个 `ExceptionHandlerExceptionResolver` 是基于 `@ExceptionHandler` 注解来配置对应的异常处理器。
+
+使用 `@ExceptionHandler` 注解来实现过异常的处理，例如：
+
+```java
+@Log4j2
+@RestControllerAdvice
+public class CustomizeExceptionHandler extends ResponseEntityExceptionHandler {
+
+    @ExceptionHandler({EmptyArgumentException.class, IllegalArgumentException.class})
+    public Result<?> customizeHandleArgumentException(HttpServletRequest request, final Exception e, HttpServletResponse response) {
+        response.setStatus(HttpStatus.OK.value());
+        return Result.fail(ResultCode.PARAM_ERROR.getCode(), e.getMessage());
+    }
+
+    @ExceptionHandler({Exception.class})
+    public Result<?> customizeHandleException(HttpServletRequest request, final Exception e, HttpServletResponse response) {
+        log.error("异常拦截[{}]：", e.getMessage(), e);
+        response.setStatus(HttpStatus.OK.value());
+        return Result.fail(ResultCode.UNKNOWN.getCode(), e.getMessage());
+    }
+}
+```
+
+该自定义异常处理类会处理 `Controller` 类抛出的**指定类型**的异常。
+
+注意：接下来只会分析`ExceptionHandlerExceptionResolver`是如何根据`@ExceptionHandler`标注的方法处理异常的。
+
+### 初始化
+
+`ExceptionHandlerExceptionResolver`实现了`InitializingBean`接口，在bean实例化时会调用afterPropertiesSet()进行自定义初始化：
+
+```java
+// 一个AbstractHandlerMethodExceptionResolver通过@ExceptionHandler方法解决异常
+public class ExceptionHandlerExceptionResolver extends AbstractHandlerMethodExceptionResolver
+    implements ApplicationContextAware, InitializingBean {
+    public void afterPropertiesSet() {
+        // 1.扫描ioc容器内所有标注有@ControllerAdvice注解的bean
+        // 将标注有@ExceptionHandler的方法和其bean包装为异常解析器
+        initExceptionHandlerAdviceCache();
+
+        // 省略对参数解析器和返回值处理器的获取
+    }
+
+    private void initExceptionHandlerAdviceCache() {
+        // 省略
+        // 1.扫描@ControllerAdvice的bean并排序
+        List<ControllerAdviceBean> adviceBeans = ControllerAdviceBean.findAnnotatedBeans(getApplicationContext());
+        for (ControllerAdviceBean adviceBean : adviceBeans) {
+            Class<?> beanType = adviceBean.getBeanType();
+
+            // 找到bean中标注有@ExceptionHandler注解的方法并包装为异常解析器
+            ExceptionHandlerMethodResolver resolver = new ExceptionHandlerMethodResolver(beanType);
+            // 有异常解析器则添加到缓存中
+            if (resolver.hasExceptionMappings()) {
+                this.exceptionHandlerAdviceCache.put(adviceBean, resolver);
+            }
+            // 如果该 beanType 类型是 ResponseBodyAdvice 子类，则添加到 responseBodyAdvice 中
+            if (ResponseBodyAdvice.class.isAssignableFrom(beanType)) {
+                this.responseBodyAdvice.add(adviceBean);
+            }
+        }
+        // 省略日志打印
+    }
+}
+```
+
+这里的初始化大概步骤就是在IOC容器内找到所有的`@ControllerAdvice`的bean并找到其中的`@ExceptionHandler`注解标注的方法包装为异常解析器。
+
+### 异常处理
+
+HandlerExceptionResolver接口的异常处理方法是resolveException()，在ExceptionHandlerExceptionResolver这个异常解析器的话会来到这个方法：
+
+```java
+// ExceptionHandlerExceptionResolver.java
+// 找到一个@ExceptionHandler方法并调用它来处理引发的异常
+protected ModelAndView doResolveHandlerMethodException(HttpServletRequest request, HttpServletResponse response, @Nullable HandlerMethod handlerMethod, Exception exception) {
+    // 1.获取异常处理器方法HandlerMethod
+    ServletInvocableHandlerMethod exceptionHandlerMethod = getExceptionHandlerMethod(handlerMethod, exception);
+    if (exceptionHandlerMethod == null) return null;
+	// 2.将参数解析器和返回值处理器放入HandlerMethod中
+    if (this.argumentResolvers != null) {
+        exceptionHandlerMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);
+    }
+    if (this.returnValueHandlers != null) {
+        exceptionHandlerMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);
+    }
+
+    ServletWebRequest webRequest = new ServletWebRequest(request, response);
+    ModelAndViewContainer mavContainer = new ModelAndViewContainer();
+
+    ArrayList<Throwable> exceptions = new ArrayList<>();
+    // 省略try/catch
+
+    // 3.将异常及其原始异常cause()作为参数提供给异常处理器HandlerMethod进行参数解析
+    Throwable exToExpose = exception;
+    while (exToExpose != null) {
+        exceptions.add(exToExpose);
+        Throwable cause = exToExpose.getCause();
+        exToExpose = (cause != exToExpose ? cause : null);
+    }
+    Object[] arguments = new Object[exceptions.size() + 1];
+    exceptions.toArray(arguments);  // efficient arraycopy call in ArrayList
+    arguments[arguments.length - 1] = handlerMethod;
+    // 4.异常处理器HandlerMethod的调用
+    exceptionHandlerMethod.invokeAndHandle(webRequest, mavContainer, arguments);
+
+   	// 省略关于ModelAndView的处理
+}
+```
+
+这里比较有意思的是将异常处理器方法也包装为了HandlerMethod(前面的controller方法也是包装为这个对象)。
+
+在前面分析知道这个处理器的调用的核心逻辑是：**解析参数-->反射调用-->结果处理**。
+
+> 那么这里的处理逻辑也就明朗了，就是**将异常作为预提供的参数和请求request一起作为参数来源进行参数解析**，然后反射调用异常处理方法，并将结果以结果处理器进行处理，最终以消息转换器输出到response的响应流中。
+
+在上面的第1步如何获取异常处理器方法HandlerMethod呢？就是直接遍历所有的异常处理器，判断其`@ExceptionHandler`注解中指定的处理哪些异常来匹配的。
+
+具体查找过程下面分析。
+
+#### 寻找异常处理器
+
+在上面的异常处理中，第1步是查找异常处理器HandlerMethod，**非常巧妙的是，异常处理方法也被包装为和controller的请求处理方法一样的HandlerMethod**，这样便能复用HandlerMethod的核心处理逻辑：**解析参数-->反射调用-->结果处理**。
+
+接下来如何根据请求方法处理器和异常获得异常方法处理器：
+
+```java
+protected ServletInvocableHandlerMethod getExceptionHandlerMethod(
+    @Nullable HandlerMethod handlerMethod, Exception exception) {
+
+    Class<?> handlerType = null;
+	// 1.首先查找本地controller类中有无@ExceptionHandler标注的异常处理方法
+    if (handlerMethod != null) {
+        // Local exception handler methods on the controller class itself.
+        // To be invoked through the proxy, even in case of an interface-based proxy.
+        handlerType = handlerMethod.getBeanType();
+        ExceptionHandlerMethodResolver resolver = this.exceptionHandlerCache.get(handlerType);
+        if (resolver == null) {
+            resolver = new ExceptionHandlerMethodResolver(handlerType);
+            this.exceptionHandlerCache.put(handlerType, resolver);
+        }
+        Method method = resolver.resolveMethod(exception);
+        if (method != null) {
+            return new ServletInvocableHandlerMethod(handlerMethod.getBean(), method, this.applicationContext);
+        }
+        // For advice applicability check below (involving base packages, assignable types
+        // and annotation presence), use target class instead of interface-based proxy.
+        if (Proxy.isProxyClass(handlerType)) {
+            handlerType = AopUtils.getTargetClass(handlerMethod.getBean());
+        }
+    }
+
+    // 2.然后再查找全局的@ControllerAdvice类bean的标注的@ExcptionHandler异常处理方法
+    for (Map.Entry<ControllerAdviceBean, ExceptionHandlerMethodResolver> entry : this.exceptionHandlerAdviceCache.entrySet()) {
+        ControllerAdviceBean advice = entry.getKey();
+        if (advice.isApplicableToBeanType(handlerType)) {
+            ExceptionHandlerMethodResolver resolver = entry.getValue();
+            Method method = resolver.resolveMethod(exception);
+            if (method != null) {
+                return new ServletInvocableHandlerMethod(advice.resolveBean(), method, this.applicationContext);
+            }
+        }
+    }
+
+    return null;
+}
+```
+
+从上面逻辑可以得知，查找异常处理方法的顺序是先找本地controller类中是否有，若没有则查找全局的@ControllerAdvice类bean中的异常处理器。
+
+> 所以咱们平常写异常处理方法时，可以写在Controller类中，也能写在全局的@ControllerAdvice类中。
+
+### 总结
+
+上面分析了Spring MVC 中的 `HandlerExceptionResolver` 组件进行分析，处理器异常解析器，将处理器（ `handler` ）执行时发生的异常（也就是处理请求，执行方法的过程中发生的异常）解析（转换）成对应的 ModelAndView 结果
+
+`HandlerExceptionResolver` 的实现类没有特别多，不过也采用了组合模式，如果某个异常处理器进行处理了，也就是返回的 ModeAndView 不为 `null`（一般都是“空”对象），则直接返回该 ModeAndView 对象
+
+在 Spring MVC 和 Spring Boot 中，默认情况下都有三种 HandlerExceptionResolver 实现类，他们的顺序如下：
+
+1. `ExceptionHandlerExceptionResolver`：基于 `@ExceptionHandler` 配置 HandlerMethod 的 HandlerExceptionResolver 实现类。例如通过 `@ControllerAdvice` 注解自定义异常处理器，加上`@ExceptionHandler`注解指定方法所需要处理的异常类型，这种方式就在这个实现类中实现的。
+2. `ResponseStatusExceptionResolver`：基于 `@ResponseStatus` 提供错误响应的 HandlerExceptionResolver 实现类。例如在方法上面添加 `@ResponseStatus` 注解，指定该方法发生异常时，需要设置的 `code` 响应码和 `reason` 错误信息
+3. `DefaultHandlerExceptionResolver`：默认 HandlerExceptionResolver 实现类，针对各种异常，设置错误响应码。例如 HTTP Method 不支持，则在这个实现类中往响应中设置**错误码**和**错误信息**
+
+还要注意的就是异常处理器方法复用了之前请求处理器HandlerMethod的核心处理逻辑：**解析参数-->反射调用-->结果处理**。
+
+## 总结SpringMVC
+
+根据上面分析的：
+
+- `DispatcherServlet`：SpringMVC的分发Servlet，每个请求都会来到`doDispatch()`方法，寻找处理器HandlerMethod-->处理器适配器HandlerAdapter-->拦截器前置拦截回调-->适配器调用HandlerMethod-->参数解析-->反射调用controller的请求处理方法-->结果处理-->拦截器后置回调-->分发结果处理(含异常处理)-->拦截器完成回调。
+- `HandlerMapping`：处理器映射器，根据请求URL、请求方法、参数、路劲变量等查找controller的请求处理方法Handler和匹配到请求拦截器HandlerInterceptor，包装为HandlerMethod对象
+- `HandlerAdapter`：处理器适配器，适配调用HandlerMethod的处理方法
+- `HandlerMethod`：处理器方法，可能是**请求处理方法**，也可能是**异常处理方法**，它的核心调用逻辑是：**解析参数-->反射调用-->结果处理**。
+
+- `HandlerMethodArgumentResolver`：参数解析器，不同的参数解析器从请求request的不同地方获取参数，如请求体参数解析器会**根据content-type找到合适的消息解析器**从请求体二进制流中解析参数。
+- `HandlerMethodReturnValueHandler`：返回值处理器，将请求处理得到的返回值进行处理输出到response响应流，先以request请求头的accept头进行**内容协商**，从而找到合适的MediaType和消息转换器，然后委托消息转换器将结果序列化后输出到响应流。
+- `HttpMessageConverter`：消息转换器，参数解析和结果处理最关键的部分都是由消息转换器进行实现，它将从request请求体中获取二进制数据，以**请求头的content-type指定的形式进行解析为某种参数类型**；而响应输出时**以内容协商好的MediaType将结果序列化为该类型输出到响应流**。
+
+- `HandlerExceptionResolver`：异常解析器，有出现异常后将根据异常类型先查找本地的异常处理方法，没有再查找全局异常处理方法，包装为HandlerMethod对象的形式进行异常处理调用。
+
+像一些其它的如视图解析`ViewResolver`就懒得去分析了，反正目前在`Content-type`几乎都是`application/json`的情况下也用不到。
