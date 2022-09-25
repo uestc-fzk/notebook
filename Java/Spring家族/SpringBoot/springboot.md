@@ -6372,9 +6372,7 @@ Web 应用部署好后，Servlet 容器在启动时会加载 Web 应用，并为
 - Filter：过滤器，可以对请求和响应做一些定制化操作，如对不同国家对响应进行本地化。
 - Listener：监听器，Servlet容器运行时的各种事件发生时回调监听器，如web应用的启动停止、请求到达等。 比如 Spring 就实现了自己的监听器，来监听 ServletContext 的启动事件，目的是当 Servlet 容器启动时，创建并初始化全局的 Spring 容器。
 
-## Tomcat总体架构
-
-### 重要组件
+## 总体架构和重要组件
 
 Tomcat要实现的**2个核心组件及核心功能**：
 
@@ -6406,7 +6404,11 @@ Tomcat要实现的**2个核心组件及核心功能**：
 
 **其中Container容器和Connector连接器是实现功能的核心组件，外层的都是包装！**
 
-### Connector连接器
+更加细致的组件图如下：虚线为请求在tomcat中流转过程
+
+![tomcat组件关系](springboot.assets/tomcat组件关系.png)
+
+## Connector连接器
 
 Connector连接器屏蔽了应用层协议和IO模型等，无论HTTP还是AJP，都能返回一个标准的ServletRequest对象给容器。它的请求处理流程大致如下：
 
@@ -6485,7 +6487,7 @@ public class Connector extends LifecycleMBeanBase  {
 }
 ```
 
-#### ProtocolHandler组件
+### ProtocolHandler组件
 
 上面分析得知ProtocolHandler用来处理网络连接和应用层协议解析，包含了2个重要组件：`Endpoint`和`Processor`。
 
@@ -6497,7 +6499,7 @@ Connector默认创建的协议处理器是`Http11NioProtocol`，目前阶段只�
 
 ![ProtocolHandler](springboot.assets/ProtocolHandler-16640305471103.png)
 
-##### Endpoint组件
+#### Endpoint组件
 
 Endpoint是通信端点，处理Socket的接收和发送，是对传输层的抽象，因此 Endpoint 是用来实现 TCP/IP 协议的。
 
@@ -6512,7 +6514,241 @@ Endpoint是通信端点，处理Socket的接收和发送，是对传输层的抽
 
 > `NioEndpoint组件`很重要，这里是Socket连接请求的起点，有`acceptor`线程监听端口的socket连接，然后注册到Selector复用器上；有`poller`线程在selector复用器上监听连接事件，会将新到来的Socket请求包装为`SocketProcessor处理任务`提交到线程池，该任务的run()方法会调用协议解析组件`Processor`解析Socket请求，将字节流解析为Tomcat Request对象和Response对象。
 
-##### Processor组件
+![NioEndpoint工作过程](springboot.assets/NioEndpoint工作过程.png)
+
+在Spring内嵌Tomcat中，NioEndpoint默认只有1个线程作为Acceptor监听连接请求，1个线程作为poller检测Channel的IO事件。
+
+##### init()
+
+玛卡巴卡，先从AbstractEndpoint抽象类的init()方法走起：
+
+```java
+// AbstractEndpoint.java    
+public final void init() throws Exception {
+    if (bindOnInit) {
+        bindWithCleanup();
+        bindState = BindState.BOUND_ON_INIT;
+    }
+    // 省略部分代码
+}
+
+private void bindWithCleanup() throws Exception {
+    try {
+        bind();
+    } catch (Throwable t) {
+        // Ensure open sockets etc. are cleaned up if something goes
+        // wrong during bind
+        ExceptionUtils.handleThrowable(t);
+        unbind();
+        throw t;
+    }
+}
+```
+
+这个bind()方法呢就是新建ServerSocketChannel去绑定服务端端口，由子类实现，在NioEndpoint中如下：
+
+```java
+// NioEndpoint.java
+public void bind() throws Exception {
+    initServerSocket();
+
+    setStopLatch(new CountDownLatch(1));
+
+    // Initialize SSL if needed
+    initialiseSsl();
+}
+
+protected void initServerSocket() throws Exception {
+    // 省略其它分支流程
+    // 默认是这个分支
+    else{
+        serverSock = ServerSocketChannel.open();
+        socketProperties.setProperties(serverSock.socket());
+        InetSocketAddress addr = new InetSocketAddress(getAddress(), getPortWithOffset());
+        serverSock.bind(addr, getAcceptCount());
+    }
+    // 配置ServerSocketChannel为阻塞的
+    serverSock.configureBlocking(true); //mimic APR behavior
+}
+```
+
+可以看到NioEndpoint的初始化方法就是创建ServerSocketChannel并绑定地址端口。
+
+注意：ServerSocketChannel配置为阻塞的，说明Acceptor将以阻塞方法接受连接。
+
+##### start()
+
+AbstractEndpoint#start()方法会调用子类实现的startInternal()方法，比如NioEndpoint的是启动方法如下：
+
+```java
+// NioEndpoint.java
+// 启动 NIO 端点，创建接受器、轮询器线程
+public void startInternal() throws Exception {
+    if (!running) {
+        running = true;
+        paused = false;
+
+        if (socketProperties.getProcessorCache() != 0) {
+            processorCache = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+                                                     socketProperties.getProcessorCache());
+        }
+        if (socketProperties.getEventCache() != 0) {
+            eventCache = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+                                                 socketProperties.getEventCache());
+        }
+        if (socketProperties.getBufferPool() != 0) {
+            nioChannels = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+                                                  socketProperties.getBufferPool());
+        }
+
+        // 1.创建线程池
+        if (getExecutor() == null) {
+            createExecutor();
+        }
+		// 2.创建连接数限制器LimitLatch
+        initializeConnectionLatch();
+
+        // 3.启动Poller线程，监听Selector上注册的Channel的IO事件
+        poller = new Poller();
+        Thread pollerThread = new Thread(poller, getName() + "-Poller");
+        pollerThread.setPriority(threadPriority);
+        pollerThread.setDaemon(true);
+        pollerThread.start();
+
+        // 4.启动Acceptor线程，接受Socket连接并注册到Selector复用器上
+        startAcceptorThread();
+    }
+}
+```
+
+`Poller`这个线程一直监听在Selector复用器上，一旦某个Channel有可读事件发生，就包装为`SocketProcessor`任务丢到线程池Executor去处理，该任务run()方法会调用 `Http11Processor` 组件来读取和解析请求数据。
+
+默认情况下创建的线程池参数如下：
+
+- 核心线程数：默认10
+- 最大线程数：默认200
+- 线程空闲时间：60s
+- 阻塞队列：无界队列LinkedBlockingQueue
+
+这里有个问题：无界队列会使得线程池内线程数永远不会超过核心线程数，tomcat如何解决的呢？后面分析。
+
+##### LimitLatch连接限制器
+
+LimitLatch用来控制连接数，当连接数达到设定的限制时则阻塞Acceptor线程防止其再将新到来的连接注册到Selector复用器上。
+
+> 注意：到达最大连接数后操作系统底层还是会接收客户端连接，但用户层已经不再接收。
+
+```java
+// Acceptor线程使用的连接限制器
+public class LimitLatch {
+    private class Sync extends AbstractQueuedSynchronizer {
+        @Override
+        protected int tryAcquireShared() {
+            long newCount = count.incrementAndGet();
+            // 连接数大于限制则返回-1使其获锁失败，进入同步队列
+            if (newCount > limit) {
+                count.decrementAndGet();
+                return -1;
+            } else return 1;
+        }
+
+        @Override
+        protected boolean tryReleaseShared(int arg) {
+            count.decrementAndGet();
+            return true;
+        }
+    }
+
+    private final Sync sync;
+    private final AtomicLong count;
+    private volatile long limit;// 默认是8*1024
+
+    // 线程调用这个方法来获得接收新连接的许可，线程可能被阻塞
+    public void countUpOrAwait() throws InterruptedException {
+        sync.acquireSharedInterruptibly(1);
+    }
+
+    // 调用这个方法来释放一个连接许可，那么前面阻塞的线程可能被唤醒
+    public long countDown() {
+        sync.releaseShared(0);
+        long result = getCount();
+        return result;
+    }
+}
+```
+
+默认情况下，可以`最多支持8*1024个连接`，还挺多的。LimitLatch内部类Sync继承了AQS，关于它的同步机制这里不分析。
+
+每次Acceptor都会先调用LimitLatch#countUpOrAwait()限制连接数量，未超过限制情况下才会调用ServerSocketChannel#accept()方法等待新连接。
+
+##### Acceptor连接接收器
+
+`Acceptor`线程通过ServerSocketChannel#accept()方法等待新连接，有新连接请求则返回SocketChannel对象交给Poller注册到Selector复用器上。
+
+源码直接看就行，这里不列出了，比较简单。
+
+##### Poller轮询器
+
+`Poller`这个线程则一直监听在Selector复用器上，一旦某个Channel有可读事件发生，就包装为`SocketProcessor任务`丢到线程池Executor去处理。
+
+Poller 的另一个重要任务是循环遍历**检查自己所管理的 SocketChannel 是否已经超时**，如果有超时就关闭这个 SocketChannel。
+
+源码直接看就行，这里不列出了，比较简单。
+
+##### SocketProcessor处理任务
+
+Poller线程监听到IO事件后将其封装为SocketProcessor任务交给线程池去处理。
+
+该任务的run()方法会调用Processor应用层协议处理器如Http11Processor组件去读取Channel的数据解析生成Tomcat Request对象。
+
+然后将Tomcat Request对象以Adapter组件转换为ServletRequest对象和ServletResponse对象交给Servlet容器处理请求，最终会调用Servlet#service()方法进行业务处理。
+
+源码直接看就行，这里不列出了，比较简单。
+
+##### 定制版线程池
+
+NioEndpoint组件中这个线程池负责执行SocketProcessor任务，这个任务的整个执行流程最终会来到Servlet#service()的业务处理，所以这个线程池是整个Web处理的线程池，其参数就显得很重要了。
+
+在NioEndpoint#start()方法得知默认情况下创建的线程池参数如下：
+
+- 核心线程数：默认10
+- 最大线程数：默认200
+- 线程空闲时间：60s
+- 阻塞队列：无界队列LinkedBlockingQueue
+
+```yaml
+server:
+  port: 8080
+  tomcat:
+    threads:
+      min-spare: 10 # 线程池核心线程数
+      max: 200 # 线程池最大线程池
+```
+
+> 在SpringBoot嵌入式Tomcat容器可以直接以yaml配置文件方式修改线程池线程数量，可以闲的没事的时候调一调。
+
+有个问题：当前线程数达到核心线程数之后，再来任务的话线程池会把任务添加到无界任务队列，并且总是会成功，这样永远不会有机会创建新线程了。
+
+先看看NioEndpoint创建线程池的方法：
+
+```java
+// AbstractEndpoint.java  
+public void createExecutor() {
+    internalExecutor = true;
+    // 1.自定义TaskQueue继承了LinkedBlockingQueue
+    TaskQueue taskqueue = new TaskQueue();
+    TaskThreadFactory tf = new TaskThreadFactory(getName() + "-exec-", daemon, getThreadPriority());
+    // 2.这个ThreadPoolExecutor不是来自于jdk的，而是Tomcat自定义的，继承自AbstractExecutorService
+    executor = new ThreadPoolExecutor(getMinSpareThreads(), getMaxThreads(), 60, TimeUnit.SECONDS,taskqueue, tf);
+    taskqueue.setParent( (ThreadPoolExecutor) executor);
+}
+```
+
+相当于Tomcat自定义了ThreadPoolExecutor和任务队列。这样它就能根据需求重写线程池的execute()方法和阻塞队列的offer()方法了，从而实现了在无界任务队列情况下的非核心线程的创建。
+
+还没分析完，明天继续。
+
+#### Processor组件
 
 Endpoint是实现TCP/IP协议的socket连接处理的，而Processor组件是解析应用层协议的，根据Socket连接得到的请求数据解析成不同的协议信息。由上面分析得知解析过程以线程池进行的并发处理。
 
@@ -6534,7 +6770,7 @@ public interface Processor {
 
 具体的协议解析部分在其实现类如Http11Processor解析HTTP/1.1。
 
-#### Adapter组件
+### Adapter组件
 
 由于应用层协议不同，Tomcat定义了自己的Request类存放这些请求信息，ProtocolHandler负责接受请求并解析协议生成Tomcat的Request对象，但这并不是Servlet规范标准的ServletRequest，所以引入了CoyoteAdapter适配器，Connector连接器调用CoyoteAdapter的service()方法将Tomcat Request对象转换成ServletRequest，再去调用Servlet容器的service()方法。
 
@@ -6566,11 +6802,18 @@ public class CoyoteAdapter implements Adapter {
             // Set query string encoding
             req.getParameters().setQueryStringCharset(connector.getURICharset());
         }
-        
+
         // 2.省略：将request和response放入Tomcat的Service的Servlet容器中进行调用处理
+
+        // 将转换后的request和response交给servlet容器去处理
+        connector.getService().getContainer().getPipeline().getFirst().invoke(
+            request, response);
+        // 省略很多代码
     }
 }
 ```
+
+这里的关于Servlet容器的Pipeline后面在Servlet容器部分进行分析，它是一种责任链模式。
 
 这个转换操作是适配器模式的经典实现：
 
@@ -6583,7 +6826,7 @@ public class CoyoteAdapter implements Adapter {
 
 这就是适配器模式！
 
-#### 一些问题
+### 一些问题
 
 问题1：为什么Connector连接器产生的是coyote.Request对象，而不直接产生ServletRequest对象呢，为什么宁愿去多用1层Adapter进行转换呢？
 
@@ -6603,11 +6846,11 @@ public class CoyoteAdapter implements Adapter {
 
 > AJP可以理解为应用层协议，它是用二进制的方式来传输文本，比如HTTP的请求头“accept-language”有15个字符，如果用二进制0xA004表示只有2个字节，效率大大提升。
 
-### Servlet容器
+## Servlet容器
 
 上面分析的Connector连接器处理Socket通信和应用层协议解析，并经过Adapter转换为ServletRequest对象和ServletResponse对象，然后将这两个对象交由Servlet容器的某个Servlet进行业务处理。
 
-#### 容器层次架构
+### 容器层次架构
 
 ```java
 /*
@@ -6632,11 +6875,384 @@ Tomcat 通过一种分层的架构，使得 Servlet 容器具有很好的灵活�
 
 Context 表示一个 Web 应用程序；Wrapper 表示一个 Servlet，一个 Web 应用程序中可能会有多个 Servlet；Host 代表的是一个虚拟主机，或者说一个站点，可以给 Tomcat 配置多个虚拟主机地址，而一个虚拟主机下可以部署多个 Web 应用程序；Engine 表示引擎，用来管理多个虚拟站点，一个 Service 最多只能有一个 Engine。
 
-#### 请求定位Servlet
+### 请求定位Servlet
 
 设计了这么多层次的容器，Tomcat如何定位到具体哪个Wrapper里的Servlet来处理的呢？
 
 通过Mapping组件，将用户请求的URL定位到一个Servlet，它的工作原理是：Mapper 组件里保存了 Web 应用的配置信息，其实就是容器组件与访问路径的映射关系，比如 Host 容器里配置的域名、Context 容器里的 Web 应用路径，以及 Wrapper 容器里 Servlet 映射的路径，你可以想象这些配置信息就是一个多层次的 Map。
+
+Request和Response来到容器的入口点在上面分析Adapter组件时在转换了request对象为ServletRequest对象后，调用了Servlet容器的Pipeline责任链处理：
+
+```java
+connector.getService().getContainer().getPipeline().getFirst().invoke(request, response);
+```
+
+这里Adapter首先拿到的是顶层容器`StandardEngine`，Engine 容器对请求做一些处理后，会把请求传给自己子容器 Host 继续处理，依次类推，最后这个请求会传给 Wrapper 容器，Wrapper 会调用最终的 Servlet 来处理。
+
+这个过程通过使用 `Pipeline-Valve` 管道，责任链模式处理：
+
+![ContainerPipeline](springboot.assets/ContainerPipeline.png)
+
+Value表示一个处理点，在不同层级容器的pipeline中执行各个职责：
+
+```java
+/**
+ * Valve是与特定容器相关联的请求处理组件。一系列Value通常相互关联成一个管道。
+ */
+public interface Valve {
+    // 返回容器pipeline的此Value后的下一个Value
+    public Valve getNext();
+
+    // 设置容器pipeline的此Value的下一个Value
+    public void setNext(Valve valve);
+
+
+    /**
+     * 执行此Value要求的请求处理
+     * 单个Value按顺序执行以下操作：
+     * 1.检查和/或修改指定请求和响应的属性。
+     * 2.检查指定Request的属性，完整生成对应的Response，并将控制权返回给调用者。
+	 * 3.检查指定请求和响应的属性，包装这些对象中的一个或两个以补充它们的功能，然后传递它们。
+	 * 4.如果没有生成相应的响应（并且没有返回控制），则通过执行getNext().invoke() 。
+	 * 5.检查但不修改结果响应的属性（由随后调用的 Valve 或 Container 创建）。
+     */
+    public void invoke(Request request, Response response)
+        throws IOException, ServletException;
+}
+```
+
+这个invoke方法会调用getNext().invoke()将执行链向后推进。
+
+```java
+/**
+ * 描述在invoke()方法时应按顺序执行的 Valve 集合的接口。
+ * 通常每个 Container 都关联一个 Pipeline 实例。
+ * 容器的正常请求处理功能一般都封装在容器特定的 Valve 中，它应该始终在管道的末端执行。
+ * 为此，提供了setBasic()方法来设置始终最后执行的 Valve 实例。在执行基本 Valve 之前，其他 Valve 将按照添加的顺序执行。
+ */
+public interface Pipeline extends Contained {
+
+    // 此pipeline的basic实例，指向下一层容器的pipeline的第一个Value
+    public Valve getBasic();
+    public void setBasic(Valve valve);
+
+    // 在此Container关联的Pipeline的管道末端basic Value之前添加新Value
+    public void addValve(Valve valve);
+
+    // 返回此pipeline所有Value
+    public Valve[] getValves();
+
+    // 返回此pipeline的首个Value
+    public Valve getFirst();
+}
+```
+
+Wrapper容器的最后一个Value会创建Filter链，调用doFilter方法，最终会执行到该wrapper保证的Servlet的service()方法。
+
+**Value和Filter的区别？Value似乎与Filter有相似功能？**
+
+- **Valve 是 Tomcat 的私有机制**，与 Tomcat 的基础架构 API 是紧耦合的。**Servlet API 是公有的标准，所有的 Web 容器包括 Jetty 都支持 Filter 机制。**
+- 另一个重要的区别是 **Valve 工作在 Web 容器级别，拦截所有应用的请求**；而 **Servlet Filter 工作在应用级别，只能拦截某个 Web 应用的所有请求**。如果想做整个 Web 容器的拦截器，必须通过 Valve 来实现。
+
+### 多层级pipeline执行
+
+上面分析了多层级容器如何最终定位到Servlet的理论，接下来从代码层面细致分析具体如下执行层级pipeline的：
+
+#### 1、CoyoteAdapter
+
+```java
+// CoyoteAdapter.java
+// 将Tomcat的request对象转换为HttpServletRequest
+public class CoyoteAdapter implements Adapter {
+
+    public void service(org.apache.coyote.Request req, org.apache.coyote.Response res)
+        throws Exception {
+        // 这个Request是HttpServletRequest的子类...
+        Request request = (Request) req.getNote(ADAPTER_NOTES);
+        Response response = (Response) res.getNote(ADAPTER_NOTES);
+
+        if (request == null) {
+            // 说白了就是以子类继承HttpServletRequest，同时将coyote.Request对象包装进去
+            request = connector.createRequest();
+            request.setCoyoteRequest(req);
+            response = connector.createResponse();
+            response.setCoyoteResponse(res);
+
+            // Link objects
+            request.setResponse(response);
+            response.setRequest(request);
+
+            // Set as notes
+            req.setNote(ADAPTER_NOTES, request);
+            res.setNote(ADAPTER_NOTES, response);
+
+            // Set query string encoding
+            req.getParameters().setQueryStringCharset(connector.getURICharset());
+        }
+
+        // 2.省略：将request和response放入Tomcat的Service的Servlet容器中进行调用处理
+
+        // 将转换后的request和response交给servlet容器去处理
+        connector.getService().getContainer().getPipeline().getFirst().invoke(
+            request, response);
+        // 省略很多代码
+    }
+}
+```
+
+Adapter转换了request和response对象后，调用了其所属Connector的Service下的Servlet顶层容器StandardEngine的pipeline进行处理。
+
+![image-20220925102805920](springboot.assets/image-20220925102805920.png)
+
+从该图可知该顶层StandardEngine的pipeline仅有1个basic Value，即StardardEngineValue。
+
+#### 2、StandardEngineValue
+
+接下来进入StandardEngine容器
+
+```java
+// StardardEngineValue.java
+// 根据请求的hostname选择某个子host容器处理该请求，找不到就404
+public final void invoke(Request request, Response response)
+    throws IOException, ServletException {
+
+    // 1.找到合适的host子容器
+    Host host = request.getHost();
+    // 找不到就404
+    if (host == null) {
+        if (!response.isError()) 
+            response.sendError(404);
+        return;
+    }
+    if (request.isAsyncSupported()) {
+        request.setAsyncSupported(host.getPipeline().isAsyncSupported());
+    }
+
+    // 2.传递给该host容器的pipeline处理
+    host.getPipeline().getFirst().invoke(request, response);
+}
+```
+
+![image-20220925103143221](springboot.assets/image-20220925103143221.png)
+
+该host容器的pipeline有2个Value处理器了
+
+- ErrorReportValue：这个异常处理器是Tomcat层面的异常处理器，处理后面的Servlet抛出异常，响应Tomact异常页面
+  ```java
+  // ErrorReportValue.java  
+  // 调用序列中的下一个 Valve。当调用返回时，检查响应状态。如果状态码大于等于 400 或抛出了未捕获的异常，则触发错误处理
+  public void invoke(Request request, Response response) throws IOException, ServletException {
+      // Perform the request
+      getNext().invoke(request, response);
+      // 省略后面的状态码或异常处理
+  }
+  ```
+
+- StandardHostValue：host容器的basic value
+
+#### 3、StandardHostValue
+
+接下来进入Host容器
+
+```java
+// StandardHostValue
+// 根据指定的请求 URI，选择适当的子Context容器来处理此请求。如果找不到匹配的上下文，则返回适当的 HTTP 错误。
+public final void invoke(Request request, Response response)
+    throws IOException, ServletException {
+
+    // 1.查找该请求匹配的子Context容器
+    Context context = request.getContext();
+    // 没找到就404
+    if (context == null) {
+        if (!response.isError()) 
+            response.sendError(404);
+        return;
+    }
+
+    if (request.isAsyncSupported()) {
+        request.setAsyncSupported(context.getPipeline().isAsyncSupported());
+    }
+
+    boolean asyncAtStart = request.isAsync();
+
+    try {
+        // 2.前线程上下文类加载器更改为 Web 应用程序类加载器
+        context.bind(Globals.IS_SECURITY_ENABLED, MY_CLASSLOADER);
+
+        // 省略很多代码
+
+        // 3.该context容器的pipeline进行处理
+        if (!response.isErrorReportRequired()) {
+            context.getPipeline().getFirst().invoke(request, response);
+        }
+
+        // 省略很多代码
+    } finally {
+        // Access a session (if present) to update last accessed time, based
+        // on a strict interpretation of the specification
+        if (ACCESS_SESSION)
+            request.getSession(false);
+        
+        // 4.线程上下文类加载器
+        context.unbind(Globals.IS_SECURITY_ENABLED, MY_CLASSLOADER);
+    }
+}
+```
+
+![image-20220925104430713](springboot.assets/image-20220925104430713.png)
+
+从该图可知此Host容器的pipeline有2个Value处理器：
+
+- NonLoginAuthenticator：这个登录验证的处理器怎么用啊？我看好像是根据session进行的处理。
+- StandardContextValue
+
+#### 4、StandardContextValue
+
+接下来进入Context容器
+
+```java
+// StandardContextValue.java    
+// 根据指定的请求 URI，选择适当的子 Wrapper 来处理此请求。如果找不到匹配的 Wrapper，则返回适当的 HTTP 错误。
+public final void invoke(Request request, Response response)
+    throws IOException, ServletException {
+
+    // 1.禁止任何对WEB-INF或META-INF资源的访问
+    MessageBytes requestPathMB = request.getRequestPathMB();
+    if ((requestPathMB.startsWithIgnoreCase("/META-INF/", 0))
+        || (requestPathMB.equalsIgnoreCase("/META-INF"))
+        || (requestPathMB.startsWithIgnoreCase("/WEB-INF/", 0))
+        || (requestPathMB.equalsIgnoreCase("/WEB-INF"))) {
+        response.sendError(HttpServletResponse.SC_NOT_FOUND);
+        return;
+    }
+
+    // 2.选择合适的wrapper容器，就是选择Servlet了
+    Wrapper wrapper = request.getWrapper();
+    // 没找到404
+    if (wrapper == null || wrapper.isUnavailable()) {
+        response.sendError(HttpServletResponse.SC_NOT_FOUND);
+        return;
+    }
+
+    // 对请求发送ACK，这个我没搞懂？
+    // 省略try/catch
+    response.sendAcknowledgement(ContinueResponseTiming.IMMEDIATELY);
+
+
+    if (request.isAsyncSupported()) {
+        request.setAsyncSupported(wrapper.getPipeline().isAsyncSupported());
+    }
+    // 3.执行该wrapper容器的pipeline
+    wrapper.getPipeline().getFirst().invoke(request, response);
+}
+```
+
+![image-20220925105208274](springboot.assets/image-20220925105208274.png)
+
+从图可知，该Context容器只有StandardWrapperValue一个处理点。
+
+#### 5、StandardWrapperValue
+
+接下来进入wrapper容器，在SpringMVC的中，这个包含了DispatcherServlet。
+
+```java
+// StandardWrapper.java
+// 调用我们正在管理的 servlet，遵守有关 servlet 生命周期和 SingleThreadModel 支持的规则
+public final void invoke(Request request, Response response)
+    throws IOException, ServletException {
+
+    // Initialize local variables we may need
+    boolean unavailable = false;
+    Throwable throwable = null;
+    // This should be a Request attribute...
+    long t1=System.currentTimeMillis();
+    requestCount.incrementAndGet();
+    StandardWrapper wrapper = (StandardWrapper) getContainer();
+    Servlet servlet = null;
+    Context context = (Context) wrapper.getParent();
+
+    // 1.获取Servlet实例，若Servlet尚未实例化则会调用其Servlet规范的init()方法
+    // 省略try/catch
+    if (!unavailable) {
+        servlet = wrapper.allocate();
+    }
+
+	// 省略很多代码
+    
+    // 2.创建此请求的Filter过滤器链
+    ApplicationFilterChain filterChain =
+        ApplicationFilterFactory.createFilterChain(request, wrapper, servlet);
+
+    // Call the filter chain for this request
+    // NOTE: This also calls the servlet's service() method
+    Container container = this.container;
+
+    // 省略try/catch/finally
+    if ((servlet != null) && (filterChain != null)) {
+        // 省略很多代码
+        // 3.过滤器链的执行，最终会调用Servlet#service()方法
+        filterChain.doFilter
+            (request.getRequest(), response.getResponse());
+        // 省略很多代码
+    }
+}
+```
+
+此时filterChain对象如下：
+
+![image-20220925193932952](springboot.assets/image-20220925193932952.png)
+
+在执行完前面4个过滤器后，就会调用DispatcherServlet#service()方法。
+
+#### 6、FilterChain执行
+
+ApplicationFilterChain执行过程如下：
+
+```java
+// ApplicationFilterChain.java
+private void internalDoFilter(ServletRequest request,
+                              ServletResponse response)
+    throws IOException, ServletException {
+
+    // 1.执行Filter
+    if (pos < n) {
+        ApplicationFilterConfig filterConfig = filters[pos++];
+        // 省略一堆代码
+        Filter filter = filterConfig.getFilter();
+        // 省略一堆代码
+        filter.doFilter(request, response, this);
+        // 省略一堆代码
+        return;
+    }
+
+	// 省略try/catch
+    // 2.Filter链执行完执行 Servlet#service()方法
+    servlet.service(request, response);
+	// 省略一堆代码
+}
+```
+
+## 组件生命周期
+
+组件生命周期指Tomcat各个组件如Connector连接器、多层级Servlet容器的这些组件的生命周期。它们都实现了LifeCycle接口：
+
+```java
+// 组件生命周期通用件接口
+public interface Lifecycle {
+    // 初始化组件
+    public void init() throws LifecycleException;
+    // 启动组件
+    public void start() throws LifecycleException;
+    // 优雅的停止组件
+    public void stop() throws LifecycleException;
+    // 销毁组件
+    public void destroy() throws LifecycleException;
+}
+```
+
+各个父组件的init()或start()方法会发出不同状态的事件，同时调用其子组件相应的生命周期方法。
+
+![lifeCycleBase](springboot.assets/lifeCycleBase.png)
 
 
 
