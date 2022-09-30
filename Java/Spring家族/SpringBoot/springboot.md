@@ -6269,7 +6269,7 @@ public void stop() throws WebServerException {
 
 > **ServletContainerInitializer** 也是 Servlet 3.0 新增的一个接口，容器在启动时使用 JAR 服务 API(JAR Service API) 来发现 **ServletContainerInitializer** 的实现类，并且容器将 WEB-INF/lib 目录下 JAR 包中的类都交给该类的 `onStartup()` 方法处理，我们通常需要在该实现类上使用 @HandlesTypes 注解来指定希望被处理的类，过滤掉不希望给 `onStartup()` 处理的类。
 
-# Tomcat
+# Tomcat原理
 
 > 注意：这里将根据源码直接分析嵌入式Tomcat
 >
@@ -6404,9 +6404,13 @@ Tomcat要实现的**2个核心组件及核心功能**：
 
 **其中Container容器和Connector连接器是实现功能的核心组件，外层的都是包装！**
 
-更加细致的组件图如下：虚线为请求在tomcat中流转过程
+更加细致的组件图如下：**虚线为请求在tomcat中流转过程**
 
 ![tomcat组件关系](springboot.assets/tomcat组件关系.png)
+
+整个请求的处理流程图如下：虚线部分是各个方法出栈处理以及WebSocket协议升级处理。
+
+![WebSocket握手](springboot.assets/WebSocket握手.png)
 
 ## Connector连接器
 
@@ -6499,7 +6503,7 @@ Connector默认创建的协议处理器是`Http11NioProtocol`，目前阶段只�
 
 ![ProtocolHandler](springboot.assets/ProtocolHandler-16640305471103.png)
 
-#### Endpoint组件
+#### NioEndpoint组件
 
 Endpoint是通信端点，处理Socket的接收和发送，是对传输层的抽象，因此 Endpoint 是用来实现 TCP/IP 协议的。
 
@@ -6746,7 +6750,355 @@ public void createExecutor() {
 
 相当于Tomcat自定义了ThreadPoolExecutor和任务队列。这样它就能根据需求重写线程池的execute()方法和阻塞队列的offer()方法了，从而实现了在无界任务队列情况下的非核心线程的创建。
 
-还没分析完，明天继续。
+先简单看看自定义ThreadPoolExecutor的提交任务方法：
+
+```java
+// org.apache.tomcat.util.threads.ThreadPoolExecutor.java
+private void executeInternal(Runnable command) {
+    if (command == null) {
+        throw new NullPointerException();
+    }
+
+    int c = ctl.get();
+    // 1.如果线程池不足核心线程数则直接创建线程并将任务委托给新线程
+    if (workerCountOf(c) < corePoolSize) {
+        if (addWorker(command, true)) {
+            return;
+        }
+        c = ctl.get();
+    }
+    // 2.调用TaskQueue的offer()方法提交任务
+    if (isRunning(c) && workQueue.offer(command)) {
+        int recheck = ctl.get();
+        if (! isRunning(recheck) && remove(command)) {
+            reject(command);
+        } else if (workerCountOf(recheck) == 0) {
+            addWorker(null, false);
+        }
+    }
+    // 3.若直接offer()提交失败，则尝试新增非核心worker线程
+    else if (!addWorker(command, false)) {
+        reject(command);
+    }
+}
+```
+
+从这里来看，这个TaskQueue#offer()方法必须在一些情况下提交失败返回false，这样才能创建非核心线程：
+
+```java
+// org.apache.tomcat.util.threads.TaskQueue.java 
+public boolean offer(Runnable o) {
+    // 这个parent属性，其实指向了上面的ThreadPoolExecutor线程池
+    if (parent==null) {
+        return super.offer(o);
+    }
+    // 1、如果线程池已满，这直接放入无界队列
+    if (parent.getPoolSize() == parent.getMaximumPoolSize()) {
+        return super.offer(o);
+    }
+    // 2.如果当前处理中任务数量少于线程数量，即有空闲线程，则直接放入无界队列
+    if (parent.getSubmittedCount()<=(parent.getPoolSize())) {
+        return super.offer(o);
+    }
+    // 3、如果线程数量未达到限制，且此时无空闲线程，则返回false
+    if (parent.getPoolSize()<parent.getMaximumPoolSize()) {
+        return false;
+    }
+    //if we reached here, we need to add it to the queue
+    return super.offer(o);
+}
+
+```
+
+**显然，TaskQueue在线程池中无空闲线程时且未达到线程池数量限制时返回false，这将使得线程池新建非核心线程，这样就在使用无界队列时，也能自由的控制核心和非核心线程数量了。**
+
+> 因此，自定义线程池和任务队列的目的就是在使用无界队列情况下，线程池依旧具有伸缩性。
+
+#### Nio2Endpoint异步组件
+
+在分析Nio2Endpoint之前，需要先了解使用Nio2如何使用，才能理解下面调用的各个API。
+
+在上面分析了NioEndpoint组件，它是SpringWebMvc嵌入式Tomcat默认创建的组件，而Nio2Endpoint异步组件则是SpringWebFlux会使用的组件。
+
+> Nio2相比于Nio是异步处理的，即应用程序不需要自己去**触发**数据从内核空间到用户空间的**拷贝**，从而**没有**NioEndpoint中的**Poller线程**监听Selector复用器，其工作由内核完成了。
+
+![Nio2处理过程](springboot.assets/Nio2处理过程.png)
+
+因为应用程序不能访问内核空间，因此数据从内核缓存拷贝到用户缓存必须由内核完成，哪谁来触发呢？
+
+- Nio：通过Selector查询数据就绪后，应用程序发起read调用，应用程序线程阻塞直至内核完成数据拷贝
+- Nio2：应用程序在调用 read API 的同时告诉内核两件事情：数据准备好了以后拷贝到哪个 Buffer，以及调用哪个回调函数去处理这些数据。
+  内核接到这个 read 指令后，等待网卡数据到达，数据到了后，产生硬件中断，内核在中断程序里把数据从网卡拷贝到内核空间，接着做 TCP/IP 协议层面的数据解包和重组，再把数据拷贝到应用程序指定的 Buffer，最后调用应用程序指定的回调函数。
+
+可以看到Nio2相比于Nio应用线程阻塞更少了，内核更忙了，但是大幅提高了IO通信效率。
+
+![NioEndpoint2](springboot.assets/NioEndpoint2.png)
+
+整体上看和NioEndpoint工作流程相似，不过没有了Poller线程，而且处理全部转为了异步。
+
+Nio2Endpoint 中没有 Poller 组件，也就是没有 Selector。因为在异步 I/O 模式下，Selector 的工作交给内核来做了。
+
+> 注意：Nio2Endpoint中没有专门的Nio2Acceptor线程，所有的处理全部运行在Tomcat 的线程池中。
+
+##### init()
+
+玛卡巴卡，先从AbstractEndpoint抽象类的init()方法走起：
+
+```java
+// AbstractEndpoint.java    
+public final void init() throws Exception {
+    if (bindOnInit) {
+        bindWithCleanup();
+        bindState = BindState.BOUND_ON_INIT;
+    }
+    // 省略部分代码
+}
+
+private void bindWithCleanup() throws Exception {
+    try {
+        bind();
+    } catch (Throwable t) {
+        // Ensure open sockets etc. are cleaned up if something goes
+        // wrong during bind
+        ExceptionUtils.handleThrowable(t);
+        unbind();
+        throw t;
+    }
+}
+```
+
+这个bind()方法在Nio2Endpoint中就是创建`AsynchronousServerSocketChannel`并绑定端口、绑定线程池：
+
+```java
+// Nio2Endpoint.java
+public void bind() throws Exception {
+    // 1.创建线程池
+    if (getExecutor() == null) {
+        createExecutor();
+    }
+    // 2.将线程池绑定到异步通道组
+    if (getExecutor() instanceof ExecutorService) {
+        threadGroup = AsynchronousChannelGroup.withThreadPool((ExecutorService) getExecutor());
+    }
+
+    // 3.创建异步服务器通道，并绑定端口
+    serverSock = AsynchronousServerSocketChannel.open(threadGroup);
+    socketProperties.setProperties(serverSock);
+    InetSocketAddress addr = new InetSocketAddress(getAddress(), getPortWithOffset());
+    serverSock.bind(addr, getAcceptCount());
+
+    // Initialize SSL if needed
+    initialiseSsl();
+}
+```
+
+很显然，在异步Nio2Endpoint中接受连接、解析应用层协议、业务处理都由线程池执行。
+
+##### start()
+
+```java
+// Nio2Endpoint.java
+public void startInternal() throws Exception {
+    if (!running) {
+        allClosed = false;
+        running = true;
+        paused = false;
+
+        if (socketProperties.getProcessorCache() != 0) {
+            processorCache = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+                                                     socketProperties.getProcessorCache());
+        }
+        if (socketProperties.getBufferPool() != 0) {
+            nioChannels = new SynchronizedStack<>(SynchronizedStack.DEFAULT_SIZE,
+                                                  socketProperties.getBufferPool());
+        }
+
+        // Create worker collection
+        if (getExecutor() == null) {
+            createExecutor();
+        }
+        // 1.初始化连接限制器LimitLatch
+        initializeConnectionLatch();
+        // 2.启动Acceptor任务
+        // 注意这里并没有新建线程，而是以任务形式交给线程池执行
+        startAcceptorThread();
+    }
+}
+// 并不会创建新线程，而是交由线程池进行异步接受accept()操作
+protected void startAcceptorThread() {
+    if (acceptor == null) {
+        acceptor = new Nio2Acceptor(this);
+        acceptor.setThreadName(getName() + "-Acceptor");
+    }
+    acceptor.state = AcceptorState.RUNNING;
+    getExecutor().execute(acceptor);// 提交任务到线程池
+}
+```
+
+##### Nio2Acceptor异步连接接收器
+
+由上面的start()方法可知，Acceptor不再是单独线程，而是有线程池去执行。
+
+```java
+// org.apache.tomcat.util.net.Nio2Endpoint.Nio2Acceptor.java
+protected class Nio2Acceptor extends Acceptor<AsynchronousSocketChannel>
+    implements CompletionHandler<AsynchronousSocketChannel, Void> {
+
+    protected int errorDelay = 0;
+    @Override
+    public void run() {
+        // 省略了各种条件判断和状态检查、try/catch/finally
+        // 保留核心逻辑如下
+        if (!isPaused()) {
+            // 1.连接数限制
+            countUpOrAwaitConnection();
+
+            // 2.异步accept，这里调用了就立刻返回，注册了连接到达的处理器为本身
+            serverSock.accept(null, this);
+        }
+    }
+
+    // 当新连接到达时将以异步服务端通道绑定的线程池回调此函数
+    public void completed(AsynchronousSocketChannel socket,
+                          Void attachment) {
+		// 省略部分代码
+        if (isRunning() && !isPaused()) {
+            // 1.继续异步接受新连接
+            if (getMaxConnections() == -1) {
+                serverSock.accept(null, this);// 连接数无限制则直接继续异步接受
+            } else if (getConnectionCount() < getMaxConnections()) {
+                // 这里必然不会阻塞，因为已经判断连接数小于限制了
+                countUpOrAwaitConnection();
+                serverSock.accept(null, this);// 直接继续异步接受
+            } else {
+                // 达到连接数限制了，就在线程池里跑run方法，run方法会检查连接数并阻塞
+                getExecutor().execute(this);
+            }
+            // 2.处理这个连接请求
+            if (!setSocketOptions(socket)) {
+                closeSocket(socket);// 处理失败则关闭连接
+            }
+        } 
+        // 省略部分代码
+    }
+}
+```
+
+当新连接到达时，competed()方法将以异步服务端通道绑定的线程池回调，会创建 Nio2SocketWrapper 和 SocketProcessor，并交给线程池处理。
+
+**为什么这里要先调用accept()方法继续接受连接呢？**不能处理连接请求之后再调用accept()方法吗？
+
+因为从节省线程切换角度考虑，处理连接请求这个方法将继续使用这个线程进行处理，而不是包装为任务放入线程池。accept()方法是异步的，所以最好提前调用立刻异步监听新连接，这也不会产生阻塞影响后续操作。
+
+##### Nio2SocketWrapper
+
+Nio2SocketWrapper 的主要作用是封装 Channel，并提供接口给 Http11Processor 读写数据。
+
+一个疑问：Http11Processor 是不能阻塞等待数据的，按照异步 I/O 的套路，Http11Processor 在调用 Nio2SocketWrapper 的 read 方法时需要注册回调类，read 调用会立即返回，问题是立即返回后 Http11Processor 还没有读到数据，怎么办呢？这个请求的处理不就失败了吗？
+
+为了解决这个问题，Http11Processor 是通过 2 次 read 调用来完成数据读取操作的。
+
+- 第一次 read 调用：连接刚刚建立好后，Acceptor 创建 SocketProcessor 任务类交给线程池去处理，Http11Processor 在处理请求的过程中，会调用 Nio2SocketWrapper 的 read 方法发出第一次读请求，同时注册了回调类 readCompletionHandler，因为数据没读到，Http11Processor 把当前的 Nio2SocketWrapper 标记为数据不完整。接着 SocketProcessor 线程被回收，Http11Processor 并没有阻塞等待数据。这里请注意，Http11Processor 维护了一个 Nio2SocketWrapper 列表，也就是维护了连接的状态。
+
+- 第二次 read 调用：当数据到达后，内核已经把数据拷贝到 Http11Processor 指定的 Buffer 里，同时回调类 readCompletionHandler 被调用，在这个回调处理方法里会重新创建一个新的 SocketProcessor 任务来继续处理这个连接，而这个新的 SocketProcessor 任务类持有原来那个 Nio2SocketWrapper，这一次 Http11Processor 可以通过 Nio2SocketWrapper 读取数据了，因为数据已经到了应用层的 Buffer。
+
+这个回调类 readCompletionHandler 的源码如下，最关键的一点是，Nio2SocketWrapper 是作为附件类来传递的，这样在回调函数里能拿到所有的上下文。
+
+```java
+this.readCompletionHandler = new CompletionHandler<Integer, SocketWrapperBase<Nio2Channel>>() {
+    public void completed(Integer nBytes, SocketWrapperBase<Nio2Channel> attachment) {
+        ...
+            //通过附件类SocketWrapper拿到所有的上下文
+            Nio2SocketWrapper.this.getEndpoint().processSocket(attachment, SocketEvent.OPEN_READ, false);
+    }
+
+    public void failed(Throwable exc, SocketWrapperBase<Nio2Channel> attachment) {
+        ...
+    }
+}
+```
+
+#### AprEndpoint
+
+在上面的NioEndpoint或Nio2Endpoint都会经历数据从：`网卡 --copy--> 内核内存 --copy--> 本地内存 --copy--> 堆内存`的过程，而Apr则通过**直接内存**避免了本地内存到堆内存的拷贝。
+
+`APR（Apache Portable Runtime Libraries）`是 Apache 可移植运行时库，用 **C 语言实现**的，其目的是向上层应用程序提供一个跨平台的操作系统接口库。
+
+Tomcat 可以用它来处理包括文件和网络 I/O，从而提升性能，**在网络交互中，Java与C存在一定差距**。
+
+跟 NioEndpoint 一样，AprEndpoint 也实现了非阻塞 I/O，它们的区别是：NioEndpoint 通过调用 Java 的 NIO API 来实现非阻塞 I/O，而 AprEndpoint 是通过 JNI 调用 APR 本地库而实现非阻塞 I/O 的。
+
+![AprEndpoint处理过程](springboot.assets/AprEndpoint处理过程.png)
+
+AprEndpoint和NioEndpoint处理流程类似，组件也差不多类似，但是ServerChannel的实现不同：
+
+```java
+// org.apache.tomcat.jni.Socket.java
+public class Socket {
+    /**
+     * 创建套接字
+     * @param family 套接字的地址族（例如，APR_INET）
+     * @param type 套接字的类型（例如 SOCK_STREAM）。
+     * @param protocol 接字的协议(例如，APR_PROTO_TCP)
+     * @param cont 要使用的父池
+     * @return 创建的套接字地址
+     */
+    public static native long create(int family, int type,
+                                     int protocol, long cont);
+	// 将套接字绑定到其关联的端口
+    public static native int bind(long sock, long sa);
+	// 侦听绑定的套接字以进行连接
+    public static native int listen(long sock, int backlog);
+	// 接受新的连接请求
+    public static native long accept(long sock)
+}
+```
+
+这些都是由C语言实现，Tomcat通过JNI（Java Native Interface）方式调用Apr程序。
+
+##### Apr高性能-零拷贝
+
+1、APR 连接器之所以能提高 Tomcat 的性能，**首先是因为APR本身是C程序库**。
+
+2、NioEndpoint或Nio2Endpoint使用**堆内存HeapByteBuffer**来接受网络数据，都会经历数据从：`网卡 --copy--> 内核内存 --copy--> 本地内存 --copy--> 堆内存`的过程，而Apr则通过**直接内存DirectByteBuffer**避免了本地内存到堆内存的拷贝，减少了不必要的拷贝次数。
+
+NioEndpoint不用本地内存DirectByteBuffer的原因可能是本地内存不好管理，发生内存泄漏难以定位，从稳定性考虑。
+
+3、sendfile
+
+为什么Tomcat处理静态HTML文件性能不行，就是因为sendfile在java中处理由太多冗余拷贝：
+
+![tomcat处理文件](springboot.assets/tomcat处理文件.png)
+
+如上图这个过程有 6 次内存拷贝，并且 read 和 write 等系统调用将导致进程从用户态到内核态的切换，会耗费大量的 CPU 和内存资源。
+
+Tomcat通过AprEndpoint通过操作系统层面的**sendfile系统调用**来**避免冗余数据拷贝和用户态和内核态切换**：
+
+```c
+sendfile(socket, file, len);
+```
+
+它带有两个关键参数：Socket 和文件句柄。
+
+将文件从磁盘写入 Socket 的过程只有两步：
+
+第一步：将文件内容读取到内核缓冲区。
+
+第二步：数据并没有从内核缓冲区复制到 Socket 关联的缓冲区，只有记录数据位置和长度的描述符被添加到 Socket 缓冲区中；接着把数据直接从内核缓冲区传递给网卡。
+
+如下图：
+
+![apr处理文件](springboot.assets/apr处理文件.png)
+
+其实在Netty中都是通过DirectByteBuffer来收发数据，由于本地内存难以管理，Netty采用了本地内存池技术。
+
+#### 如何选择Endpoint
+
+如果web应用使用tls通信，对性能响应时间要求比较高，而用户又愿意花时间去配置APR，推荐APR。 
+
+NIO和NIO2其实差别不是很大，如果硬要区分，NIO适合处理比较轻的，数据传输量比较少的请求，AIO适合比较重，数据传输量比较大的请求。
+
+ 这是因为NIO本质还是同步，数据从用户空间和内核空间之间的拷贝还是阻塞的。
 
 #### Processor组件
 
@@ -6768,19 +7120,24 @@ public interface Processor {
 
 ![Processor](springboot.assets/Processor.png)
 
-具体的协议解析部分在其实现类如Http11Processor解析HTTP/1.1。
+具体的协议解析部分在其实现类如`Http11Processor`解析HTTP/1.1。
 
 ### Adapter组件
 
-由于应用层协议不同，Tomcat定义了自己的Request类存放这些请求信息，ProtocolHandler负责接受请求并解析协议生成Tomcat的Request对象，但这并不是Servlet规范标准的ServletRequest，所以引入了CoyoteAdapter适配器，Connector连接器调用CoyoteAdapter的service()方法将Tomcat Request对象转换成ServletRequest，再去调用Servlet容器的service()方法。
+`org.apache.coyote.Request` ----作为属性----> `org.apache.catalina.connector.Request`
+
+由于应用层协议不同，Tomcat定义了自己的`org.apache.coyote.Request`类存放这些请求信息，ProtocolHandler负责接受请求并解析协议生成Tomcat的Request对象，但这并不是Servlet规范标准的ServletRequest，所以引入了CoyoteAdapter适配器，Connector连接器调用CoyoteAdapter的service()方法将Tomcat Request对象转换成ServletRequest，再去调用Servlet容器的service()方法。
+
+这个实现了Servlet规范的HttpServletRequest接口实现类是`org.apache.catalina.connector.Request`
 
 ```java
+// CoyoteAdapter.java
 // 将Tomcat的request对象转换为HttpServletRequest
 public class CoyoteAdapter implements Adapter {
 
     public void service(org.apache.coyote.Request req, org.apache.coyote.Response res)
         throws Exception {
-        // 这个Request是HttpServletRequest的子类...
+        // 1.适配为Servlet规范的HttpServletRequest接口的子类
         Request request = (Request) req.getNote(ADAPTER_NOTES);
         Response response = (Response) res.getNote(ADAPTER_NOTES);
 
@@ -6803,12 +7160,20 @@ public class CoyoteAdapter implements Adapter {
             req.getParameters().setQueryStringCharset(connector.getURICharset());
         }
 
-        // 2.省略：将request和response放入Tomcat的Service的Servlet容器中进行调用处理
-
-        // 将转换后的request和response交给servlet容器去处理
+        // 2.将转换后的request和response交给servlet容器去处理
         connector.getService().getContainer().getPipeline().getFirst().invoke(
             request, response);
         // 省略很多代码
+        // 3.结束Request和Response，使其不可用
+        request.finishRequest();
+        response.finishResponse();
+
+        // 4.回收Request和Response到对象池
+        if (!async) {
+            updateWrapperErrorCount(request, response);
+            request.recycle();
+            response.recycle();
+        }
     }
 }
 ```
@@ -6967,7 +7332,7 @@ public class CoyoteAdapter implements Adapter {
 
     public void service(org.apache.coyote.Request req, org.apache.coyote.Response res)
         throws Exception {
-        // 这个Request是HttpServletRequest的子类...
+        // 1.适配为Servlet规范的HttpServletRequest接口的子类
         Request request = (Request) req.getNote(ADAPTER_NOTES);
         Response response = (Response) res.getNote(ADAPTER_NOTES);
 
@@ -6990,12 +7355,20 @@ public class CoyoteAdapter implements Adapter {
             req.getParameters().setQueryStringCharset(connector.getURICharset());
         }
 
-        // 2.省略：将request和response放入Tomcat的Service的Servlet容器中进行调用处理
-
-        // 将转换后的request和response交给servlet容器去处理
+        // 2.将转换后的request和response交给servlet容器去处理
         connector.getService().getContainer().getPipeline().getFirst().invoke(
             request, response);
         // 省略很多代码
+        // 3.结束Request和Response，使其不可用
+        request.finishRequest();
+        response.finishResponse();
+
+        // 4.回收Request和Response到对象池
+        if (!async) {
+            updateWrapperErrorCount(request, response);
+            request.recycle();
+            response.recycle();
+        }
     }
 }
 ```
@@ -7204,31 +7577,51 @@ public final void invoke(Request request, Response response)
 
 在执行完前面4个过滤器后，就会调用DispatcherServlet#service()方法。
 
+这里注意最后一个Filter是用来处理WebSocket协议升级握手的。
+
 #### 6、FilterChain执行
 
 ApplicationFilterChain执行过程如下：
 
 ```java
-// ApplicationFilterChain.java
-private void internalDoFilter(ServletRequest request,
-                              ServletResponse response)
-    throws IOException, ServletException {
+public final class ApplicationFilterChain implements FilterChain {
 
-    // 1.执行Filter
-    if (pos < n) {
-        ApplicationFilterConfig filterConfig = filters[pos++];
-        // 省略一堆代码
-        Filter filter = filterConfig.getFilter();
-        // 省略一堆代码
-        filter.doFilter(request, response, this);
-        // 省略一堆代码
-        return;
+    // Filter链中有Filter数组
+    private ApplicationFilterConfig[] filters = new ApplicationFilterConfig[0];
+
+    // Filter链中的当前的调用位置
+    private int pos = 0;
+
+    // 总共有多少了Filter
+    private int n = 0;
+
+    // 每个Filter链对应一个Servlet，也就是它要调用的Servlet
+    private Servlet servlet = null;
+
+    public void doFilter(ServletRequest req, ServletResponse res) {
+        internalDoFilter(request,response);
     }
 
-	// 省略try/catch
-    // 2.Filter链执行完执行 Servlet#service()方法
-    servlet.service(request, response);
-	// 省略一堆代码
+    private void internalDoFilter(ServletRequest request,
+                                  ServletResponse response)
+        throws IOException, ServletException {
+
+        // 1.执行Filter
+        if (pos < n) {
+            ApplicationFilterConfig filterConfig = filters[pos++];
+            // 省略一堆代码
+            Filter filter = filterConfig.getFilter();
+            // 省略一堆代码
+            filter.doFilter(request, response, this);
+            // 省略一堆代码
+            return;
+        }
+
+        // 省略try/catch
+        // 2.Filter链执行完执行 Servlet#service()方法
+        servlet.service(request, response);
+        // 省略一堆代码
+    }
 }
 ```
 
@@ -7254,22 +7647,786 @@ public interface Lifecycle {
 
 ![lifeCycleBase](springboot.assets/lifeCycleBase.png)
 
+## 性能
 
+高性能程序就是高效的利用 CPU、内存、网络和磁盘等资源，在短时间内处理大量的请求。那如何衡量“短时间和大量”呢？其实就是两个关键指标：
 
+- 响应时间
+- 每秒事务处理量（TPS）
 
+如何高效利用这些资源呢？
 
+- **减少资源浪费**：避免线程阻塞而发生线程上下文切换，这会耗费大量CPU资源；再比如网络通信时数据从内核空间拷贝到 Java 堆内存，需要通过本地内存中转。
+- **盈余资源替换缺少资源**：如缓存、对象池就是内存换CPU，而数据压缩就是CPU换网络。
 
+Tomcat为了高性能设计，从以下角度进行分析：
 
+- **IO模型**：NIO或异步IO，目的是业务线程不阻塞在IO等待上
+- **线程模型**：Acceptor线程专门处理新连接、Poller线程专门侦测IO事件、线程池则进行协议解析和业务处理
+- **减少系统调用**：系统调用非常耗资源，涉及CPU从用户态到内核态切换，如Tomcat解析HTTP协议数据时，采取了**延迟解析**策略，请求体只有在使用时才解析。当 Tomcat 调用 Servlet 的 service 方法时，只是读取了和解析了 HTTP 请求头，并没有读取 HTTP 请求体。
+- **对象池技术**：Java对象的创建、初始化、GC都耗费CPU和内存资源，采用对象池技术，创建的对象保存起来重复使用，在使用的Java对象很多且时间很短时，对象本身的创建成本较高的场景下就适合使用对象池技术。如Tomcat处理HTTP请求就符合该特征，为了处理单个请求需要创建不少的复杂对象（比如 Tomcat 连接器中 SocketWrapper 和 SocketProcessor）。
+- **高效并发**：
+  - 缩小锁粒度
+  - 原子变量和CAS
+  - volatile
 
+## 打破双亲委派和隔离Web类
 
+由于目前用的Spring嵌入式Tomcat不需要再设计多层类加载器来隔离Web类或共享第3方jar包，更多细节看极客时间：https://time.geekbang.org/column/article/105711
 
+知道线程上下文加载器就是避免类加载器的传递性的关键就行。
 
+# Tomcat支持WebSocket原理
 
+资料来源：百度百科、[WebSocket通信原理](https://mp.weixin.qq.com/s/5Oq5gu_rWIC-LNa8oip_lA)、Tomcat源码
 
+## 前言
 
+### 背景
 
+- **WebSocket定义**
 
+`WebSocket`是一种在**单个TCP连接**上进行**全双工通信**的协议。
 
+在WebSocket API中，浏览器和服务器只需要**完成一次握手**，两者之间就直接可以**创建持久性的连接**，并进行双向数据传输。
+
+这样的特点，使得它在一些实时性要求比较高的场景效果斐然（比如微信朋友圈实时通知、在线协同编辑等）。主流浏览器以及一些常见服务端通信框架（`Tomcat`、`netty`等）都对`WebSocket`进行了技术支持。
+
+- **HTTP轮询缺点**
+
+很多网站为了实现[推送技术](https://baike.baidu.com/item/推送技术?fromModule=lemma_inlink)，所用的技术都是[轮询](https://baike.baidu.com/item/轮询?fromModule=lemma_inlink)。这种传统的模式带来很明显的缺点，即浏览器需要不断的向服务器发出请求，然而HTTP请求可能包含较长的[头部](https://baike.baidu.com/item/头部?fromModule=lemma_inlink)，其中真正有效的数据可能只是很小的一部分，显然这样会**浪费很多的带宽等资源**。
+
+而比较新的技术去做轮询的效果是Comet。这种技术虽然可以双向通信，但依然需要反复发出请求。而且在Comet中，普遍采用的长链接，也会消耗服务器资源。
+
+在`WebSocket`出现之前，主要通过长轮询和HTTP长连接实现实时数据更新，这种方式有个统称叫`Comet`，`Tomcat8.5`之前有对`Comet`基于流的HTTP长连接做支持，后来因为`WebSocket`的成熟和标准化，以及`Comet`自身依然是基于HTTP，在性能消耗和瓶颈上无法跳脱HTTP，就把`Comet`废弃了。
+
+在这种情况下，[HTML5](https://baike.baidu.com/item/HTML5?fromModule=lemma_inlink)定义了WebSocket协议，能更好的节省服务器资源和带宽，并且能够更实时地进行通讯。
+
+- **HTTP/1.1自身局限**
+
+`HTTP/1.1`最初是为网络中超文本资源（HTML），**请求-响应**传输而设计的，后来支持了传输更多类型的资源，如图片、视频等，但都没有改变它单向的请求-响应模式。
+
+随着互联网的日益壮大，`HTTP/1.1`功能使用上已体现捉襟见肘的疲态。虽然可以通过某些方式满足需求（如`Ajax`、`Comet`），但是性能上还是局限于`HTTP/1.1`，那么`HTTP/1.1`有哪些缺陷呢：
+
+- 请求-响应模式，只能客户端发送请求给服务端，服务端才可以发送响应数据给客户端。
+- 传输数据为文本格式，且**请求/响应头部冗长重复**。
+
+### 历史
+
+在这种背景下，`HTML5`制定了`WebSocket`
+
+- 筹备阶段，`WebSocket`被划分为`HTML5`标准的一部分，2008年6月，Michael Carter进行了一系列讨论，最终形成了称为`WebSocket`的协议。
+- 2009年12月，Google Chrome 4是第一个提供标准支持的浏览器，默认情况下启用了`WebSocket`。
+- 2010年2月，`WebSocket`协议的开发从`W3C`和`WHATWG`小组转移到`IETF`（TheInternet Engineering Task Force），并在Ian Hickson的指导下进行了两次修订。
+- 2011年，`IETF`将`WebSocket`协议标准化为RFC 6455起，大多数Web浏览器都在实现支持`WebSocket`协议的客户端API。此外，已经开发了许多实现`WebSocket`协议的Java库。
+- 2013年，发布**JSR356标准**，Java API for WebSocket。
+
+（为什么要去了解`WebSocket`的发展历史和背景呢？个人认为可以更好的理解某个技术实现的演变历程，比如`Tomcat`，早期有`Comet`没有`WebSocket`时，`Tomcat`就对`Comet`做了支持，后来有`WebSocket`了，但是还没出`JSR356`标准，`Tomcat`就对`Websocket`做了支持，自定义API，再后来有了`JSR356`，`Tomcat`立马紧跟潮流，废弃自定义的API，实现`JSR356`那一套，这就使得在`Tomcat7`使用`WebSocket`的同学，想升为`Tomcat8`（其实`Tomcat7.0.47`之后就是`JSR356`标准了），发现`WebSocket`接入方式变了，而且一些细节也变了。）
+
+### 握手和双向通信
+
+虽然`WebSocket`有别于HTTP，是一种新协议，但是RFC 6455中规定：
+
+> it is designed to work over HTTP ports 80 and 443 as well as to support HTTP proxies and intermediaries.
+
+- `WebSocket`通过HTTP端口80和443进行工作，并支持HTTP代理和中介，从而使其与HTTP协议兼容。
+- 为了实现兼容性，`WebSocket`握手使用HTTP `Upgrade`头从HTTP协议更改为`WebSocket`协议。
+- `Websocket`使用`ws`或`wss`的统一资源标志符（URI），分别对应明文和加密连接。
+
+**1、握手**
+
+`Websocket`通过 `HTTP/1.1` 协议的**101状态码**进行握手，首先客户端（如浏览器）发出带有特殊消息头（`Upgrade`、`Connection`）的请求到服务器，服务器判断是否支持升级，支持则返回**响应状态码101**，表示协议升级成功，即握手成功。
+
+**客户端请求如下：**
+
+```http
+GET /test HTTP/1.1
+Host: server.example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: tFGdnEL/5fXMS9yKwBjllg==
+Origin: http://example.com
+Sec-WebSocket-Protocol: v10.stomp, v11.stomp, v12.stomp
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+Sec-WebSocket-Version: 13
+```
+
+- `Connection`设置`Upgrade`，表示客户端希望连接升级。
+- `Upgrade: websocket`表明协议升级为`websocket`。
+- `Sec-WebSocket-Key`字段内记录着握手过程中必不可少的键值，由客户端（浏览器）生成，可以尽量避免普通HTTP请求被误认为`Websocket`协议。
+- `Sec-WebSocket-Version` 表示支持的`Websocket`版本。`RFC6455`要求使用的版本是13。
+- `Origin`字段是必须的。如果缺少origin字段，`WebSocket`服务器需要回复HTTP 403 状态码（禁止访问），通过`Origin`可以做安全校验。
+
+**服务端响应如下：**响应码为101
+
+```http
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: HaA6EjhHRejpHyuO0yBnY4J4n3A=
+Sec-WebSocket-Extensions: permessage-deflate;client_max_window_bits=15
+Sec-WebSocket-Protocol: v12.stomp
+```
+
+响应头`Sec-WebSocket-Accept`的值是根据握手请求中`Sec-WebSocket-Key`值生成的。
+
+Tomcat中关于`Sec-WebSocket-Accept`根据客户端传的`Sec-WebSocket-Key`生成代码如下：
+
+```java
+private static String getWebSocketAccept(String key) {
+    byte[] digest = ConcurrentMessageDigest.digestSHA1(
+            key.getBytes(StandardCharsets.ISO_8859_1), WS_ACCEPT);
+    return Base64.encodeBase64String(digest);
+}
+```
+
+在握手过程中使用HTTP协议数据帧，在握手成功后则**使用WebSocket自己的数据帧**。
+
+**2、WebSocket数据帧**
+
+HTTP/1.1是文本消息格式传输数据（冗长的消息头和分隔符等），WebSocket消息帧以二进制形式传输更加短小精悍。
+
+![websocket数据帧](springboot.assets/websocket数据帧.png)
+
+- `FIN`:  1 bit，表示该帧是否为消息的最后一帧。1-是，0-否。
+- `RSV1`,`RSV2`,`RSV3`:  1 bit each，预留(3位)，扩展的预留标志。一般情况为0，除非协商的扩展定义为非零值。如果接收到非零值且不为协商扩展定义，接收端必须使连接失败。
+- `Opcode`:  4 bits，定义消息帧的操作类型，如果接收到一个未知Opcode，接收端必须使连接失败。（0x0-延续帧，0x1-文本帧，0x2-二进制帧，0x8-关闭帧，0x9-PING帧，0xA-PONG帧（在接收到PING帧时，终端必须发送一个PONG帧响应，除非它已经接收到关闭帧），0x3-0x7保留给未来的非控制帧，0xB-F保留给未来的控制帧）
+- `Mask`:  1 bit，表示该帧是否为隐藏的，即被加密保护的。1-是，0-否。`Mask=1`时，必须传一个`Masking-key`，用于解除隐藏（客户端发送消息给服务器端，`Mask`必须为1）。
+- `Payload length`:  7 bits, 7+16 bits, or 7+64 bits，有效载荷数据的长度（扩展数据长度+应用数据长度，扩展数据长度可以为0）。
+
+> if 0-125, that is the payload length.  If 126, the following 2 bytes interpreted as a 16-bit unsigned integer are the payload length.  If 127, the following 8 bytes interpreted as a 64-bit unsigned integer (the most significant bit MUST be 0) are the payload length.
+
+- `Masking-key`:  0 or 4 bytes，用于解除帧隐藏（加密）的key，Mask=1时不为空，Mask=0时不用传。
+- `Payload dat`a:  (x+y) bytes，有效载荷数据包括扩展数据（x bytes）和应用数据（y bytes）。有效载荷数据是用户真正要传输的数据。
+
+这样的二进制消息帧设计，与HTTP协议相比，`WebSocket`协议可以提供约500:1的流量减少和3:1的延迟减少。
+
+**3、挥手**
+
+挥手相对于握手要简单很多，客户端和服务器端任何一方都可以通过发送关闭帧来发起挥手请求。发送关闭帧的一方，之后不再发送任何数据给对方；接收到关闭帧的一方，如果之前没有发送过关闭帧，则必须发送一个关闭帧作为响应。关闭帧中可以携带关闭原因。
+
+在发送和接收一个关闭帧消息之后，就认为`WebSocket`连接已关闭，且必须关闭底层TCP连接。
+
+除了通过关闭握手来关闭连接外，`WebSocket`连接也可能在另一方离开或底层TCP连接关闭时突然关闭。
+
+### 优点
+
+- **较少的控制开销**。在连接建立后，服务器和客户端之间交换数据时，用于协议控制的数据包头部相对于HTTP请求每次都要携带完整的头部，显著减少。
+- **更强的实时性**。由于协议是全双工的，所以服务器可以随时主动给客户端下发数据。相对于HTTP请求需要等待客户端发起请求服务端才能响应，延迟明显更少。
+- **保持连接状态**。与HTTP不同的是，`Websocket`需要先建立连接，这就使得其成为一种有状态的协议，之后通信时可以省略部分状态信息。而HTTP请求可能需要在每个请求都携带状态信息（如身份认证等）。
+- 更好的二进制支持。`Websocket`定义了二进制帧，相对HTTP，可以更轻松地处理二进制内容。
+- 支持扩展。`Websocket`定义了扩展，用户可以扩展协议、实现部分自定义的子协议。
+- 更好的压缩效果。相对于HTTP压缩，`Websocket`在适当的扩展支持下，可以沿用之前内容的上下文，在传递类似的数据时，可以显著提高压缩率。
+
+## Java API for WebSocket(JSR356)
+
+`javax.websocket`包下API：
+
+![jsr356](springboot.assets/jsr356.png)
+
+根据`JSR356`规定， 建立`WebSocket`连接的服务器端和客户端，两端对称，可以互相通信，差异性较小，抽象成API，就是一个个`Endpoint`（端点），只不过服务器端的叫`ServerEndpoint`，客户端的叫`ClientEndpoint`。
+
+客户端向服务端发送`WebSocket`握手请求，建立连接后就创建一个`ServerEndpoint`对象。（这里的`Endpoint`和`Tomcat`连接器里的`AbstractEndpoint`名称上有点像，但是两个毫不相干的东西。
+
+`ServerEndpoint`和`ClientEndpoint`在API上差异也很小，有相同的生命周期事件（`OnOpen`、`OnClose`、`OnError`、`OnMessage`），不同之处是`ServerEndpoint`作为服务器端点，可以指定一个URI路径供客户端连接，`ClientEndpoint`没有。
+
+1、`@ServerEndpoint`
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+public @interface ServerEndpoint {
+	// 可以指定一个URI路径标识一个Endpoint
+    String value();
+	// 用户在WebSocket协议下自定义扩展一些子协议
+    String[] subprotocols() default {};
+	// 用户可自定义消息解码器
+    Class<? extends Decoder>[] decoders() default {};
+	// 用户可自定义消息编码器
+    Class<? extends Encoder>[] encoders() default {};
+	// configurator，ServerEndpoint配置类，主要提供ServerEndpoint对象的创建方式扩展（如果使用Tomcat的WebSocket实现，默认是反射创建ServerEndpoint对象）。
+    public Class<? extends ServerEndpointConfig.Configurator> configurator()
+            default ServerEndpointConfig.Configurator.class;
+}
+```
+
+`@ServerEndpoint`可以注解到任何类上，但是想实现服务端的完整功能，还需要配合几个生命周期的注解使用，这些生命周期注解只能注解在方法上：
+
+- `@OnOpen` 建立连接时触发。
+- `@OnClose` 关闭连接时触发。
+- `@OnError` 发生异常时触发。
+- `@OnMessage` 接收到消息时触发。
+
+2、`Endpoint`：继承抽象类`Endpoint`，重写几个生命周期方法
+
+```java
+package javax.websocket;
+
+public abstract class Endpoint {
+
+    // 会话session开始时的触发回调
+    public abstract void onOpen(Session session, EndpointConfig config);
+
+    // 会话关闭时回调
+    public void onClose(Session session, CloseReason closeReason) { }
+
+    // 出错时回调
+    public void onError(Session session, Throwable throwable) { }
+}
+```
+
+怎么没有onMessage()方法呢？实现`onMessage()`还需要继承实现一个接口`javax.websocket.MessageHandler`，`MessageHandler`接口又分为`Partial`和`Whole`，实现的`MessageHandler`需要在`onOpen`触发时注册到`javax.websocket.Session`中。
+
+3、`MessageHandler`
+
+```java
+package javax.websocket;
+
+public interface MessageHandler {
+    interface Partial<T> extends MessageHandler {
+        // 当消息的一部分可供处理时调用
+        void onMessage(T messagePart, boolean last);
+    }
+
+    interface Whole<T> extends MessageHandler {
+        // 当整条消息可供处理时调用
+        void onMessage(T message);
+    }
+}
+```
+
+4、`Session`
+
+WebSocket是有状态连接，建立连接都会创建`javax.websocket.Session`来保持状态，一个连接一个Session，并且有一个唯一标识Id(Tomcat 中以自增Id实现)
+
+Session的主要职责涉及：
+
+- 基础信息管理（`request`信息（`getRequestURI`、`getRequestParameterMap`、`getPathParameters`等）、协议版本`getProtocolVersion`、子协议`getNegotiatedSubprotocol`等）。
+- 连接管理（状态判断`isOpen`、接收消息的`MessageHandler`、发送消息的异步远程端点`RemoteEndpoint.Async`和同步远程端点`RemoteEndpoint.Basic`等）。
+
+以下仅列出重要方法：
+
+```java
+public interface Session extends Closeable {
+    // 获取创建此会话的容器
+    WebSocketContainer getContainer();
+
+    // 连接状态判断
+    boolean isOpen();
+
+    // 会话唯一标识符，在Tomcat中以自增id实现
+    String getId();
+
+    // 使用指定的代码和原因短语关闭与远程端点的连接
+    void close(CloseReason closeReason) throws IOException;
+
+    URI getRequestURI();// 请求的URL
+
+    Map<String, List<String>> getRequestParameterMap();// 请求参数
+
+    Map<String,String> getPathParameters();// 路径参数
+
+    // 获取与此会话相同的本地端点关联的一组打开会话，用来广播？
+    Set<Session> getOpenSessions();
+
+    /**
+     * 为部分传入消息注册MessageHandler 。每种消息类型只能注册一个MessageHandler （文本或二进制，pong 消息永远不会显示为部分消息）
+     * @param clazz     泛型T的类型
+     * @param handler   消息处理器
+     */
+    <T> void addMessageHandler(Class<T> clazz, MessageHandler.Partial<T> handler)
+        throws IllegalStateException;
+
+    /**
+     * 为整个传入消息注册一个MessageHandler 。每种消息类型（文本、二进制、心跳pong）只能注册一个MessageHandler    
+     * @param clazz     泛型T的类型
+     * @param handler   消息处理器
+     */
+    <T> void addMessageHandler(Class<T> clazz, MessageHandler.Whole<T> handler)
+        throws IllegalStateException;
+	
+    // 发送消息的异步远程端点RemoteEndpoint.Async
+    RemoteEndpoint.Async getAsyncRemote();
+	// 发送消息的同步远程端点RemoteEndpoint.Basic
+    RemoteEndpoint.Basic getBasicRemote();
+}
+
+```
+
+5、`WebSocketHandler`
+
+WebSocket容器
+
+```java
+public interface WebSocketContainer {
+    /**
+     * 创建到 WebSocket 的新连接，并返回Session会话
+     *
+     * @param endpoint 处理来自服务器的响应的端点实例
+     * @param clientEndpointConfiguration 用于配置新连接
+     * @param path 要连接的WebSocket端点的完整URL
+     *
+     * @return WebSocket连接的Session会话
+     */
+    Session connectToServer(Endpoint endpoint,
+                            ClientEndpointConfig clientEndpointConfiguration, URI path)
+        throws DeploymentException, IOException;
+
+    // 获取当前默认会话空闲超时，单位ms
+    long getDefaultMaxSessionIdleTimeout();
+}
+```
+
+## WebSocket在Tomcat中源码实现
+
+以下根据Tomcat源码分析：
+
+- `WebSocket`如何借助HTTP协议进行的握手升级
+- `WebSocket`建立连接后如何保持连接不断，互相通信
+
+握手过程如下：
+
+![WebSocket握手](springboot.assets/WebSocket握手.png)
+
+WebSocket消息接受处理流程如下：
+
+![WebSocket消息接受](springboot.assets/WebSocket消息接受.png)
+
+### 协议升级--握手
+
+Tomcat中`WebSocket`是通过`UpgradeToken`机制实现的，其具体的升级处理器为`WsHttpUpgradeHandler`。`WebSocket`协议升级的过程比较曲折，首先要通过过滤器`WsFilter`进行升级判断，然后调用`org.apache.catalina.connector.Request#upgrade`进行`UpgradeToken`的构建，最后通过`org.apache.catalina.connector.Request#coyoteRequest`回调函数`action()`将`UpgradeToken`回传给连接器为后续升级处理做准备。
+
+#### WsFilter
+
+WebSocket协议升级的过程中，带有WebSocket握手的HTTP请求从连接器到达Servlet容器后，在执行过滤器链时，会有`WsFilter`这个过滤器：
+
+- 首先判断`WsServerContainer`是否有进行`Endpoint`的扫描和注册以及请头中是否有`Upgrade: websocket`。
+- 获取请求`path`即`uri`在`WsServerContainer`中找对应的`ServerEndpointConfig`。
+- 调用`UpgradeUtil.doUpgrade`进行升级。
+
+```java
+package org.apache.tomcat.websocket.server;
+// 处理 WebSocket 连接的初始 HTTP 连接握手操作
+public class WsFilter extends GenericFilter {
+    private transient WsServerContainer sc;
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response,
+                         FilterChain chain) throws IOException, ServletException {
+        // 1.判断WsServerContainer是否注册Endpoint，判断请求头是否有`Upgrade: websocket`
+        // 若都没有则是正常HTTP请求，执行向下执行过滤器链
+        if (!sc.areEndpointsRegistered() ||
+            !UpgradeUtil.isWebSocketUpgradeRequest(request, response)) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // HTTP request with an upgrade header for WebSocket present
+        HttpServletRequest req = (HttpServletRequest) request;
+        HttpServletResponse resp = (HttpServletResponse) response;
+
+        // 2.通过uri找到对应的ServerEndpointConfig
+        String path;
+        String pathInfo = req.getPathInfo();
+        if (pathInfo == null) path = req.getServletPath();
+        else path = req.getServletPath() + pathInfo;
+
+        WsMappingResult mappingResult = sc.findMapping(path);
+
+        if (mappingResult == null) {
+            // No endpoint registered for the requested path. Let the
+            // application handle it (it might redirect or forward for example)
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // 3.处理协议升级
+        UpgradeUtil.doUpgrade(sc, req, resp, mappingResult.getConfig(),
+                              mappingResult.getPathParams());
+    }
+}
+```
+
+`UpgradeUtil#doUpgrade`主要做了如下几件事情：
+
+- 检查`HttpServletRequest`的一些请求头的有效性，如`Connection: upgrade`、`Sec-WebSocket-Version:13`、`Sec-WebSocket-Key`等。
+- 给`HttpServletResponse`设置一些响应头，如`Upgrade:websocket`、`Connection: upgrade`、根据`Sec-WebSocket-Key`的值生成响应头`Sec-WebSocket-Accept`的值。
+- 封装`WsHandshakeRequest`和`WsHandshakeResponse`。
+- 调用`HttpServletRequest#upgrade`进行升级，并获取`WsHttpUpgradeHandler`（具体的升级流程处理器）。
+
+```java
+public static void doUpgrade(WsServerContainer sc, HttpServletRequest req,
+                             HttpServletResponse resp, ServerEndpointConfig sec,
+                             Map<String,String> pathParams)
+    throws ServletException, IOException {
+
+    // 1.验证请求头中关于协议升级的各个字段是否正确
+   	// 省略
+	
+    // 2.设置响应头的各个字段，如：`Upgrade:websocket`,`Connection: upgrade`等
+    // If we got this far, all is good. Accept the connection.
+    resp.setHeader(Constants.UPGRADE_HEADER_NAME,
+                   Constants.UPGRADE_HEADER_VALUE);
+    resp.setHeader(Constants.CONNECTION_HEADER_NAME,
+                   Constants.CONNECTION_HEADER_VALUE);
+    resp.setHeader(HandshakeResponse.SEC_WEBSOCKET_ACCEPT,
+                   getWebSocketAccept(key));
+  	// 省略部分代码
+
+    // 3.封装`WsHandshakeRequest`和`WsHandshakeResponse`
+    WsPerSessionServerEndpointConfig perSessionServerEndpointConfig =
+        new WsPerSessionServerEndpointConfig(sec);
+
+    WsHandshakeRequest wsRequest = new WsHandshakeRequest(req, pathParams);
+    WsHandshakeResponse wsResponse = new WsHandshakeResponse();
+    sec.getConfigurator().modifyHandshake(perSessionServerEndpointConfig, wsRequest, wsResponse);
+    wsRequest.finished();
+	// 省略部分代码
+    
+    // 4.调用`HttpServletRequest#upgrade`进行升级
+    WsHttpUpgradeHandler wsHandler =
+        req.upgrade(WsHttpUpgradeHandler.class);
+    wsHandler.preInit(perSessionServerEndpointConfig, sc, wsRequest,
+                      negotiatedExtensionsPhase2, subProtocol, transformation, pathParams,
+                      req.isSecure());
+}
+```
+
+##### Request#upgrade
+
+`org.apache.catalina.connector.Request#upgrade`主要做了三件事：
+
+- 实例化`WsHttpUpgradeHandler`并构建`UpgradeToken`。
+- 回调`coyoteRequest.action()`，将`UpgradeToken`回传给连接器。
+- 设置响应码101
+
+这个Request类是Servlet协议的HttpServletRequest接口在Tomcat的实现类。
+
+```java
+// org.apache.catalina.connector.Request.java  
+public <T extends HttpUpgradeHandler> T upgrade(
+    Class<T> httpUpgradeHandlerClass) throws java.io.IOException, ServletException {
+    // 1.实例化WsHttpUpgradeHandler
+    T handler;
+    InstanceManager instanceManager = null;
+    try {
+        // Do not go through the instance manager for internal Tomcat classes since they don't
+        // need injection
+        if (InternalHttpUpgradeHandler.class.isAssignableFrom(httpUpgradeHandlerClass)) {
+            handler = httpUpgradeHandlerClass.getConstructor().newInstance();
+        } else {
+            instanceManager = getContext().getInstanceManager();
+            handler = (T) instanceManager.newInstance(httpUpgradeHandlerClass);
+        }
+    } catch (ReflectiveOperationException | NamingException | IllegalArgumentException |
+             SecurityException e) {
+        throw new ServletException(e);
+    }
+    // 2.构建UpgradeToken
+    UpgradeToken upgradeToken = new UpgradeToken(handler, getContext(), instanceManager,
+getUpgradeProtocolName(httpUpgradeHandlerClass));
+
+    // 3.回调coyoteRequest.action()方法进行升级
+    coyoteRequest.action(ActionCode.UPGRADE, upgradeToken);
+
+    // 4.设置响应码101
+    response.setStatus(HttpServletResponse.SC_SWITCHING_PROTOCOLS);
+    return handler;
+}
+```
+
+这个`org.apache.coyote.Request`就是Tomcat应用协议解析器直接解析得到的Request对象，Adapter适配器将其作为1个属性包装为`org.apache.catalina.connector.Request`，以满足Servlet规范要求的HttpServletRequest接口。
+
+这里需要注意第3步的回调升级，它将Servlet容器内产生的`UpgradeToken`以回调方式传递给了Connector连接器的`Http11Processor`。
+
+##### 回调机制ActionHook#action()
+
+发生在Servlet容器的动作可以需要回传给Connector连接器做处理，比如`WebSocket`的握手升级，所以连接器就给`org.apache.coyote.Request`设置了一个动作钩子`ActionHook#action`。
+
+一些动作表示定义在枚举类`ActionCode`中，`ActionCode.UPGRADE`就代表协议升级动作。`org.apache.coyote.AbstractProcessor`实现了`ActionHook`接口，`ActionCode.UPGRADE`动作会调用`org.apache.coyote.http11.Http11Processor#doHttpUpgrade`，只是简单将`upgradeToken`设置给`Http11Processor`。
+
+```java
+// org.apache.coyote.Request.java
+public void action(ActionCode actionCode, Object param) {
+    if (hook != null) {
+        if (param == null) {
+            hook.action(actionCode, this);
+        } else {
+            hook.action(actionCode, param);
+        }
+    }
+}
+
+// Http11Processor.java
+public final void action(ActionCode actionCode, Object param) {
+    switch (actionCode) {
+            // Servlet 3.1 HTTP Upgrade
+        case UPGRADE: {
+            doHttpUpgrade((UpgradeToken) param);
+            break;
+        }
+            // 省略其他情况
+    }
+}
+
+protected final void doHttpUpgrade(UpgradeToken upgradeToken) {
+    this.upgradeToken = upgradeToken;
+    // Stop further HTTP output
+    outputBuffer.responseFinished = true;
+}
+```
+
+可以看到的是就是将Servlet容器阶段产生的`upgradeToken`传递给了Connector连接器阶段新建的`Http11Processor`
+
+到这里，这个WsFilter的doFilter()方法及其调用方法基本执行完成，接下来就是方法的出栈，它将一直回退到Connector连接器阶段的`ConnectionHandler#process()`方法
+
+#### 回退到Adapter#service()
+
+CoyoteAdapter#service()方法将调用Servlet容器处理请求，所以Wsfilter#doFilter()结束后首先回退到这个适配器的service()方法：
+
+```java
+// CoyoteAdapter.java
+// 将Tomcat的request对象转换为HttpServletRequest
+public class CoyoteAdapter implements Adapter {
+    public void service(org.apache.coyote.Request req, org.apache.coyote.Response res)
+        throws Exception {
+        // 1.适配为Servlet规范的HttpServletRequest接口的子类
+        Request request = (Request) req.getNote(ADAPTER_NOTES);
+        Response response = (Response) res.getNote(ADAPTER_NOTES);
+
+        if (request == null) {
+            // 说白了就是以子类继承HttpServletRequest，同时将coyote.Request对象包装进去
+            request = connector.createRequest();
+            request.setCoyoteRequest(req);
+            response = connector.createResponse();
+            response.setCoyoteResponse(res);
+
+            // Link objects
+            request.setResponse(response);
+            response.setRequest(request);
+
+            // Set as notes
+            req.setNote(ADAPTER_NOTES, request);
+            res.setNote(ADAPTER_NOTES, response);
+
+            // Set query string encoding
+            req.getParameters().setQueryStringCharset(connector.getURICharset());
+        }
+
+        // 2.将转换后的request和response交给servlet容器去处理
+        connector.getService().getContainer().getPipeline().getFirst().invoke(
+            request, response);
+        // 省略很多代码
+        // 3.结束Request和Response，使其不可用
+        request.finishRequest();
+        response.finishResponse();
+
+        // 4.回收Request和Response到对象池
+        if (!async) {
+            updateWrapperErrorCount(request, response);
+            request.recycle();
+            response.recycle();
+        }
+    }
+}
+```
+
+当WsFilter的doFilter()结束之后，会出栈回到这个方法，这里结束了Request和Response并回收它们。
+
+#### 回退到ConnectionHandler#process()
+
+`org.apache.catalina.connector.CoyoteAdapter#service()`是在`org.apache.coyote.http11.Http11Processor#service()`中调用的，`Http11Processor#service()`是HTTP请求处理主流程，通过`upgradeToken != null`来判断是否为升级操作，若为true则返回`SocketState.UPGRADING`。
+
+下面是Http11Processor#service()的部分代码：
+
+```java
+getAdapter().service(request, response);
+// 省略一大堆
+if (isUpgrade()) { // 这里就判断 upgradeToken != null
+    return SocketState.UPGRADING;
+}
+```
+
+这就是为什么前面WsFilter要将产生的UpgradeToken回调传回Http11Processor的原因。
+
+这里执行完后就回退到`org.apache.coyote.AbstractProtocol.ConnectionHandler#process()`一个连接处理的主流程，根据`Http11Processor#service()`返回`SocketState.UPGRADING`来进行升级操作，如下只截取了和`WebSocket`协议升级相关流程的代码：
+
+```java
+public SocketState process(SocketWrapperBase<S> wrapper, SocketEvent status) {
+    // 1.为每个Socket连接新建1个Http11Processor
+    S socket = wrapper.getSocket();
+    Processor processor = (Processor) wrapper.getCurrentProcessor();
+    // 如果Processor为空，则中对象池获取或新建1个Http11Processor
+    if (processor == null) {
+        // 省略
+    }
+    // Associate the processor with the connection
+    wrapper.setCurrentProcessor(processor);
+
+    SocketState state = SocketState.CLOSED;
+    do {
+        // 2.调用Http11Processor#process()方法
+        state = processor.process(wrapper, status);
+
+        // 3.处理WebSocket的连接升级
+        if (state == SocketState.UPGRADING) {
+            // 3.1 获得HttpUpgradeHandler
+            UpgradeToken upgradeToken = processor.getUpgradeToken();
+            // 将剩余输入恢复到包装器，以便升级处理器可以处理它
+            ByteBuffer leftOverInput = processor.getLeftoverInput();
+            wrapper.unRead(leftOverInput);
+
+            HttpUpgradeHandler httpUpgradeHandler = upgradeToken.getHttpUpgradeHandler();
+            // 3.2 回收Http11Processor到对象池
+            release(processor);
+            // 3.3 创建新的Processor，即UpgradeProcessorInternal
+            // 并绑定到当前Socket连接
+            processor = getProtocol().createUpgradeProcessor(wrapper, upgradeToken);
+            wrapper.setCurrentProcessor(processor);
+
+            // 4.调用UpgradeHandler#init()方法，即将握手成功
+            httpUpgradeHandler.init((WebConnection) processor);
+
+            if (httpUpgradeHandler instanceof InternalHttpUpgradeHandler) {
+                if (((InternalHttpUpgradeHandler) httpUpgradeHandler).hasAsyncIO()) {
+                    // The handler will initiate all further I/O
+                    state = SocketState.UPGRADED;
+                }
+            }
+        }
+    } while ( state == SocketState.UPGRADING);
+
+    // 省略很多代码
+    // 回收Processor组件
+    release(processor);
+    return state;
+}
+```
+
+SocketProcessor任务在运行doRun()方法时会调用ConnectionHandler#process()方法，该方法调用Http11Processor处理请求，若是WebSocket连接握手请求则会返回SocketState.UPGRADING状态，回退到此process()方法则会进行握手操作：
+
+- **替换协议处理器**：回收Http11Processor到对象池，替换为`UpgradeProcessorInternal`并绑定到Socket连接
+- **握手操作**：调用WsHttpUpgradeHandler#init()方法进行握手
+
+#### WsHttpUpgradeHandler#init握手成功
+
+这里进行WebSocket握手过程：
+
+- 创建WsSession
+- 触发onOpen
+- 将WsSession注册到WebSocket容器
+
+```java
+// WsHttpUpgradeHandler.java
+public void init(WebConnection connection) {
+    this.connection = connection;
+
+    String httpSessionId = null;
+    Object session = handshakeRequest.getHttpSession();
+    if (session != null ) {
+        httpSessionId = ((HttpSession) session).getId();
+    }
+
+    // Need to call onOpen using the web application's class loader
+    // Create the frame using the application's class loader so it can pick
+    // up application specific config from the ServerContainerImpl
+    Thread t = Thread.currentThread();
+    ClassLoader cl = t.getContextClassLoader();
+    t.setContextClassLoader(applicationClassLoader);
+    try {
+        // 1.新建WebSession
+        wsRemoteEndpointServer = new WsRemoteEndpointImplServer(socketWrapper, upgradeInfo, webSocketContainer);
+        wsSession = new WsSession(wsRemoteEndpointServer,
+                                  webSocketContainer, handshakeRequest.getRequestURI(),
+                                  handshakeRequest.getParameterMap(),
+                                  handshakeRequest.getQueryString(),
+                                  handshakeRequest.getUserPrincipal(), httpSessionId,
+                                  negotiatedExtensions, subProtocol, pathParameters, secure,
+                                  serverEndpointConfig);
+        ep = wsSession.getLocal();
+        wsFrame = new WsFrameServer(socketWrapper, upgradeInfo, wsSession, transformation,
+                                    applicationClassLoader);
+        // WsFrame adds the necessary final transformations. Copy the
+        // completed transformation chain to the remote end point.
+        wsRemoteEndpointServer.setTransformation(wsFrame.getTransformation());
+        // 2.回调ServerEndpoint#onOpen()方法，表示握手已经成功
+        ep.onOpen(wsSession, serverEndpointConfig);
+        // 3.将WsSession注册到WebSocket容器
+        webSocketContainer.registerSession(serverEndpointConfig.getPath(), wsSession);
+    } catch (DeploymentException e) {
+        throw new IllegalArgumentException(e);
+    } finally {
+        t.setContextClassLoader(cl);
+    }
+}
+```
+
+- `WsSession`的构建中会实例化`Endpoint`，如果实例化出来的对象不是`Endpoint`类型，即加了`@ServerEndpoint`的实例对象，则用一个`PojoEndpointServer`进行包装，而`PojoEndpointServer`是继承了抽象类`Endpoint`的。
+- 触发`onOpen`时会将`WsSession`传进去，对于加`PojoEndpointServer`，因为用户自定义的方法名和形参不确定，所以通过反射调用用户自定义的`onOpen`形式的方法，并且会将通过`@onMessage`解析出的MessageHandler设置给`WsSession`。
+
+```java
+// PojoEndpointBase.java
+protected final void doOnOpen(Session session, EndpointConfig config) {
+    PojoMethodMapping methodMapping = getMethodMapping();
+    Object pojo = getPojo();
+
+    // 1.解析出MessageHandler添加到WsSession中
+    // 在调用 onOpen 之前添加消息处理程序，因为这可能会触发消息，进而触发响应和或关闭会话
+    for (MessageHandler mh : methodMapping.getMessageHandlers(pojo, pathParameters, session, config)) {
+        session.addMessageHandler(mh);
+    }
+
+    // 2.@onOpen注解标注的方法反射调用，即握手成功的回调
+    if (methodMapping.getOnOpen() != null) {
+        try {
+            methodMapping.getOnOpen().invoke(pojo,
+                                             methodMapping.getOnOpenArgs(
+                                                 pathParameters, session, config));
+
+        } catch (IllegalAccessException e) {
+            // Reflection related problems
+            log.error(sm.getString(
+                "pojoEndpointBase.onOpenFail",
+                pojo.getClass().getName()), e);
+            handleOnOpenOrCloseError(session, e);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            handleOnOpenOrCloseError(session, cause);
+        } catch (Throwable t) {
+            handleOnOpenOrCloseError(session, t);
+        }
+    }
+}
+```
+
+### 消息接受和发送
+
+经过上面的协议升级，此时WebSocket所建立的SocketWrapper绑定了`UpgradeProcessorInternal`这个Processor组件。
+
+- 消息接受
+
+当NioEndpoint的Poller线程监听到Socket有新消息到来，并把SocketWrapper包装为SocketProcessor扔到线程池去处理。
+
+此时这个任务doRun()调用ConnectionHandler，然后判断是WebSocket连接则会调用`UpgradeProcessorInternal#dispatch()`去处理新消息，而不是像HTTP请求那样新建Http11Processor去处理哦。
+
+`org.apache.tomcat.websocket.server.WsHttpUpgradeHandler#upgradeDispatch`是专门处理`WebSocket`连接的处理器
+
+`org.apache.tomcat.websocket.server.WsFrameServer`是对服务器端消息帧处理的封装，包括读取底层数据，按消息帧格式解析、拼装出有效载荷数据，触发`onMessage`。
+
+大致流程如下：源码比较冗杂，就不展示了。
+
+![WebSocket消息接受](springboot.assets/WebSocket消息接受.png)
+
+- 消息发送
+
+**Tomcat在WebSocket握手完成后生成的WsSession对象会保存到WebSocketContainer**（广播所有可以用这种），可以从这里获取WsSession发送，当然也完全可以在握手的onOpen()回调时将WsSession保存到指定的Map里(聊天室一般用这种)。
+
+Tomcat提供了可以发送三种数据类型（文本、二进制、Object对象）和两种发送方式（同步、异步）的发送消息的方法。
+
+- `org.apache.tomcat.websocket.WsRemoteEndpointAsync`异步发送。
+- `org.apache.tomcat.websocket.WsRemoteEndpointBasic` 同步发送。
+
+发送消息也同样需要按消息帧格式封装，然后通过`socket`写到网络里即可。
 
 
 

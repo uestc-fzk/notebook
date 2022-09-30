@@ -3000,7 +3000,7 @@ public abstract class ByteBuffer extends Buffer
 特点：
 
 1、具有**更高的分配和释放成本**。
-2、其内容可能**驻留在正常的垃圾收集堆之外**，因此它们对应用程序内存占用的影响可能并不明显。
+2、其内容**驻留在正常的垃圾收集堆之外**，因此它们对应用程序内存占用的影响可能并不明显。
 
 因此，建议将直接缓冲区主要分配给受底层系统的本机 I/O 操作影响的大型、长期存在的缓冲区。通常，最好**仅在直接缓冲区对程序性能产生可衡量的增益时才分配它们**。
 
@@ -3011,6 +3011,22 @@ public abstract class ByteBuffer extends Buffer
 `DirectByteBuffer`的父类是`MappedByteBuffer`，说明将`FileChannel.map()`映射到内存中的映射缓冲区也是直接缓冲区，位于JVM的堆外。它是通过 `Unsafe` 的本地方法 `allocateMemory()` 进行内存分配，底层调用的是操作系统的 malloc() 函数。
 
 这里的直接缓冲区或许看不出来作用，但是它是文件通道FileChannel的内存映射缓冲区，可以看看后面的零拷贝部分。
+
+**优势：内存位于GC堆之外，不受GC影响，避免了GC算法使得ByteBuffer对象在内存中移动，这对于大的bytebuffer缓存中很有用。**
+
+![堆内存和直接内存](JavaSE.assets/堆内存和直接内存.png)
+
+**HeapByteBuffer 和 DirectByteBuffer 有什么区别呢？**
+
+HeapByteBuffer 对象本身在 JVM 堆上分配，并且它持有的字节数组byte[]也是在 JVM 堆上分配。但是如果用 HeapByteBuffer 来接收网络数据，需要**把数据从内核先拷贝到一个临时的本地内存**，**再从临时本地内存拷贝到 JVM 堆**，而不是直接从内核拷贝到 JVM 堆上。
+
+这是为什么呢？这是因为数据从内核拷贝到 JVM 堆的过程中，JVM 可能会发生 GC，GC 过程中对象可能会被移动，也就是说 JVM 堆上的字节数组可能会被移动，这样的话 Buffer 地址就失效了。如果这中间经过本地内存中转，从本地内存到 JVM 堆的拷贝过程中 JVM 可以保证不做 GC（**HotSpot虚拟机保证本地内存到JVM堆的拷贝过程没有`safepoint`，因此不会GC**）。
+
+如果使用 HeapByteBuffer，你会发现 JVM 堆和内核之间多了一层中转，而 DirectByteBuffer 用来解决这个问题，DirectByteBuffer 对象本身在 JVM 堆上，但是它持有的字节数组不是从 JVM 堆上分配的，而是从本地内存分配的。
+
+DirectByteBuffer 对象中有个 long 类型字段 address，记录着本地内存的地址，这样在接收数据的时候，直接把这个本地内存地址传递给 C 程序，C 程序会将网络数据从内核拷贝到这个本地内存，JVM 可以直接读取这个本地内存，**这种方式比 HeapByteBuffer 少了一次拷贝**，因此一般来说它的速度会比 HeapByteBuffer 快好几倍。
+
+
 
 ## Channel
 
@@ -5122,7 +5138,15 @@ protected final Class<?> defineClass(String name, byte[] b, int off, int len,
 
 ### 传递性
 
-若类A是有类加载器L加载，则其依赖的所有类都将有L加载。
+```java
+public static Class<?> forName(String className)
+            throws ClassNotFoundException {
+    Class<?> caller = Reflection.getCallerClass();
+    return forName0(className, true, ClassLoader.getClassLoader(caller), caller);
+}
+```
+
+根据上面代码可知，若不传入类加载器则默认使用调用类的加载类，这就是类加载器的传递性。
 
 即使其依赖的java.xx包下的核心类库，也由L加载，不过最终由双亲委派模型交由启动类加载器加载。
 
@@ -5145,6 +5169,8 @@ protected final Class<?> defineClass(String name, byte[] b, int off, int len,
 为了解决这个问题，Java提供了线程上下文类加载器，默认是AppClassLoader。
 
 如Spring会将它的自定义类加载器设置为线程上下文加载器。
+
+> 在用Class.forName()加载类时，将线程上下文加载器传入进去，这样就能避免类加载的传递性了。
 
 - **热加载/热部署**打破双亲委派
 
