@@ -5737,7 +5737,7 @@ public class TomcatServletWebServerFactory extends AbstractServletWebServerFacto
 
 - 第3步创建了NIO的Connector连接器对象，并放入了Tomcat对象中，**如果要研究真正的请求全流程，则必须从这个Connector对象出发！**
 - 第5步创建了TomcatEmbeddedContext 上下文对象，需要注意`TomcatStarter对象`
-- 第6步创建`TomcatWebServer对象`，对tomcat对象封装，**用于控制其start和stop**，可以看看上面的优雅开始/关闭WebServer是如何控制其生命周期的。
+- 第6步创建`TomcatWebServer对象`，对tomcat对象封装，**用于控制其start和stop**，可以看看下面的优雅开始/关闭WebServer是如何控制其生命周期的。
 
 #### 2.5.创建tomcat context
 
@@ -6082,7 +6082,7 @@ public DispatcherServletRegistrationBean dispatcherServletRegistration(Dispatche
 }
 ```
 
-然后看看它的onStartup()方法是如何注册到Servlet上下文的：就是直接调用add方法
+然后看看它的onStartup()方法是如何注册到Servlet上下文的：就是直接调用add()方法
 
 ```java
 public final void onStartup(ServletContext servletContext) throws ServletException {
@@ -6219,7 +6219,7 @@ private void performDeferredLoadOnStartup() {
 
 > 我打断点发现：DispatcherServlet的关于Servlet的init()方法未被调用？
 >
-> 不过我又发现，**当请求到来时，Servlet#init()方法才会调用**！
+> 不过我又发现，**当请求到来时，Servlet#init()方法才会调用**！说明是懒加载初始化的。
 
 ### WebServer#stop()
 
@@ -6264,7 +6264,7 @@ public void stop() throws WebServerException {
    1. 先创建一个 `org.apache.catalina.startup.Tomcat` 对象 `tomcat`，使用临时目录作为基础目录（`tomcat.端口号`），退出时删除，同时会设置端口、编码、最小空闲线程和最大线程数
    2. 为 `tomcat` 创建一个 `TomcatEmbeddedContext` 上下文对象，会添加一个 `TomcatStarter`（实现 `javax.servlet.ServletContainerInitializer` 接口）到这个上下文对象中
    3. 将 `tomcat` 封装到 TomcatWebServer 对象中，实例化过程会启动 `tomcat`，启动后会触发 `javax.servlet.ServletContainerInitializer` 实现类的回调，也就会触发 `TomcatStarter` 的回调，在其内部会调用 Spring Boot 自己的 `ServletContextInitializer` 初始器，例如 `ServletWebServerApplicationContext#selfInitialize(ServletContext)` 匿名方法
-   4. 在这个匿名方法中会找到所有的 `RegistrationBean`，执行他们的 `onStartup` 方法，将其关联的 Servlet、Filter 和 EventListener 添加至 Servlet 上下文中，包括 Spring MVC 的 DispatcherServlet 对象
+   4. 在这个匿名方法中会找到IOC容器内所有的 `RegistrationBean`，执行他们的 `onStartup` 方法，将其关联的 Servlet、Filter 和 EventListener 添加至 Servlet 上下文中，包括 Spring MVC 的 DispatcherServlet 对象
 2. 接下来在finishRefresh()方法中会涉及到对SmartLifeCycle接口的start()方法回调处理，**从而优雅的将Tomcat容器生命周期和SpringIOC容器的生命周期绑在了一起！**
 
 > **ServletContainerInitializer** 也是 Servlet 3.0 新增的一个接口，容器在启动时使用 JAR 服务 API(JAR Service API) 来发现 **ServletContainerInitializer** 的实现类，并且容器将 WEB-INF/lib 目录下 JAR 包中的类都交给该类的 `onStartup()` 方法处理，我们通常需要在该实现类上使用 @HandlesTypes 注解来指定希望被处理的类，过滤掉不希望给 `onStartup()` 处理的类。
@@ -6274,12 +6274,6 @@ public void stop() throws WebServerException {
 > 注意：这里将根据源码直接分析嵌入式Tomcat
 >
 > 极客时间资料：https://time.geekbang.org/column/article/95480
-
-关于Tomcat如何以NIO监听端口，如何分发到Servlet的流程，这里先不分析。
-
-目前定位到的Selector选择器在`org.apache.tomcat.util.net.NioEndpoint`类中，之后有时间具体分析这个流程。
-
-其入口方法是`NioEndpoint#startInternal()`，它启动了1个线程以Selector监听8080端口。
 
 ## Servlet规范
 
@@ -6731,7 +6725,7 @@ server:
 
 > 在SpringBoot嵌入式Tomcat容器可以直接以yaml配置文件方式修改线程池线程数量，可以闲的没事的时候调一调。
 
-有个问题：当前线程数达到核心线程数之后，再来任务的话线程池会把任务添加到无界任务队列，并且总是会成功，这样永远不会有机会创建新线程了。
+**有个问题**：当前线程数达到核心线程数之后，再来任务的话线程池会把任务添加到无界任务队列，并且总是会成功，这样永远不会有机会创建新线程了。
 
 先看看NioEndpoint创建线程池的方法：
 
@@ -7625,6 +7619,265 @@ public final class ApplicationFilterChain implements FilterChain {
 }
 ```
 
+### Session管理
+
+在Servlet规范中，可以通过HttpServletRequest#getSession()获得HttpSession对象，并通过 Session 对象来读取和写入属性值。而 Session 的管理是由 Web 容器来完成的，主要是对 Session 的创建和销毁，除此之外 Web 容器还需要将 Session 状态的变化通知给监听者。
+
+> 注意：Session 管理还可以交给 Spring 来做，好处是与特定的 Web 容器解耦，Spring Session 的核心原理是**通过 Filter 拦截 Servlet 请求，将标准的 ServletRequest 包装一下，换成 Spring 的 Request 对象**，当调用 Request 对象的 getSession 方法时，Spring 来创建和管理 Session。
+>
+> 其实也可以自己实现Filter来包装HttpServletRequest，从而将Session保存到redis中。
+
+#### StandardSession
+
+在Tomcat中具体实现类是`StandardSession`，其同时实现了Servlet规范的`javax.servlet.http.HttpSession`接口和Tomcat内部`org.apache.catalina.Session`包装接口。StandardSession 的核心成员变量如下：
+
+```java
+package org.apache.catalina.session;
+public class StandardSession implements HttpSession, Session, Serializable {
+    // 用户保存在Session的键值对信息
+    protected ConcurrentMap<String, Object> attributes = new ConcurrentHashMap<>();
+    // 此Session的创建时间戳
+    protected long creationTime = 0L;
+    // 此Session正在处理过期操作，即正在过期中
+    protected transient volatile boolean expiring = false;
+    // SessionId唯一标识符
+    protected String id = null;
+    // 最后访问时间
+    protected volatile long lastAccessedTime = creationTime;
+    // 此Session的事件监听器
+    protected transient ArrayList<SessionListener> listeners = new ArrayList<>();
+    // 此Session是否合法，即是否过期
+    protected volatile boolean isValid = false;
+    // 访问次数
+    protected transient AtomicInteger accessCount = null;
+    // Session的当前访问时间
+    protected volatile long thisAccessedTime = creationTime;
+}
+```
+
+#### 获取Session
+
+首先分析有Connector的Adapter转换后的HttpServletRequest接口实现类`org.apache.catalina.connector.Request`的doGetSession()实现：
+
+```java
+// @param create 若为true则在当前请求没有session时则新建
+protected Session doGetSession(boolean create) {
+    // 1.获取此request的Context容器
+    Context context = getContext();
+    if (context == null) 
+        return null;
+
+    // 2.如果已经存在session则直接返回
+    if ((session != null) && !session.isValid()) 
+        session = null;
+    if (session != null) 
+        return session;
+
+    // 3.从Context容器获取Session管理器Manager接口
+    Manager manager = context.getManager();
+    if (manager == null)
+        return null;      // Sessions are not supported
+    // 4.若Cookie中存在sessionId则尝试从内存中查询
+    if (requestedSessionId != null) {
+        // 根据id从map中找
+        session = manager.findSession(requestedSessionId);
+        if ((session != null) && !session.isValid()) 
+            session = null;
+        // 找到且未过期则刷新访问时间
+        if (session != null) {
+            session.access();
+            return session;
+        }
+    }
+
+    // 不需要新建则返回null
+    if (!create) return null;
+
+    // 省略部分代码
+    String sessionId = getRequestedSessionId();
+    // 省略部分代码
+
+    // 5.新建Session
+    session = manager.createSession(sessionId);
+    // 6.将新SessionId设置到Cookie中
+    if (session != null && trackModesIncludesCookie) {
+        Cookie cookie = ApplicationSessionCookieConfig.createSessionCookie(
+            context, session.getIdInternal(), isSecure());
+        response.addSessionCookieInternal(cookie);
+    }
+    if (session == null) return null;
+    session.access();
+    return session;
+}
+
+// 刷新Session访问时间
+public void access() {
+    // 为什么刷thisAccessedTime而不是lastAccessedTime呢？
+    this.thisAccessedTime = System.currentTimeMillis();
+    if (ACTIVITY_CHECK) 
+        accessCount.incrementAndGet();// 新增访问次数
+}
+```
+
+获取过程还是比较简单的，从Cookie中获取到SessionId后从map查询，并更新访问时间和访问次数
+
+若未创建Session则需要调用Session管理器Manager去创建。
+
+#### 创建Session
+
+Tomcat 中主要由每个 Context 容器内的一个 Manager 对象来管理 Session。默认实现类为 StandardManager。
+
+```java
+// ManagerBase.java
+public Session createSession(String sessionId) {
+    // 1.判断是否活跃Session数超过限制，默认无限制-1
+    if ((maxActiveSessions >= 0) &&
+        (getActiveSessions() >= maxActiveSessions)) {
+        rejectedSessions++;
+        throw new TooManyActiveSessionsException(
+            sm.getString("managerBase.createSession.ise"),
+            maxActiveSessions);
+    }
+
+    // 2.创建新StandardSession
+    Session session = createEmptySession();
+
+    // Initialize the properties of the new session and return it
+    session.setNew(true);
+    session.setValid(true);
+    session.setCreationTime(System.currentTimeMillis());
+    session.setMaxInactiveInterval(getContext().getSessionTimeout() * 60);
+    String id = sessionId;
+    // 3.若id为null，则生成新的唯一SessionId
+    // 默认生成16个字符的随机字符串
+    if (id == null) {
+        id = generateSessionId();
+    }
+    // 4.设置SessionId，并且将其更新到Manager的map容器内
+    session.setId(id);
+    sessionCounter++;
+
+    // 4.将创建时间添加到LinkedList中，并且把最先添加的时间移除 
+    // 主要还是方便清理过期Session
+    SessionTiming timing = new SessionTiming(session.getCreationTime(), 0);
+    synchronized (sessionCreationTiming) {
+        sessionCreationTiming.add(timing);
+        sessionCreationTiming.poll();
+    }
+    return session;
+}
+protected final Deque<SessionTiming> sessionCreationTiming =
+    new LinkedList<>();
+
+// StandardSession.java
+public void setId(String id, boolean notify) {
+    // 移除旧的SessionId
+    if ((this.id != null) && (manager != null)) 
+        manager.remove(this);
+
+    this.id = id;
+
+    // 更新新的id-->session到Manager的map容器
+    if (manager != null) 
+        manager.add(this);
+
+    // 通知此Session的监听器新Session创建了
+    if (notify) 
+        tellNew();
+}
+```
+
+这个创建StandardSession对象过程中，若为给定SessionId则会生成16字符的随机字符串，而且将其设置到Session中，并将映射添加到Manager的map容器内。
+
+#### 清理过期Session
+
+在上面的getSession()方法中知道，每次获取Session之前都会调用Session#isValid()方法校验其有效性，当然除了这个使用前校验，还有定时的后台过期。
+
+容器组件会开启一个 ContainerBackgroundProcessor 后台线程，调用自己以及子容器的 backgroundProcess 进行一些后台逻辑的处理，和 Lifecycle 一样，这个动作也是具有传递性的，也就是说子容器还会把这个动作传递给自己的子容器。其中StandardContext容器会调用其StandManager#backgroupdProcess()方法清理过期Session：
+
+![tomcat-backgroudProcess](springboot.assets/tomcat-backgroudProcess.png)
+
+```java
+// ManagerBase.java   
+public void backgroundProcess() {
+    // processExpiresFrequency 默认值为6
+    // 而backgroundProcess默认每隔10s调用一次，也就是说除了任务执行的耗时，每隔 60s 执行一次
+    count = (count + 1) % processExpiresFrequency;
+    if (count == 0) 
+        processExpires();
+}
+
+// 单线程处理，无须考虑线程安全
+public void processExpires() {
+    // 遍历所有Session，调用其isValid()方法
+    long timeNow = System.currentTimeMillis();
+    Session sessions[] = findSessions();
+    int expireHere = 0 ;
+
+    for (Session session : sessions) {
+        if (session != null && !session.isValid()) {
+            expireHere++;
+        }
+    }
+    long timeEnd = System.currentTimeMillis();
+ 
+    processingTime += ( timeEnd - timeNow );// 处理Session过期耗时，可以用来作为监控指标
+}
+```
+
+毕竟是遍历所有session，所以将原本10s的间隔回调取模处理为60s。
+
+StandardSession的isValid()方法就是很简单的计算访问时间和Session活跃时间：
+
+```java
+// StandardSession.java
+public boolean isValid() {
+    if (!this.isValid) 
+        return false;
+    if (this.expiring) 
+        return true;
+    if (ACTIVITY_CHECK && accessCount.get() > 0) 
+        return true;
+
+    // 如果Session的非活跃时间超过限制则将其过期清理
+    if (maxInactiveInterval > 0) {
+        int timeIdle = (int) (getIdleTimeInternal() / 1000L);
+        if (timeIdle >= maxInactiveInterval) 
+            expire(true);
+    }
+    return this.isValid;
+}
+
+public void expire(boolean notify) {
+    if (!isValid) return;
+    synchronized (this) {
+        if (expiring || !isValid) return;// 双重校验嘛
+        if (manager == null) return;
+
+        // 1.标记此Session正在过期中
+        expiring = true;
+
+        // 2.通知Session的监听器Session正在过期
+        Context context = manager.getContext();
+        if (notify) {
+            // 省略
+        }
+
+        // 3.从Manager的map容器内删除Session
+        manager.remove(this, true);
+
+        // 省略 通知监听器Session已经过期完成
+
+        // 4.标记Session已经过期
+        setValid(false);
+        expiring = false;
+        // 省略
+    }
+}
+```
+
+从这里可以大概得知，Tomcat对于Session过期的处理策略就是**用前检查+定时检查**。定时检查以遍历方式进行的，但是60s一次的话也还是可以接受。
+
 ## 组件生命周期
 
 组件生命周期指Tomcat各个组件如Connector连接器、多层级Servlet容器的这些组件的生命周期。它们都实现了LifeCycle接口：
@@ -7669,6 +7922,48 @@ Tomcat为了高性能设计，从以下角度进行分析：
   - 缩小锁粒度
   - 原子变量和CAS
   - volatile
+
+### IO模型选择
+
+I/O 调优实际上是连接器类型的选择，一般情况下**默认都是 NIO**，在绝大多数情况下都是够用的。
+
+如果Web 应用用到了 **TLS 加密传输**，而且对性能要求极高，这个时候可以考虑 APR，因为 APR 通过 OpenSSL 来处理 TLS 握手和加 / 解密。OpenSSL 本身用 C 语言实现，它还对 TLS 通信做了优化，所以性能比 Java 要高。
+
+什么时候选择NIO2呢？如果你的 Tomcat **跑在 Windows 平台上，并且 HTTP 请求的数据量比较大**，可以考虑 NIO.2，这是因为 Windows 从操作系统层面实现了真正意义上的异步 I/O，如果传输的数据量比较大，异步 I/O 的效果就能显现出来。
+
+如果 Tomcat 跑在 Linux 平台上，建议使用 NIO，这是因为 Linux 内核没有很完善地支持异步 I/O 模型，因此 JVM 并没有采用原生的 Linux 异步 I/O，而是在应用层面通过 epoll 模拟了异步 I/O 模型，只是 Java NIO 的使用者感觉不到而已。因此可以这样理解，在 Linux 平台上，Java NIO 和 Java NIO.2 底层都是通过 epoll 来实现的，但是 Java NIO 更加简单高效。
+
+### 线程池调控
+
+在NioEndpoint#start()方法得知默认情况下创建的线程池参数如下：
+
+- 核心线程数：默认10
+- 最大线程数：默认200
+- 线程空闲时间：60s
+- 阻塞队列：Tomcat扩展的无界队列LinkedBlockingQueue的子类TaskQueue
+
+这里面可以**考虑调控的是maxThreads**，其它的默认就可以了。
+
+对于核心线程数：发现系统在闲的时候用不到 10 个线程，就可以调小一点；如果系统在大部分时间都比较忙，线程池中的线程总是远远多于 10 个，这个时候可以把这个参数调大一点，因为这样线程池就不需要反复地创建和销毁线程了。
+
+接下来分析如何调控最大线程数，先了解一下**利特尔法则：系统中的请求数 = 请求的到达速率 × 每个请求处理时间**。如单核服务器中每秒 10 个请求到达，平均处理一个请求需要 1 秒，那么服务器任何时候都有 10 个请求在处理，即需要 10 个线程。
+
+通过该法则计算队列的长度，创建相应数量的线程来处理请求，这样既能以最快的速度处理完所有请求，同时又没有额外的线程资源闲置和浪费。
+
+从该法则可以得到下面两个公式：
+
+- **线程池大小 = 每秒请求数 × 平均请求处理时间**
+- **线程池大小 = （线程 I/O 阻塞时间 + 线程 CPU 时间 ）/ 线程 CPU 时间**
+
+**实际场景下如何确定最大线程数：**
+
+1、先根据该公式**计算理论线程数**
+
+2、**压力测试**，当达到系统极限时（错误数增加，或者响应时间大幅增加），再逐步加大线程数，当增加到某个值，再增加线程数也无济于事，甚至 TPS 反而下降，那这个值可以认为是最佳线程数。
+
+### 拒绝网络连接原因分析和网络优化
+
+https://time.geekbang.org/column/article/115471
 
 ## 打破双亲委派和隔离Web类
 
