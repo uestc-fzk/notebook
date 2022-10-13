@@ -2785,9 +2785,7 @@ Externalizable接口和Serializable接口功能类似，不过此接口强制用
 
 ## 资料
 
-尚硅谷的PDF课件
-
-Java17源码nio包
+java.nio包
 
 [IO模型详解](https://mp.weixin.qq.com/s?__biz=Mzg3NzU5NTIwNg==&mid=2247496448&idx=1&sn=cd502f850290a25949dd4a11ac55a039)
 
@@ -3025,8 +3023,6 @@ HeapByteBuffer 对象本身在 JVM 堆上分配，并且它持有的字节数组
 如果使用 HeapByteBuffer，你会发现 JVM 堆和内核之间多了一层中转，而 DirectByteBuffer 用来解决这个问题，DirectByteBuffer 对象本身在 JVM 堆上，但是它持有的字节数组不是从 JVM 堆上分配的，而是从本地内存分配的。
 
 DirectByteBuffer 对象中有个 long 类型字段 address，记录着本地内存的地址，这样在接收数据的时候，直接把这个本地内存地址传递给 C 程序，C 程序会将网络数据从内核拷贝到这个本地内存，JVM 可以直接读取这个本地内存，**这种方式比 HeapByteBuffer 少了一次拷贝**，因此一般来说它的速度会比 HeapByteBuffer 快好几倍。
-
-
 
 ## Channel
 
@@ -3876,6 +3872,11 @@ public abstract class SelectionKey {
     
 }
 ```
+
+- Connect ：连接完成事件( TCP 连接 )，仅适用于客户端，对应 `SelectionKey.OP_CONNECT` 。
+- Accept ：接受新连接事件，仅适用于服务端，对应 `SelectionKey.OP_ACCEPT` 。
+- Read ：读事件，适用于两端，对应 `SelectionKey.OP_READ` ，表示 Buffer 可读。
+- Write ：写时间，适用于两端，对应 `SelectionKey.OP_WRITE` ，表示 Buffer 可写。
 
 ### NIO编程示例
 
