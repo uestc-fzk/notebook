@@ -726,6 +726,8 @@ ChannelPipeline中还有很多执行链向后传递的入站方法和出站方�
 
 保存和Channel相关的上下文信息，关联有1个ChannelHandler对象。同时也绑定对应的Channel和ChannelPipeline。
 
+ChannelPipeline中就是以ChannelHandlerContext封装ChannelHandler，并将其组装成链。
+
 ```java
 /**
  * 使ChannelHandler能够与其ChannelPipeline和其他处理程序进行交互。
@@ -751,6 +753,346 @@ public interface ChannelHandlerContext extends AttributeMap, ChannelInboundInvok
 
     // 此绑定的pipeline
     ChannelPipeline pipeline();
+}
+```
+
+# Reactor模型
+
+Reactor模型核心思想：
+
+
+> 将关注的 I/O 事件注册到多路复用器上，一旦有 I/O 事件触发，将事件分发到事件处理器中，执行就绪 I/O 事件对应的处理函数中。模型中有三个重要的组件：
+>
+> **多路复用器**：由操作系统提供接口，Linux 提供的 I/O 复用接口有select、poll、epoll 。
+> **事件分发器**：将多路复用器返回的就绪事件分发到事件处理器中。
+> **事件处理器**：处理就绪事件处理函数。
+
+Reactor有3种模型实现：
+
+- 单Reactor单线程模型
+- 单Reactor多线程模型
+- 多Reactor多线程模型
+
+可以看看这篇文章：https://mp.weixin.qq.com/s/GRkZ1IEfTalQSkErWe1SAg
+
+当下开源软件如Redis、Nginx、Netty做到网络高性能的原因就是使用I/O多路复用，而多路复用网络编程一般是面向过程方式写代码，开发效率不高，于是大佬们基于面向对象的思想，对 I/O 多路复用作了一层封装，让使用者不用考虑底层网络 API 的细节，只需要关注应用代码的编写，这种模式就是Reactor模式。
+
+## 单Reactor单线程
+
+![单Reactor单线程](netty.assets/单Reactor单线程.png)
+
+- Reactor通过Selector监听到事件后，进行dispatch分发，连接事件分发给Acceptor，读写事件分发给Handler
+- Acceptor 通过accept()方法获取连接，并创建一个handler绑定到此连接
+- Handler 对象的作用是处理业务，当监听到连接的读写事件则交由其绑定的handler处理，Handler 对象通过 `read -> 业务处理 -> send` 的流程来完成完整的业务流程。
+
+Redis在未采用I/O多线程之前呢，正是这种单Reactor单进程/线程模型，后来Redis把响应send交给专门I/O线程去输出了。业务处理依旧是单线程，因为Redis的内存操作不会阻塞，单个线程不用上下文切换更能长时间占有CPU。
+
+## 单Reactor多线程
+
+![单Reactor多线程](netty.assets/单Reactor多线程.png)
+
+该模型**和单Reactor单线程的区别在于将业务处理逻辑分派到线程池中处理**，其它如I/O事件的监听/分派、read、send依旧由主线程处理。
+
+这里很明显，出现性能瓶颈的地方肯定会是Reactor所在主线程。
+
+Tomcat大致采用此模型，一个Acceptor线程负责监听新连接，Poller线程负责监听IO事件，监听到的Socket的IO事件将其包装为`read->业务处理->send`任务放入线程池处理。和这个模型的区别在于将耗时的read和send也交由线程池来处理。
+
+## 多Reactor多线程
+
+![多Reactor多线程](netty.assets/多Reactor多线程.png)
+
+主Reactor就负责监听新连接，通过Acceptor的accept获取连接后分配给某个子线程SubReactor(一个SubReactor可以注册监听多个连接，不是一个连接一个线程哈)。
+
+SubReactor就负责监听IO事件，并进行`read -> 业务处理 -> send`流程。
+
+Netty采用此模型，其EventLoopGroup和EventLoop就以这种模型开发。
+
+1. mainReactor 负责监听 ServerSocketChannel ，用来处理客户端新连接的建立，并将建立的客户端的 SocketChannel 指定注册给 subReactor 。
+2. subReactor 维护自己的 Selector ，基于 mainReactor 建立的客户端的 SocketChannel 多路分离 IO 读写事件，读写网络数据。对于业务处理的功能，另外扔给 worker 线程池来完成。
+
+### 案例
+
+下面代码是多Reactor多线程示例“
+
+MainReactor如下：
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-10-14 10:15
+ */
+public class MainReactor implements Runnable {
+    public static void main(String[] args) throws IOException {
+        ServerSocketChannel serverSocketChannel = ServerSocketChannel.open().bind(new InetSocketAddress("localhost", 8080));
+        serverSocketChannel.configureBlocking(false);
+        MainReactor mainReactor = new MainReactor(serverSocketChannel);
+        mainReactor.start();
+    }
+
+    private final Selector mainSelector;
+    private final ServerSocketChannel serverSocketChannel;
+    private final Acceptor acceptor;
+    private final SubReactor[] subReactors;
+    private volatile int nextSunReactor = 0;
+
+    public MainReactor(ServerSocketChannel serverSocketChannel) throws IOException {
+        this.serverSocketChannel = serverSocketChannel;
+        this.mainSelector = SelectorProvider.provider().openSelector();
+        this.acceptor = new Acceptor(mainSelector);
+        this.serverSocketChannel.register(mainSelector, SelectionKey.OP_ACCEPT);
+
+        this.subReactors = new SubReactor[Runtime.getRuntime().availableProcessors() + 1];
+        for (int i = 0; i < subReactors.length; i++) {
+            subReactors[i] = new SubReactor();
+        }
+    }
+
+    public void start() throws IOException {
+        // 1.启动SubReactor线程组
+        ThreadGroup subReactorGroup = new ThreadGroup("subReactors");
+        for (int i = 0; i < subReactors.length; i++) {
+            new Thread(subReactorGroup, subReactors[i], "subReactor-" + i).start();
+        }
+
+        // 2.启动MainReactor/Acceptor线程
+        new Thread(this, "mainReactor").start();
+    }
+
+    /**
+     * 将SocketChannel转发到各个SubReactor中
+     *
+     * @param socketChannel 新连接
+     */
+    private void dispatch(SocketChannel socketChannel) throws IOException {
+        // 将SocketChannel分派到各个SubReactor中
+        synchronized (subReactors) {
+            System.out.printf("监听到新连接: %s 即将分派到%s\n", socketChannel.getRemoteAddress(), "subReactor-" + nextSunReactor);
+            SubReactor subReactor = subReactors[nextSunReactor++];
+            if (nextSunReactor >= subReactors.length) nextSunReactor = 0;
+            subReactor.registerChannel(socketChannel);
+        }
+    }
+
+    @Override
+    public void run() {
+        while (!Thread.interrupted()) {
+            try {
+                // 监听新连接并转发
+                SocketChannel socketChannel = this.acceptor.accept();
+                if (socketChannel != null) {
+                    dispatch(socketChannel);
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }   
+}
+```
+
+Acceptor如下：感觉这个Acceptor有点不必要啊？
+
+```java
+static class Acceptor {
+    private final Selector mainSelector;
+
+    public Acceptor(Selector selector) {
+        this.mainSelector = selector;
+    }
+
+    public SocketChannel accept() throws IOException {
+        // 接收器获取新连接并返回
+        if (mainSelector.select(1000) > 0) {
+            Iterator<SelectionKey> keys = mainSelector.selectedKeys().iterator();
+            while (keys.hasNext()) {
+                SelectionKey selectionKey = keys.next();
+                keys.remove();
+
+                if (selectionKey.isAcceptable()) {
+                    ServerSocketChannel serverSocketChannel = (ServerSocketChannel) (selectionKey.channel());
+                    SocketChannel sc = serverSocketChannel.accept();
+                    sc.configureBlocking(false);
+                    sc.write(ByteBuffer.wrap("您已经连上服务器".getBytes(StandardCharsets.UTF_8)));
+                    return sc;
+                }
+            }
+        }
+        return null;
+    }
+}
+```
+
+SubReactor如下：每个SubReactor都有1个Selector和1个线程池。
+
+```java
+static class SubReactor implements Runnable {
+    final Selector subSelector;
+
+    //多线程处理业务逻辑
+    ExecutorService executorService;
+
+    SubReactor() throws IOException {
+        this.subSelector = SelectorProvider.provider().openSelector();
+        this.executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    }
+
+    // 注册chanel，关注读事件
+    public void registerChannel(SocketChannel sc) throws IOException {
+        sc.configureBlocking(false);
+        sc.register(subSelector, SelectionKey.OP_READ);
+        wakeup();// 必须唤醒Selector才能检测到新加入的SocketChannel
+    }
+
+    /**
+     * wakeup的目的在于唤醒Selector，原因如下：
+     * 1.新加入的SocketChannel必须让Selector重新调用select()方法才能检测到
+     * 2.SocketChannel修改兴趣集也必须让Selector重新调用select()方法才能检测到新兴趣集
+     * 因此必须调用Selector#wakeup()让其立刻从select()阻塞调用中唤醒并重新发起select()监听
+     */
+    public void wakeup() {
+        this.subSelector.wakeup();
+    }
+
+    public void updateInterestOps(SelectionKey key, int interest) {
+        key.interestOps(interest);
+        wakeup();// 修改兴趣集必须唤醒Selector让其重新发起select()监听才能监听到新兴趣集
+    }
+
+    @Override
+    public void run() {
+        while (!Thread.interrupted()) {
+            try {
+                if (subSelector.select() > 0) {
+                    Set<SelectionKey> keys = subSelector.selectedKeys();
+                    Iterator<SelectionKey> iterator = keys.iterator();
+                    while (iterator.hasNext()) {
+                        SelectionKey key = iterator.next();
+                        iterator.remove();
+                        // 监听到可读事件，进行处理
+                        if (key.isReadable()) {
+                            // 暂时将其兴趣集设置为0，防止多次触发可读操作
+                            updateInterestOps(key, 0);
+                            processRead(key);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void processRead(SelectionKey key) {
+        // 线程池异步处理
+        executorService.execute(() -> {
+            try {
+                SocketChannel sc = (SocketChannel) key.channel();
+                StringBuilder sb = new StringBuilder(128);
+                ByteBuffer buf = ByteBuffer.allocate(128);
+
+                while (sc.read(buf) > 0) {
+                    buf.flip();
+                    sb.append(StandardCharsets.UTF_8.decode(buf));
+                    buf.clear();
+                }
+                String message = sb.toString();
+                System.out.printf("服务端收到来自%s的消息：%s\n", sc.getRemoteAddress(), message);
+                if ("ping".equals(message)) sc.write(ByteBuffer.wrap("pong".getBytes()));// 心跳
+
+                // 将兴趣集恢复，监听读事件
+                updateInterestOps(key, SelectionKey.OP_READ);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        });
+    }
+}
+```
+
+客户端代码示例：
+
+```java
+/**
+ * @author fzk
+ * @datetime 2022-10-14 11:19
+ */
+public class Client {
+    public static void main(String[] args) {
+        new Client().startClient("client");
+    }
+
+    public void startClient(String clientName) {
+        try (
+            // 1.新建客户端通道
+            SocketChannel sc = SocketChannel.open(new InetSocketAddress("localhost", 8080));
+            // 2.新建选择器
+            Selector selector = Selector.open();
+        ) {
+            sc.configureBlocking(false);// 设为非阻塞模式
+            // 3.客户端通道注册到选择器
+            sc.register(selector, SelectionKey.OP_READ);
+
+            // 4.接受者线程
+            Thread sender = new Thread(new Receiver(selector, clientName));
+            sender.start();
+
+            // 5.主线程做发送者
+            System.out.printf("%s 启动成功...\n", clientName);
+            Scanner scanner = new Scanner(System.in);
+            while (scanner.hasNextLine()) {
+                String nextLine = scanner.nextLine();
+                try {
+                    sc.write(ByteBuffer.wrap(nextLine.getBytes(StandardCharsets.UTF_8)));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    System.exit(1);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static class Receiver implements Runnable {
+        private Selector selector;
+        private String clientName;
+
+        public Receiver(Selector selector, String clientName) {
+            this.selector = selector;
+            this.clientName = clientName;
+        }
+
+        @Override
+        public void run() {
+            try {
+                // 1.监听通道
+                while (selector.select() > 0) {
+                    // 2.取出可操作的通道
+                    Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                    Iterator<SelectionKey> iterator = selectionKeys.iterator();
+                    while (iterator.hasNext()) {
+                        SelectionKey next = iterator.next();
+                        iterator.remove();
+                        // 2.读取消息
+                        if (next.isReadable()) {
+                            SocketChannel socketChannel = (SocketChannel) next.channel();
+                            ByteBuffer buf = ByteBuffer.allocate(128);
+                            StringBuilder sb = new StringBuilder();
+                            while (socketChannel.read(buf) > 0) {
+                                buf.flip();
+                                sb.append(StandardCharsets.UTF_8.decode(buf));
+                            }
+                            String message = sb.toString();
+                            System.out.printf("客户端%s收到消息: %s\n", clientName, message);
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.exit(1);
+            }
+        }
+    }
 }
 ```
 
@@ -926,12 +1268,12 @@ private void register0(ChannelPromise promise) {
         neverRegistered = false;
         registered = true;
 
-        // 2.触发ChannelHandler#handlerAdded()回调
+        // 2.执行可能的挂起的ChannelHandler#handlerAdded()回调任务
         // 比如ChannelInitializer就是在这回调初始化，此回调常用来添加ChannelHandler
         pipeline.invokeHandlerAddedIfNeeded();
 
         safeSetSuccess(promise);
-        // 3.触发ChannelInboundHandler#channelRegistered()回调
+        // 3.向管道传播入站事件pipeline#channelRegistered() 
         pipeline.fireChannelRegistered();
         // 省略部分代码
     } catch (Throwable t) {
@@ -942,6 +1284,8 @@ private void register0(ChannelPromise promise) {
     }
 }
 ```
+
+这里第2步骤执行挂起的回调任务在后面的`ChannelPipeline#addLast()`方法添加ChannelHandler时会分析到。
 
 注册到Selector代码如下：
 
@@ -988,9 +1332,15 @@ private static void doBind0(
         }
     });
 }
+public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
+    @Override
+    public ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise) {
+        return pipeline.bind(localAddress, promise);// 传播出站事件bind
+    }
+}
 ```
 
-它最终会调用`AbstractUnsafe#bind()`进行端口绑定：
+这里的`AbstractChannel#bind(SocketAddress localAddress, ChannelPromise promise)`是一个pipeline出站事件，从`tail->head`，最终会调用HeadContext这个pipeline头节点里保存的`AbstractUnsafe#bind()`进行端口绑定：(关于bind事件在pipeline的传播，可以看后面专门的分析)
 
 ```java
 // AbstractChannel.AbstractUnsafe.java
@@ -1191,57 +1541,1356 @@ void init(Channel channel) {
 }
 ```
 
-# Reactor模型
-
-Reactor模型核心思想：
-
-
-> 将关注的 I/O 事件注册到多路复用器上，一旦有 I/O 事件触发，将事件分发到事件处理器中，执行就绪 I/O 事件对应的处理函数中。模型中有三个重要的组件：
->
-> **多路复用器**：由操作系统提供接口，Linux 提供的 I/O 复用接口有select、poll、epoll 。
-> **事件分发器**：将多路复用器返回的就绪事件分发到事件处理器中。
-> **事件处理器**：处理就绪事件处理函数。
-
-Reactor有3种模型实现：
-
-- 单Reactor单线程模型
-- 单Reactor多线程模型
-- 多Reactor多线程模型
-
-可以看看这篇文章：https://mp.weixin.qq.com/s/GRkZ1IEfTalQSkErWe1SAg
-
-当下开源软件如Redis、Nginx、Netty做到网络高性能的原因就是使用I/O多路复用，而多路复用网络编程一般是面向过程方式写代码，开发效率不高，于是大佬们基于面向对象的思想，对 I/O 多路复用作了一层封装，让使用者不用考虑底层网络 API 的细节，只需要关注应用代码的编写，这种模式就是Reactor模式。
-
-## 单Reactor单线程
-
-![单Reactor单线程](netty.assets/单Reactor单线程.png)
-
-- Reactor通过Selector监听到事件后，进行dispatch分发，连接事件分发给Acceptor，读写事件分发给Handler
-- Acceptor 通过accept()方法获取连接，并创建一个handler绑定到此连接
-- Handler 对象的作用是处理业务，当监听到连接的读写事件则交由其绑定的handler处理，Handler 对象通过 `read -> 业务处理 -> send` 的流程来完成完整的业务流程。
-
-Redis在未采用I/O多线程之前呢，正是这种单Reactor单进程/线程模型，后来Redis把响应send交给专门I/O线程去输出了。业务处理依旧是单线程，因为Redis的内存操作不会阻塞，单个线程不用上下文切换更能长时间占有CPU。
-
-## 单Reactor多线程
-
-![单Reactor多线程](netty.assets/单Reactor多线程.png)
-
-该模型**和单Reactor单线程的区别在于将业务处理逻辑分派到线程池中处理**，其它如I/O事件的监听/分派、read、send依旧由主线程处理。
-
-这里很明显，出现性能瓶颈的地方肯定会是Reactor所在主线程。
-
-Tomcat大致采用此模型，一个Acceptor线程负责监听新连接，Poller线程负责监听IO事件，监听到的Socket的IO事件将其包装为`read->业务处理->send`任务放入线程池处理。和这个模型的区别在于将耗时的read和send也交由线程池来处理。
-
-## 多Reactor多线程
-
-![多Reactor多线程](netty.assets/多Reactor多线程.png)
-
-主Reactor就负责监听新连接，通过Acceptor的accept获取连接后分配给某个子线程SubReactor(一个SubReactor可以注册监听多个连接，不是一个连接一个线程哈)。
-
-SubReactor就负责监听IO事件，并进行`read -> 业务处理 -> send`流程。
-
-Netty采用此模型，其EventLoopGroup和EventLoop就以这种模型开发。
-
 # EventLoop
 
 Netty的EventLoop基于Reactor模型思想设计的，所以需要先理解Reactor模型。
+
+EventLoop对应一个Reactor，EventLoopGroup是EventLoop分组，相当于一组Reactor。
+
+对于Netty NIO客户端而言，一般仅创建1个EventLoopGroup，因为客户端启动器Bootstrap只能连接一个远程服务端，一般仅分配一个EventLoop，即一个Reactor。
+
+Netty NIO服务端一般会创建2个EventLoopGroup：
+
+- `bossGroup`：对应Reactor模型MainReactor，一般会传入参数`nThreads=1`，表示只使用1个EventLoop，即1个Reactor。
+- `wokerGroup`：对应Reactor模型SubReactor，默认SubReactor个数和CPU核心数*2相等。
+
+`bossGroup` 如果配置多个线程，是否可以使用**多个 mainReactor** 呢？一个 Netty NIO 服务端**同一时间**，只能 bind 一个端口，那么只能使用一个 Selector 处理客户端连接事件。又因为，Selector 操作是非线程安全的，所以无法在多个 EventLoop ( 多个线程 )中，同时操作。所以这样就导致，即使 `bossGroup` 配置多个线程，实际能够使用的也就是一个线程。
+
+## NioEventLoopGroup
+
+NioEventLoopGroup就是管理着一组NioEventLoop(作用如Reactor)，当设置数量为1时可作为主Reactor，数量大于1时可作为从Reactor组。
+
+![NioEventLoopGroup](netty.assets/NioEventLoopGroup.png)
+
+先分析具有chooser和children属性的MultithreadEventExecutorGroup：
+
+```java
+// EventExecutorGroup实现的抽象基类，它同时使用多个线程处理其任务
+public abstract class MultithreadEventExecutorGroup extends AbstractEventExecutorGroup {
+    private final EventExecutor[] children;// 类似Reactor组
+
+    // 选择器：选择哪个EventExecutor，选择方式就是平均分配，即自增序列取余
+    private final EventExecutorChooserFactory.EventExecutorChooser chooser;
+
+    protected MultithreadEventExecutorGroup(int nThreads, Executor executor, EventExecutorChooserFactory chooserFactory, Object... args) {
+        checkPositive(nThreads, "nThreads");
+        // 1.创建执行器线程池
+        if (executor == null) {
+            executor = new ThreadPerTaskExecutor(newDefaultThreadFactory());
+        }
+        // 2.创建EventExecutor数组，默认是NioEventLoop
+        children = new EventExecutor[nThreads];
+        for (int i = 0; i < nThreads; i++) {
+            boolean success = false;
+            // 省略try/catch
+            children[i] = newChild(executor, args);// 由子类实现
+            success = true;
+        }
+        // 3.创建EventExecutor选择器
+        chooser = chooserFactory.newChooser(children);
+
+     	// 省略部分代码
+    }
+
+    // 由选择器选择下个EventExecutor，默认是平均选择
+    public EventExecutor next() {
+        return chooser.next();
+    }
+    // 创建新的EventExecutor，由子类实现，如NioEventLoopGroup就会创建NioEventLoop
+    protected abstract EventExecutor newChild(Executor executor, Object... args) throws Exception;
+}
+```
+
+EventExecutor选择器默认是`GenericEventExecutorChooser`：就是自增序列取余，平均分配到每个EventExecutor。
+
+```java
+private static final class GenericEventExecutorChooser implements EventExecutorChooser {
+    private final AtomicLong idx = new AtomicLong();
+    private final EventExecutor[] executors;
+
+    GenericEventExecutorChooser(EventExecutor[] executors) {
+        this.executors = executors;
+    }
+
+    @Override
+    public EventExecutor next() {
+        return executors[(int) Math.abs(idx.getAndIncrement() % executors.length)];
+    }
+}
+```
+
+接下来分析NioEventLoopGroup，它主要提供了创建EventExecutor即Reactor的方法newChild()：
+
+```java
+// MultithreadEventLoopGroup实现，用于基于 NIO Selector的Channel
+public class NioEventLoopGroup extends MultithreadEventLoopGroup {
+    // 设置子事件循环中用于 I/O 所需时间量的百分比。
+    // 默认值为50 ，这意味着事件循环将尝试在 I/O 上花费与非 I/O 任务相同的时间。
+    public void setIoRatio(int ioRatio) {
+        // 设置所有 EventLoop 的 IO 任务占用执行时间的比例，默认50，即I/O和非I/O各占50%
+        for (EventExecutor e : this) {
+            ((NioEventLoop) e).setIoRatio(ioRatio);
+        }
+    }
+
+    // 用新创建的Selector替换子事件循环的当前Selector以解决臭名昭著的 epoll 100% CPU 错误
+    public void rebuildSelectors() {
+        // 因为 JDK 有 epoll 100% CPU Bug
+        // 实际上，NioEventLoop 当触发该 Bug 时，也会自动调用 NioEventLoop#rebuildSelector() 方法，
+        // 进行重建 Selector 对象，以修复该问题。
+        for (EventExecutor e : this) {
+            ((NioEventLoop) e).rebuildSelector();
+        }
+    }
+
+    // 创建child EventLoop，即Reactor模型中的子/从Reactor
+    protected EventLoop newChild(Executor executor, Object... args) throws Exception {
+        // 省略参数获取
+        return new NioEventLoop(this, executor, selectorProvider,
+                                selectStrategyFactory.newSelectStrategy(),
+                                rejectedExecutionHandler, taskQueueFactory, tailTaskQueueFactory);
+    }
+}
+```
+
+## NioEventLoop
+
+![NioEventLoop](netty.assets/NioEventLoop.png)
+
+NioEventLoop就是Reactor模型中的Reactor，保存有Selector和线程池。
+
+```java
+// SingleThreadEventLoop实现将Channel注册到Selector并且在事件循环中对这些进行多路复用
+public final class NioEventLoop extends SingleThreadEventLoop {
+    // 是否禁用SelectionKey的优化，默认开启
+    private static final boolean DISABLE_KEY_SET_OPTIMIZATION =
+        SystemPropertyUtil.getBoolean("io.netty.noKeySetOptimization", false);
+    // 少于该值，不开启空轮训重建新的Selector对象
+    private static final int MIN_PREMATURE_SELECTOR_RETURNS = 3;
+    // Selector空轮询N次后，重建新的Selector对象，用以解决JDK NIO的epoll空轮询bug，默认512
+    private static final int SELECTOR_AUTO_REBUILD_THRESHOLD;
+
+    // 经过优化后包装的Selector对象
+    private Selector selector;
+    private Selector unwrappedSelector;// 未包装的原始Selector对象
+    // 注册的SelectedKey集合，Netty自己实现，经过优化
+    private SelectedSelectionKeySet selectedKeys;
+
+    // nextWakeupNanos is: 下次唤醒时间，因为Selector#wakeup()开销较大，尽量减少调用
+    //    AWAKE            when EL is awake
+    //    NONE             when EL is waiting with no wakeup scheduled
+    //    other value T    when EL is waiting with wakeup scheduled at time T
+    private final AtomicLong nextWakeupNanos = new AtomicLong(AWAKE);
+
+    /**
+     * 处理 Channel 的I就绪的 IO 事件，占处理任务的总时间的比例
+     * 有3中类型任务：
+     * 1.Channel的就绪I/O事件
+     * 2.普通任务
+     * 3.定时任务
+     * */
+    private volatile int ioRatio = 50;
+}
+```
+
+### openSelector
+
+```java
+private SelectorTuple openSelector() {
+    // 1.创建JavaNIO的Selector
+    final Selector unwrappedSelector;
+    unwrappedSelector = provider.openSelector();
+
+    if (DISABLE_KEY_SET_OPTIMIZATION) // 如果禁用优化则直接返回，默认开始优化
+        return new SelectorTuple(unwrappedSelector);
+    
+    // 2.获得SelectorImpl类
+    Object maybeSelectorImplClass = AccessController.doPrivileged(new PrivilegedAction<Object>() {/*省略*/});
+	// 省略获取失败的异常处理
+
+    final Class<?> selectorImplClass = (Class<?>) maybeSelectorImplClass;
+    // 3.创建 SelectedSelectionKeySet 对象，这是 Netty 对 Selector 的 selectionKeys 的优化
+    final SelectedSelectionKeySet selectedKeySet = new SelectedSelectionKeySet();
+    
+    // 4.设置 SelectedSelectionKeySet 对象到 unwrappedSelector中，替换其以HashSet实现的selectedKey
+    Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+		// 省略
+    });
+	// 省略异常处理
+    
+    // 5.创建 SelectedSelectionKeySetSelector 对象，这是 Netty 对 Selector 的优化实现类
+    return new SelectorTuple(unwrappedSelector,
+                             new SelectedSelectionKeySetSelector(unwrappedSelector, selectedKeySet));
+}
+```
+
+从上面的代码知道，Netty以`SelectedSelectionKeySetSelector`包装了Selector，将其selectedKey()方法返回的HashSet替换为了`SelectedSelectionKeySet`，为什么要替换呢？
+
+这就得从`SelectedSelectionKeySet`和`SelectedSelectionKeySetSelector`来分析了。
+
+#### 优化的SelectedKeySet
+
+Netty以`SelectedSelectionKeySetSelector`作为JavaNIO Selector的包装类，并以`SelectedSelectionKeySet`替换了原本Selector容纳选中的selectedKey的集合HashSet，使得其处理发生IO事件的selectionKeys的平均添加/删除时间复杂度从O(logN)下降至O(1)。
+
+```java
+/**
+ * 这是Netty对SelectorImpl的selectedKeys的小优化，相比于其HashSet的实现，此实现事件复杂度从 O(logn) 降低到 O(1)
+ * 因为 #remove(Object o)、#contains(Object o) 不会使用到，索性不进行实现
+ */
+final class SelectedSelectionKeySet extends AbstractSet<SelectionKey> {
+    SelectionKey[] keys; // 以数组容纳发生IO事件的SelectionKey
+    int size;// 数组可读大小
+
+    SelectedSelectionKeySet() {
+        keys = new SelectionKey[1024];// 默认1024大小数组
+    }
+
+    @Override
+    public boolean add(SelectionKey o) {
+        if (o == null) 
+            return false;
+        if (size == keys.length) 
+            increaseCapacity();// 2倍扩容
+        keys[size++] = o;
+        return true;
+    }
+
+    // 每次读取使用完数据，调用该方法，进行重置。
+    void reset() {
+        reset(0);
+    }
+
+    void reset(int start) {
+        Arrays.fill(keys, start, size, null);
+        size = 0;
+    }
+
+    private void increaseCapacity() {
+        SelectionKey[] newKeys = new SelectionKey[keys.length << 1];
+        System.arraycopy(keys, 0, newKeys, 0, size);
+        keys = newKeys;
+    }
+}
+```
+
+这个类以数组容纳新发生IO事件的SelectionKey，而原本Selector的以HashSet作为容器。
+
+这样在Selector检测到新IO事件时添加操作为O(1)，而原本的HashSet为O(logN)。
+
+在我们自己写网络编程时，处理发生IO事件的SelectionKey集合时，会获取其迭代器并每处理一个就移除一个，每次移除的时间复杂度为O(log N)，总得时间复杂度为O(NlogN)，而这个Netty简单优化的容器类则不会移除，而是直接`reset()`方法清空数组就行了，时间复杂度为O(1)。
+
+那么何时清空该集合呢？`SelectedSelectionKeySetSelector#select()`包装类会先清空集合，再调用包装的`selector#select()`。
+
+#### 优化的Selector
+
+Netty以`SelectedSelectionKeySetSelector`作为JavaNIO Selector的包装类，并以`SelectedSelectionKeySet`替换了原本Selector容纳选中的selectedKey的集合HashSet，使得其处理发生IO事件的selectionKeys的平均添加/删除时间复杂度从O(logN)下降至O(1)。
+
+```java
+// 基于 Netty SelectedSelectionKeySet 作为 selectionKeys 的 Selector 实现类
+// 其每次select()调用前都会调用 SelectedSelectionKeySet#reset() 方法，重置 selectionKeys
+final class SelectedSelectionKeySetSelector extends Selector {
+    private final SelectedSelectionKeySet selectionKeys;
+    private final Selector delegate;// 包装的原始Selector
+
+    SelectedSelectionKeySetSelector(Selector delegate, SelectedSelectionKeySet selectionKeys) {
+        this.delegate = delegate;
+        this.selectionKeys = selectionKeys;
+    }
+
+    @Override
+    public boolean isOpen() {
+        return delegate.isOpen();
+    }
+
+    @Override
+    public Set<SelectionKey> selectedKeys() {
+        return delegate.selectedKeys();
+    }
+
+    @Override
+    public int select() throws IOException {
+        selectionKeys.reset();
+        return delegate.select();
+    }
+
+    @Override
+    public Selector wakeup() {
+        return delegate.wakeup();
+    }
+}
+```
+
+上面代码只列出了一些关键方法。
+
+### run
+
+![NioEventLoop](netty.assets/NioEventLoop#run.png)
+
+```java
+protected void run() {
+    int selectCnt = 0;
+    for (; ; ) {
+        // 省略最外层try/catch/finally
+        int strategy;
+        try {
+            strategy = selectStrategy.calculateStrategy(selectNowSupplier, hasTasks());
+            switch (strategy) {
+                // 省略其它情况
+                case SelectStrategy.SELECT:
+                    // 1.监听到下个定时任务达到时间，没有则-1
+                    long curDeadlineNanos = nextScheduledTaskDeadlineNanos();
+                    if (curDeadlineNanos == -1L) 
+                        curDeadlineNanos = NONE; // nothing on the calendar
+                    nextWakeupNanos.set(curDeadlineNanos);
+                    try {
+                        // 2.所有任务都处理完了再进行IO事件监听
+                        if (!hasTasks()) 
+                            strategy = select(curDeadlineNanos);
+                    } finally {
+                        // This update is just to help block unnecessary selector wakeups
+                        // so use of lazySet is ok (no race condition)
+                        nextWakeupNanos.lazySet(AWAKE);
+                    }
+                    // fall through
+                default:
+            }
+        } catch (IOException e) {
+            // 如果这里出现IO错误，则是Selector出问题了，重构它
+            // https://github.com/netty/netty/issues/8566
+            rebuildSelector0();
+            selectCnt = 0;
+            handleLoopException(e);
+            continue;
+        }
+
+        selectCnt++;
+        cancelledKeys = 0;
+        needsToSelectAgain = false;
+        final int ioRatio = this.ioRatio;
+        boolean ranTasks;
+        // 3.根据设置的IO处理时间占比，运行IO处理和普通任务处理，默认50，即各占一半
+        if (ioRatio == 100) {
+            try {
+                // 处理检测到的IO事件
+                if (strategy > 0) processSelectedKeys();
+            } finally {
+                // 运行所有普通任务和定时任务，不限制时间
+                ranTasks = runAllTasks();
+            }
+        } else if (strategy > 0) {
+            final long ioStartTime = System.nanoTime();
+            try {
+                // 4.处理IO事件
+                processSelectedKeys();
+            } finally {
+                // 5.按设置的IO运行时间比例限制运行普通任何和定时任务的时间
+                final long ioTime = System.nanoTime() - ioStartTime;
+                ranTasks = runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
+            }
+        } else ranTasks = runAllTasks(0); // This will run the minimum number of tasks
+
+        if (ranTasks || strategy > 0) {
+            selectCnt = 0;
+        }
+        // 用新创建的Selector替换此事件循环的当前Selector以解决臭名昭著的 epoll 100% CPU 错误。
+        else if (unexpectedSelectorWakeup(selectCnt)) { // Unexpected wakeup (unusual case)
+            selectCnt = 0;
+        }
+    }
+}
+```
+
+#### 执行3个任务队列
+
+在上面的`NioEventLoop#run()`方法中，默认配置下处理IO的时间和运行普通任务的时间是相同的，在处理完检测到的IO事件后，将花费相同时间去执行任务队列taskQueue中的任务：
+
+```java
+// 从任务队列中轮询所有任务并通过Runnable.run()方法运行它们。此方法停止运行任务队列中的任务，如果运行时间超过timeoutNanos则返回
+protected boolean runAllTasks(long timeoutNanos) {
+    // 1.将定时任务队列scheduledTaskQueue中已经到达时间的任务取出并放入taskQueue中等待执行
+    fetchFromScheduledTaskQueue();
+    // 2.从taskQueue中取出1个任务
+    Runnable task = pollTask();
+    if (task == null) {
+        afterRunningAllTasks();
+        return false;
+    }
+
+    final long deadline = timeoutNanos > 0 ? getCurrentTimeNanos() + timeoutNanos : 0;
+    long runTasks = 0;
+    long lastExecutionTime;
+    for (;;) {
+        // 3.安全的执行任务，即出现异常仅日志提醒
+        safeExecute(task);// 调用Runnable#run()
+        runTasks ++;
+
+        // 4.每64个任务检查1次超时，因为nanoTime()调用比较昂贵
+        // 目前是硬编码，如果它真会出现问题的话会考虑将其设为可配置
+        if ((runTasks & 0x3F) == 0) {
+            lastExecutionTime = getCurrentTimeNanos();
+            if (lastExecutionTime >= deadline) {// 运行时间超过限制则跳出
+                break;
+            }
+        }
+
+        task = pollTask();
+        if (task == null) {
+            lastExecutionTime = getCurrentTimeNanos();
+            break;
+        }
+    }
+    // 5.任务执行时间完成回调
+    // 目前的实现是执行tailQueue中所有任务
+    afterRunningAllTasks();
+    this.lastExecutionTime = lastExecutionTime;
+    return true;
+}
+```
+
+> 注意：这里发现一个小优化，因为`System.nanoTime()`调用相对昂贵，因此每执行64个任务才进行1次超时检查。Netty真是优化到极致了。
+
+这里出现了3个任务队列：`scheduledTaskQueue`、`taskQueue`、`tailQueue`。
+
+将定时任务队列中到达的任务放入taskQueue末尾待执行，执行taskQueue中的任务，到达时间限制则执行tailQueue中所有任务。
+
+到底什么样的任务适合放入到tailQueue中呢？观察如下Handler：
+
+```java
+public class BatchFlushHandler extends ChannelOutboundHandlerAdapter {
+
+    private CompositeByteBuf compositeByteBuf;
+    /**
+    * 是否使用 CompositeByteBuf 对象，用于数据写入
+    **/
+    private boolean preferComposite;
+
+    private SingleThreadEventLoop eventLoop;
+
+    private Channel.Unsafe unsafe;
+
+    /**
+    * 是否添加任务到 tailTaskQueue 队列中
+    */
+    private boolean hasAddTailTask = false;
+
+    public BatchFlushHandler() {
+        this(true);
+    }
+
+    public BatchFlushHandler(boolean preferComposite) {
+        this.preferComposite = preferComposite;
+    }
+
+    @Override
+    public void handlerAdded(ChannelHandlerContext ctx) {
+        // 初始化 CompositeByteBuf 对象，如果开启 preferComposite 功能
+        if (preferComposite) {
+            compositeByteBuf = ctx.alloc().compositeBuffer();
+        }
+        eventLoop = (SingleThreadEventLoop) ctx.executor();
+        unsafe = ctx.channel().unsafe();
+    }
+
+    @Override
+    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+        // 写入到 CompositeByteBuf 对象中
+        if (preferComposite) {
+            compositeByteBuf.addComponent(true, (ByteBuf) msg);
+            // 普通写入
+        } else {
+            ctx.write(msg);
+        }
+    }
+
+    @Override
+    public void flush(ChannelHandlerContext ctx) {
+        // 通过 hasAddTailTask 有且仅有每个 EventLoop 执行循环( run )，只添加一次任务
+        if (!hasAddTailTask) {
+            hasAddTailTask = true;
+
+            // 【重点】添加最终批量提交( flush )的任务
+            // 【重点】添加最终批量提交( flush )的任务
+            // 【重点】添加最终批量提交( flush )的任务
+            eventLoop.executeAfterEventLoopIteration(() -> {
+                if (preferComposite) {
+                    ctx.writeAndFlush(compositeByteBuf).addListener(future -> compositeByteBuf = ctx.alloc()
+                                                                    .compositeBuffer());
+                } else {
+                    unsafe.flush();
+                }
+
+                // 重置 hasAddTailTask ，从而实现下个 EventLoop 执行循环( run )，可以再添加一次任务
+                hasAddTailTask = false;
+            });
+        }
+    }
+}
+```
+
+作用：如此能减少 `pipeline` 的执行次数，同时提升吞吐量。这个模式在低并发场景，并没有什么优势，而在高并发场景下对提升吞吐量有不小的性能提升。
+
+这样做会有好处呢？在 [《蚂蚁通信框架实践》](https://mp.weixin.qq.com/s/JRsbK1Un2av9GKmJ8DK7IQ) 的 **批量解包与批量提交**章节有相关分享。
+
+#### 处理IO事件
+
+在run()方法调用`NioEventLoop#selector#select()`检测到新IO事件的SelectionKey后，就会调用`processSelectedKeys()`方法处理IO事件：
+
+```java
+private void processSelectedKeys() {
+    // 当 selectedKeys 非空，意味着使用优化的 SelectedSelectionKeySetSelector
+    if (selectedKeys != null) processSelectedKeysOptimized();// 默认会优化调用这个
+    else processSelectedKeysPlain(selector.selectedKeys());
+}
+
+private void processSelectedKeysOptimized() {
+    // 优化后以数组存selectedKey，比HashSet迭代器方便多了
+    for (int i = 0; i < selectedKeys.size; ++i) {
+        final SelectionKey k = selectedKeys.keys[i];
+        // null out entry in the array to allow to have it GC'ed once the Channel close
+        // See https://github.com/netty/netty/issues/2363
+        selectedKeys.keys[i] = null;
+
+        final Object a = k.attachment();
+
+        // 1.处理Channel的就绪IO事件
+        if (a instanceof AbstractNioChannel) 
+            processSelectedKey(k, (AbstractNioChannel) a);
+        // 2.如果是用户自己注册的Channel，则交由用户程序NioTask处理就绪的 IO 事件
+        else {
+            NioTask<SelectableChannel> task = (NioTask<SelectableChannel>) a;
+            processSelectedKey(k, task);
+        }
+        // 省略
+    }
+}
+```
+
+这里以优化后的SeletedKeySet集合处理选中key时就无须原来那种迭代器访问并移除了。
+
+对于选中的每个key，判断其`SelectionKey#attachment()`粘贴：
+
+- `AbstractNioChannel`：说明是Netty创建的Channel，则以`NioEventLoop#processSelectedKey()`处理该IO事件，这将涉及pipeline的处理。
+- `NioTask`：说明是用户手动创建的Channel，则以将回调`NioTask#channelReady()`自定义处理程序。
+
+### 处理selectedKey
+
+在上面分析的`NioEventLoop#processSelectedKeys()`处理选中的key集合，对每个选中key都会先判断其`SelectionKey#attachment()`是否为用户自定义`NioTask`，默认是Netty的`AbstractNioChannel`则调用`NioEventLoop#processSelectedKey()`处理该Channel的IO事件：
+
+```java
+private void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+    final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
+    // 1.如果SelectionKey失效了则关闭Channel
+    if (!k.isValid()) {
+        // 省略try/catch
+        final EventLoop eventLoop = ch.eventLoop();
+        // 只有在该Channel仍然注册在此EventLoop时才能关闭该通道。
+        // 通道可能因为从此EventLoop取消注册(如因Selector重构)，此时不应关闭通道
+        // https://github.com/netty/netty/issues/5125
+        if (eventLoop == this) 
+            unsafe.close(unsafe.voidPromise());
+        return;
+    }
+
+    // 省略try/catch
+    // 2.获取就绪集操作
+    int readyOps = k.readyOps();
+    // 3.OP_CONNECT 事件就绪，需要先完成连接建立
+    if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
+        // 修改兴趣集
+        int ops = k.interestOps();
+        ops &= ~SelectionKey.OP_CONNECT;
+        k.interestOps(ops);
+
+        unsafe.finishConnect();
+    }
+
+    // 4.OP_WRITE事件就绪
+    if ((readyOps & SelectionKey.OP_WRITE) != 0)
+        unsafe.forceFlush();// 将缓冲的数据写入Channel
+
+    // 5.SelectionKey.OP_READ 或 SelectionKey.OP_ACCEPT 就绪
+    // readyOps == 0 是对 JDK Bug 的处理，防止空的死循环
+    if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0)
+        unsafe.read();
+}
+```
+
+从第5步可知，unsafe.read()会处理选中的SelectionKey.OP_ACCEPT或SelectionKey.OP_READ事件，其根据该EventLoop中注册的Channel类型的不同有不同Unsafe实现，则有不同的处理逻辑：
+
+- 服务端即`NioServerSocketChannel`的`NioMessageUnsafe#read()`处理accept事件，封装JavaNIO的SocketChannel为Netty的NioSocketChannel并注册到某个wokerEventLoop中。
+- 客户端或服务端创建的`NioSocketChannel`的`NioByteUnsafe#read()`处理read事件，并发布pipeline#fireChannelRead()事件。
+
+关于其read()的具体实现解析在后面的Channel分析部分进行解析。
+
+### 自定义NioTask处理selectedKey
+
+在上面分析的`NioEventLoop#processSelectedKeys()`处理选中的key集合，对每个选中key都会先判断其`SelectionKey#attachment()`是否为用户自定义`NioTask`，如果是则调用用户自定义程序处理IO事件。
+
+这里的NioTask接口在Netty中并没有相应的实现类，是留给用户进行自定义扩展处理IO事件的扩展接口：
+
+```java
+/**
+ * 当SelectableChannel准备好时， NioEventLoop可以执行的任意任务
+ * @see NioEventLoop#register(SelectableChannel, int, NioTask)
+ */
+public interface NioTask<C extends SelectableChannel> {
+    // 当Selector选中该SelectableChannel时调用，用户可自定义Channel的IO事件处理
+    void channelReady(C ch, SelectionKey key) throws Exception;
+
+    /**
+     * 指定SelectableChannel的SelectionKey被取消时调用
+     * @param cause 注销的原因。如果用户调用了SelectionKey.cancel()或事件循环已关闭，则为null
+     */
+    void channelUnregistered(C ch, Throwable cause) throws Exception;
+}
+```
+
+那么这个NioTask接口该如何使用呢？即如何将NioTask绑定到指定的SelectableChannel上呢？
+
+官方案例：
+
+```java
+public void testSelectableChannel() throws Exception {
+    NioEventLoopGroup group = new NioEventLoopGroup(1);
+    NioEventLoop loop = (NioEventLoop) group.next();
+
+    try {
+        Channel channel = new NioServerSocketChannel();
+        loop.register(channel).syncUninterruptibly();
+        channel.bind(new InetSocketAddress(0)).syncUninterruptibly();
+
+        SocketChannel selectableChannel = SocketChannel.open();
+        selectableChannel.configureBlocking(false);
+        selectableChannel.connect(channel.localAddress());
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        loop.register(selectableChannel, SelectionKey.OP_CONNECT, new NioTask<SocketChannel>() {
+            @Override
+            public void channelReady(SocketChannel ch, SelectionKey key) {
+                latch.countDown();
+            }
+
+            @Override
+            public void channelUnregistered(SocketChannel ch, Throwable cause) {
+            }
+        });
+
+        latch.await();
+
+        selectableChannel.close();
+        channel.close().syncUninterruptibly();
+    } finally {
+        group.shutdownGracefully();
+    }
+}
+```
+
+从这个案例得知，需要手动创建SelectableChannel并将其注册到NioEventLoop的Selector中。
+
+> 从此案例可知，用户可以自己创建Channel，并自定义处理程序`NioTask`以`attachment()`方法粘贴到Channel上，将Channel注册到Netty提供的`NioEventLoop`的`Selector`中，享受Netty`主从Reactor模型`带来的高性能。
+
+#### 注册
+
+从上面案例得知，用户创建的Channel可调用`NioEventLoop#register()`将Channel进行注册：
+
+```java
+// 将不由 Netty 创建的SelectableChannel注册到此EventLoop的Selector 
+// 当SelectableChannel准备好时，该事件循环将执行指定的NioTask
+public void register(final SelectableChannel ch, final int interestOps, final NioTask<?> task) {
+    // 省略参数检查
+
+    if (inEventLoop()) {
+        register0(ch, interestOps, task);
+    } else {
+        // 省略丢进线程池处理
+    }
+}
+// 注册方式就是将NioTask作为粘贴，注册到该EventLoop的非包装的原始Selector中
+private void register0(SelectableChannel ch, int interestOps, NioTask<?> task) {
+    ch.register(unwrappedSelector, interestOps, task);
+}
+```
+
+#### 处理IO事件
+
+在上面分析的`NioEventLoop#processSelectedKeys()`处理选中的key集合，对每个选中key都会先判断其`SelectionKey#attachment()`是否为用户自定义`NioTask`，如果是则调用用户自定义程序处理IO事件。
+
+```java
+// NioEventLoop.java    
+private static void processSelectedKey(SelectionKey k, NioTask<SelectableChannel> task) {
+    int state = 0;
+    try {
+        // 1.直接调用用户自定义处理程序捏
+        task.channelReady(k.channel(), k);
+        state = 1;
+    } catch (Exception e) {
+        k.cancel();// 2.出现异常则将其从EventLoop的Selector取消注册
+        invokeChannelUnregistered(task, k, e);// 取消注册回调
+        state = 2;
+    } finally {
+        switch (state) {
+            case 0:
+                k.cancel();
+                invokeChannelUnregistered(task, k, null);
+                break;
+            case 1:
+                if (!k.isValid()) { // Cancelled by channelReady()
+                    invokeChannelUnregistered(task, k, null);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+```
+
+> 注意：从这里的处理程序来看，当自定义处理逻辑出现了异常，Netty并不会帮我们关闭Channel，因此如有必要，可以在`NioTask#channelUnregistered()`回调方法中手动关闭Channel捏。
+
+# ChannelPipeline
+
+ChannelPipeline是ChannelHandler链，负责处理和拦截inbound或outbound事件流。
+
+![ChannelPipeline](netty.assets/ChannelPipeline.png)
+
+
+
+```java
+// 通常在创建Channel时一起创建
+public class DefaultChannelPipeline implements ChannelPipeline {
+    // 自定义的ChannelHandler加入在head和tail之间
+    final HeadContext head;// pipeline执行链头结点
+    final TailContext tail;// pipeline执行链尾结点
+
+    private final Channel channel;// 所属的Channel
+    private final ChannelFuture succeededFuture;
+    private final VoidChannelPromise voidPromise;
+
+    // 挂起的ChannelHandler回调任务
+    // 如可以存放的是还未执行ChannelHandler#handlerAdded()回调的处理器Context任务PendingHandlerAddedTask
+    private PendingHandlerCallback pendingHandlerCallbackHead;
+    private boolean registered;// 所属的Channel是否注册到EventLoop
+
+    protected DefaultChannelPipeline(Channel channel) {
+        this.channel = ObjectUtil.checkNotNull(channel, "channel");
+        succeededFuture = new SucceededChannelFuture(channel, null);
+        voidPromise = new VoidChannelPromise(channel, true);
+
+        tail = new TailContext(this);
+        head = new HeadContext(this);
+
+        head.next = tail;
+        tail.prev = head;
+    }
+}
+```
+
+## 添加ChannelHandler
+
+注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
+
+往ChannelPipeline中添加ChannelHandler的方法是`DefaultChannelPipeline#addLast()`：
+
+```java
+public final ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
+    final AbstractChannelHandlerContext newCtx;
+    synchronized (this) {// 加锁防止多线程并发操作pipeline的双向链表
+        // 1.检查重复handler，若某个handler被多次添加到pipeline，且未标注@Shareble注解则抛异常
+        checkMultiplicity(handler);
+
+        // 2.创建DefaultChannelHandlerContext封装handler作为新节点，并添加到pipeline的双向执行链中
+        newCtx = newContext(group, filterName(name, handler), handler);
+        addLast0(newCtx);
+
+        // 3.如果此时pipeline所属的Channel还未注册到EventLoop，
+        // 则包装为PendingHandlerAddedTask任务挂起，该任务将在通道注册后再回调此ChannelHandler.handlerAdded()
+        // 详细见 DefaultChannelPipeline#invokeHandlerAddedIfNeeded()
+        if (!registered) {
+            newCtx.setAddPending();
+            callHandlerCallbackLater(newCtx, true);
+            return this;// 直接返回
+        }
+
+        // 省略
+    }
+    // 4.回调ChannelHandler#handlerAdded()方法
+    callHandlerAdded0(newCtx);
+    return this;
+}
+```
+
+注意第3步的挂起回调任务，下面分析为什么要挂起而不是如第4步那样直接回调。
+
+### 挂起Handler回调任务
+
+DefaultChannelPipeline中有个属性`PendingHandlerCallback pendingHandlerCallbackHead`，它保存了一些挂起任务，比如像这个`PendingHandlerAddedTask`任务，它其实就是保存了ChannelHandlerContext，以执行`ChannelHandler#handlerAdded()`回调。
+
+```java
+private abstract static class PendingHandlerCallback implements Runnable {
+    final AbstractChannelHandlerContext ctx;// 保存的ChannelHandler上下文
+    PendingHandlerCallback next;// 下一个挂起的回调任务
+    PendingHandlerCallback(AbstractChannelHandlerContext ctx) {
+        this.ctx = ctx;
+    }
+    abstract void execute();
+}
+
+// 挂起的ChannelHandler#handlerAdded()回调任务
+private final class PendingHandlerAddedTask extends PendingHandlerCallback {
+    @Override
+    void execute() {
+        EventExecutor executor = ctx.executor();
+        if (executor.inEventLoop()) {
+            callHandlerAdded0(ctx);// 这里就是调用ChannelHandler#handlerAdded()回调
+        } else {
+            // 省略
+        }
+    }
+}
+```
+
+**那为什么会有`PendingHandlerCallback`挂起任务，而不直接执行handlerAdded()回调？**
+
+> 因为 ChannelHandler 添加到 pipeline 中，会触发 `ChannelHandler#handlerAdded()`回调，并且该事件需要在 Channel 所属的 EventLoop 中执行。
+>
+> 但是 Channel 并未注册在 EventLoop 上时，需要暂时将“触发 ChannelHandler 的添加完成( added )事件”的逻辑，作为一个 PendingHandlerCallback 进行“缓存”。在 Channel 注册到 EventLoop 上时，进行回调执行。
+>
+> 在`EventLoop#register()`注册Channel到EventLoop的Selector完成后，会调用`DefaultChannelPipeline#invokeHandlerAddedIfNeeded()`去执行这些挂起的回调任务。
+>
+> 移除ChannelHandler时也会有一个挂起任务PendingHandlerRemovedTask，就不细究了。
+
+如下面是Channel注册到EventLoop的方法：第2步会触发这些挂起任务的执行。
+
+```java
+// AbstractChannel.AbstractUnsafe.java
+private void register0(ChannelPromise promise) {
+    try {
+        if (!promise.setUncancellable() || !ensureOpen(promise)) {return;}
+        boolean firstRegistration = neverRegistered;
+        // 1.执行注册逻辑
+        // 将SelectableChannel注册到此EventLoop的Selector上，不过此时注册的兴趣集为0
+        doRegister();
+        neverRegistered = false;
+        registered = true;
+
+        // 2.执行可能的挂起的ChannelHandler#handlerAdded()回调任务
+        // 比如ChannelInitializer就是在这回调初始化，此回调常用来添加ChannelHandler
+        pipeline.invokeHandlerAddedIfNeeded();
+
+        safeSetSuccess(promise);
+        // 3.触发ChannelInboundHandler#channelRegistered()回调
+        pipeline.fireChannelRegistered();
+        // 省略部分代码
+    } catch (Throwable t) {
+        // 省略
+    }
+}
+```
+
+## ChannelHandlerContext
+
+注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
+
+![DefaultChannelHandlerContext](netty.assets/DefaultChannelHandlerContext.png)
+
+### Abstract
+
+```java
+abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, ResourceLeakHint {
+    volatile AbstractChannelHandlerContext next;// 上一个节点
+    volatile AbstractChannelHandlerContext prev;// 下一个节点
+
+    private final DefaultChannelPipeline pipeline;// 所属pipeline
+    private final String name;// 此context在pipeline中的唯一名字
+    private final boolean ordered;
+    // 此context的执行码，可用于快速判断入站和出站各个事件拦截
+    private final int executionMask;
+
+    AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor,
+                                  String name, Class<? extends ChannelHandler> handlerClass) {
+        this.name = ObjectUtil.checkNotNull(name, "name");
+        this.pipeline = pipeline;
+        this.executor = executor;
+        this.executionMask = mask(handlerClass);// 根据传入的Handler类型计算执行掩码
+        ordered = executor == null || executor instanceof OrderedEventExecutor;
+    }
+}
+```
+
+### 执行掩码
+
+在上面AbstractChannelHandlerContext中有`executionMask`执行掩码属性，它用于快速判断此context包含的handler是否能拦截某个出站或入站事件，它由`ChannelHandlerMask`管理：
+
+```java
+// 入站和出站的执行掩码，这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
+final class ChannelHandlerMask {
+    // Using to mask which methods must be called for a ChannelHandler.
+    static final int MASK_EXCEPTION_CAUGHT = 1;
+    static final int MASK_CHANNEL_REGISTERED = 1 << 1;
+    static final int MASK_CHANNEL_UNREGISTERED = 1 << 2;
+    static final int MASK_CHANNEL_ACTIVE = 1 << 3;
+    static final int MASK_CHANNEL_INACTIVE = 1 << 4;
+    static final int MASK_CHANNEL_READ = 1 << 5;
+    static final int MASK_CHANNEL_READ_COMPLETE = 1 << 6;
+    static final int MASK_USER_EVENT_TRIGGERED = 1 << 7;
+    static final int MASK_CHANNEL_WRITABILITY_CHANGED = 1 << 8;
+    static final int MASK_BIND = 1 << 9;
+    static final int MASK_CONNECT = 1 << 10;
+    static final int MASK_DISCONNECT = 1 << 11;
+    static final int MASK_CLOSE = 1 << 12;
+    static final int MASK_DEREGISTER = 1 << 13;
+    static final int MASK_READ = 1 << 14;
+    static final int MASK_WRITE = 1 << 15;
+    static final int MASK_FLUSH = 1 << 16;
+    // 所有入站事件掩码
+    static final int MASK_ONLY_INBOUND = MASK_CHANNEL_REGISTERED |
+        MASK_CHANNEL_UNREGISTERED | MASK_CHANNEL_ACTIVE | MASK_CHANNEL_INACTIVE | MASK_CHANNEL_READ |
+        MASK_CHANNEL_READ_COMPLETE | MASK_USER_EVENT_TRIGGERED | MASK_CHANNEL_WRITABILITY_CHANGED;
+    private static final int MASK_ALL_INBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_INBOUND;
+    // 所有出站事件掩码
+    static final int MASK_ONLY_OUTBOUND = MASK_BIND | MASK_CONNECT | MASK_DISCONNECT |
+        MASK_CLOSE | MASK_DEREGISTER | MASK_READ | MASK_WRITE | MASK_FLUSH;
+    private static final int MASK_ALL_OUTBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_OUTBOUND;
+
+    private static final FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>> MASKS =
+        new FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>>() {
+        @Override
+        protected Map<Class<? extends ChannelHandler>, Integer> initialValue() {
+            return new WeakHashMap<Class<? extends ChannelHandler>, Integer>(32);
+        }
+    };
+
+    // 根据ChannelHandler的具体类型获取执行掩码
+    static int mask(Class<? extends ChannelHandler> clazz) {
+        // 先从缓存获取，没有则计算再放入缓存
+        Map<Class<? extends ChannelHandler>, Integer> cache = MASKS.get();
+        Integer mask = cache.get(clazz);
+        if (mask == null) {
+            mask = mask0(clazz);
+            cache.put(clazz, mask);
+        }
+        return mask;
+    }
+
+    // 判断handler的某个方法上是否标有@Skip注解以判断是否在执行链中跳过该方法
+    private static boolean isSkippable(
+        final Class<?> handlerType, final String methodName, final Class<?>... paramTypes) throws Exception {
+        return AccessController.doPrivileged(new PrivilegedExceptionAction<Boolean>() {
+            @Override
+            public Boolean run() throws Exception {
+                // 省略try/catch
+                Method m = handlerType.getMethod(methodName, paramTypes);
+                return m.isAnnotationPresent(Skip.class);// 是否标有@Skip
+            }
+        });
+    }
+
+    // ChannelHandler中的带此注解的事件处理方法不会被pipeline调用
+    @Target(ElementType.METHOD)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Skip {}
+}
+```
+
+根据handler类型计算掩码的细节如下：
+
+```java
+/**
+ * 计算某个ChannelHandler类型的执行掩码
+ * 这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
+ */
+private static int mask0(Class<? extends ChannelHandler> handlerType) {
+    int mask = MASK_EXCEPTION_CAUGHT;
+	// 省略try/catch
+    // 1.如果实现了入站事件接口
+    if (ChannelInboundHandler.class.isAssignableFrom(handlerType)) {
+        mask |= MASK_ALL_INBOUND;
+        // 判断是否以@Skip注解跳过某些入站事件回调
+        if (isSkippable(handlerType, "channelRegistered", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_REGISTERED;
+        }
+        if (isSkippable(handlerType, "channelUnregistered", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_UNREGISTERED;
+        }
+        if (isSkippable(handlerType, "channelActive", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_ACTIVE;
+        }
+        if (isSkippable(handlerType, "channelInactive", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_INACTIVE;
+        }
+        if (isSkippable(handlerType, "channelRead", ChannelHandlerContext.class, Object.class)) {
+            mask &= ~MASK_CHANNEL_READ;
+        }
+        if (isSkippable(handlerType, "channelReadComplete", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_READ_COMPLETE;
+        }
+        if (isSkippable(handlerType, "channelWritabilityChanged", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_WRITABILITY_CHANGED;
+        }
+        if (isSkippable(handlerType, "userEventTriggered", ChannelHandlerContext.class, Object.class)) {
+            mask &= ~MASK_USER_EVENT_TRIGGERED;
+        }
+    }
+    // 2.如果实现了出站事件接口
+    if (ChannelOutboundHandler.class.isAssignableFrom(handlerType)) {
+        mask |= MASK_ALL_OUTBOUND;
+        // 判断是否以@Skip注解跳过某些出站事件回调
+        if (isSkippable(handlerType, "bind", ChannelHandlerContext.class,
+                        SocketAddress.class, ChannelPromise.class)) {
+            mask &= ~MASK_BIND;
+        }
+        if (isSkippable(handlerType, "connect", ChannelHandlerContext.class, SocketAddress.class,SocketAddress.class, ChannelPromise.class)) {
+            mask &= ~MASK_CONNECT;
+        }
+        if (isSkippable(handlerType, "disconnect", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_DISCONNECT;
+        }
+        if (isSkippable(handlerType, "close", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_CLOSE;
+        }
+        if (isSkippable(handlerType, "deregister", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_DEREGISTER;
+        }
+        if (isSkippable(handlerType, "read", ChannelHandlerContext.class)) {
+            mask &= ~MASK_READ;
+        }
+        if (isSkippable(handlerType, "write", ChannelHandlerContext.class,
+                        Object.class, ChannelPromise.class)) {
+            mask &= ~MASK_WRITE;
+        }
+        if (isSkippable(handlerType, "flush", ChannelHandlerContext.class)) {
+            mask &= ~MASK_FLUSH;
+        }
+    }
+
+    if (isSkippable(handlerType, "exceptionCaught", ChannelHandlerContext.class, Throwable.class)) {
+        mask &= ~MASK_EXCEPTION_CAUGHT;
+    }
+
+    return mask;
+}
+```
+
+这种通过执行掩码以**位运算**判断是否执行某些回调方法的方式非常值得学习，远远比每次都通过反射调用判断是否某个注解再决定是否执行的方式快的多。
+
+## outbound事件传播
+
+**outbound事件发起者是Channel，处理者是`Unsafe`**，在pipeline中传播方向：`tail->head`。
+
+在 ChannelHandler 中处理事件时, 如果这个 Handler 不是最后一个 Handler ，则需要调用 `ctx.xxx` (如 `ctx.connect()` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
+
+在 `io.netty.channel.ChannelOutboundInvoker` 接口中，定义了所有 Outbound 事件对应的方法：
+
+```java
+ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise);
+ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise);
+ChannelFuture disconnect(ChannelPromise promise);
+ChannelFuture close(ChannelPromise promise);
+ChannelFuture deregister(ChannelPromise promise);
+ChannelOutboundInvoker read();
+ChannelFuture write(Object msg, ChannelPromise promise);
+ChannelOutboundInvoker flush();
+ChannelFuture writeAndFlush(Object msg, ChannelPromise promise);
+```
+
+pipeline的处理节点DefaultChannelHandlerContext实现了该出站事件调用器，用于出站事件传播。
+
+### bind事件传播
+
+在上面分析AbstractBootstrap启动器时分析了其bind()方法，其在初始化并注册了Channel后会调用`AbstractBootstrap#doBind0()`方法：
+
+```java
+// AbstractBootstrap.java
+private static void doBind0(
+    final ChannelFuture regFuture, final Channel channel,
+    final SocketAddress localAddress, final ChannelPromise promise) {
+    channel.eventLoop().execute(new Runnable() {
+        @Override
+        public void run() {
+            if (regFuture.isSuccess()) {
+                channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            } else promise.setFailure(regFuture.cause());
+        }
+    });
+}
+public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
+    @Override
+    public ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise) {
+        return pipeline.bind(localAddress, promise);// 想管道pipeline传播出站事件bind
+    }
+}
+```
+
+这里的`AbstractChannel#bind(SocketAddress localAddress, ChannelPromise promise)`是一个pipeline的出站事件，从`tail->head`，最终会调用HeadContext这个pipeline头节点里保存的`AbstractUnsafe#bind()`进行端口绑定。
+
+**bind事件的出站传播过程如下**：其它出站事件传播过程和这个一模一样，将bind换成write是完全可以的。
+
+![outbound事件传播](netty.assets/outbound事件传播.png)
+
+pipeline以`AbstractChannelHandlerContext`作为处理节点构建成双向链表，其实现了`ChannelOutboundInvoker`接口和`ChannelInboundInvoker`接口作为**出站和入站事件传播调用器**，其实现的各个方法如bind(args)唯一作用是将事件传播到下个节点并调用其handler相应回调函数。
+
+每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如bind(ctx,args)，**处理完成后需要调用ctx#bind(args)将此事件向后传播**，否则该事件传播就将提前终止了。
+
+从这可以猜测`ChannelOutboundHandler`的实现`ChannelOutboundHandlerAdapter`的每个方法肯定是直接调用`ctx#xxx(args)`进行事件传播，而当我们要实现某个handler时，就重写其中某些方法即可：
+
+```java
+public class ChannelOutboundHandlerAdapter extends ChannelHandlerAdapter implements ChannelOutboundHandler {
+
+    // 调用ChannelHandlerContext.bind(SocketAddress, ChannelPromise)以转发到ChannelPipeline中的下一个ChannelOutboundHandler 
+    // 子类可以会覆盖此方法以更改行为。
+    @Skip
+    @Override
+    public void bind(ChannelHandlerContext ctx, SocketAddress localAddress,
+                     ChannelPromise promise) throws Exception {
+        ctx.bind(localAddress, promise);
+    }
+    // 其它方法是一样的，不列出
+}
+```
+
+注意到还多了一个注解`@Skip`，根据前面分析的ChannelHandlerContext的执行掩码可知，如果我们自定义handler未覆盖某个事件方法如bind(args)，bind事件根本不会传播到此处理节点，也就是说只会传播到覆盖了某个事件处理方法并且未标注`@Skip`注解的节点。不得不感叹优化到极致了。
+
+## inbound事件传播
+
+**inbound事件发起者是Unsafe，处理者是TailContext**，如果用户没有实现自定义的处理方法, 那么Inbound 事件默认的处理者是 TailContext, 并且其处理方法是空实现。
+
+inbound事件传播方向：`head->tail`，如果这个 Handler 不是最后一个 Handler，则需要调用 `ctx.fireIN_EVT` (如 `ctx.fireChannelActive` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
+
+在 `io.netty.channel.ChannelInboundInvoker` 接口中，定义了所有 Inbound 事件传播对应的方法：
+
+```java
+ChannelInboundInvoker fireChannelRegistered();
+ChannelInboundInvoker fireChannelUnregistered();
+
+ChannelInboundInvoker fireChannelActive();
+ChannelInboundInvoker fireChannelInactive();
+
+ChannelInboundInvoker fireExceptionCaught(Throwable cause);
+
+ChannelInboundInvoker fireUserEventTriggered(Object event);
+
+ChannelInboundInvoker fireChannelRead(Object msg);
+ChannelInboundInvoker fireChannelReadComplete();
+
+ChannelInboundInvoker fireChannelWritabilityChanged();
+```
+
+`ChannelInboundInvoker`接口的入站事件传播方法多了fire前缀，`ChannelInboundHandler`接口的入站事件处理方法没有此前缀，这和出站事件那边全是同名方法有了明显的区分性。
+
+### channelActive事件传播
+
+`pipeline#fireChannelActive()`事件触发点如下：
+
+- 服务端启动器`AbstractBootstrap#bind()`方法绑定端口，绑定成功向服务端Channel对应的pipeline发布此事件
+
+- 客户端启动器`Bootstrap#connect()`连接服务端，连接成功向客户端Channel对应的pipeline发布此事件
+
+在DefaultChannelPipeline中实现如下：
+
+```java
+// DefaultChannelPipeline.java
+public final ChannelPipeline fireChannelActive() {
+    AbstractChannelHandlerContext.invokeChannelActive(head);
+    return this;
+}
+```
+
+**channelActive事件的出站传播过程如下**：其它入站事件传播过程和这个一模一样，将channelActive换成channelRead是完全可以的。
+
+![inbound事件传播](netty.assets/inbound事件传播.png)
+
+每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如channelActive(ctx)，**处理完成后需要调用ctx#fireChannelActive()将此事件向后传播**，否则该事件传播就将提前终止了。
+
+如`io.netty.handler.logging.LoggingHandler`处理器的方法如下：
+
+```java
+final class LoggingHandler implements ChannelInboundHandler, ChannelOutboundHandler {
+    //... 省略无关方法
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        // 打印日志
+        if (logger.isEnabled(internalLevel)) {
+            logger.log(internalLevel, format(ctx, "ACTIVE"));
+        }
+        // 传递 Channel active 事件，给下一个节点
+        ctx.fireChannelActive();
+    }
+}
+```
+
+# Channel
+
+`io.netty.channel.Channel`是 Netty 网络操作抽象类，它除了包括基本的 I/O 操作，如 bind、connect、read、write 之外，还包括了 Netty 框架相关的一些功能，如获取该 Channel 的 EventLoop。
+
+在传统的网络编程中，作为核心类的 Socket ，它对程序员来说并不是那么友好，直接使用其成本还是稍微高了点。而 Netty 的 Channel 则提供的一系列的 API ，它大大降低了直接与 Socket 进行操作的复杂性。而相对于原生 NIO 的 Channel，Netty 的 Channel 具有如下优势( 摘自《Netty权威指南( 第二版 )》) ：
+
+- 在 Channel 接口层，采用 Facade 模式进行统一封装，将网络 I/O 操作、网络 I/O 相关联的其他操作封装起来，统一对外提供。
+- Channel 接口的定义尽量大而全，**为 SocketChannel 和 ServerSocketChannel 提供统一的视图**，由不同子类实现不同的功能，公共功能在抽象父类中实现，最大程度地实现功能和接口的重用。
+- 具体实现采用聚合而非包含的方式，将相关的功能类聚合在 Channel 中，由 Channel 统一负责和调度，功能实现更加灵活。
+
+![NioSocketChannel](netty.assets/NioServerSocketChannel.png)
+
+oio是old io，即bio阻塞io。
+
+![Channel体系](netty.assets/Channel体系.png)
+
+## Unsafe
+
+Unsafe接口定义在`io.netty.channel.Channel`内部，和Channel的操作紧密结合。
+
+Unsafe接口不应在用户代码中调用unsafe方法。
+
+![NioSocketChannelUnsafe](netty.assets/NioSocketChannelUnsafe.png)
+
+Unsafe的API和Channel的API类似，作用在于真正调用Channel的API之前呢用于和发布pipeline事件和一些缓冲实现，和netty的各个组件进行交互，而netty的Channel则负责与其包装有JavaNIO的原始SocketChannel进行交互。
+
+## accept处理
+
+accept处理由bossEventLoop中注册的NioServerSocketChannel触发。
+
+在前面分析EventLoop轮询到IO事件并处理`NioEventLoop#processSelectedKey()`部分第5步：
+
+```java
+private void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+    final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
+    // 1.如果SelectionKey失效了则关闭Channel
+    // 省略
+
+    // 省略try/catch
+    // 2.获取就绪集操作
+    int readyOps = k.readyOps();
+    // 3.OP_CONNECT 事件就绪，需要先完成连接建立
+    // 4.OP_WRITE事件就绪
+    // 省略
+    
+    // 5.SelectionKey.OP_READ 或 SelectionKey.OP_ACCEPT 就绪
+    // readyOps == 0 是对 JDK Bug 的处理，防止空的死循环
+    if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0)
+        unsafe.read();
+}
+```
+
+unsafe.read()会处理选中的SelectionKey.OP_ACCEPT或SelectionKey.OP_READ事件，其根据该EventLoop中注册的Channel类型的不同有不同Unsafe实现，则有不同的处理逻辑：
+
+- 服务端即`NioServerSocketChannel`的`NioMessageUnsafe#read()`处理accept事件，封装JavaNIO的SocketChannel为Netty的NioSocketChannel并注册到某个wokerEventLoop中。
+- 客户端或服务端创建的`NioSocketChannel`的`NioByteUnsafe#read()`处理read事件，并发布`pipeline#fireChannelRead()`事件。
+
+### 接受新连接
+
+服务端bossEventLoop轮询到新连接事件，调用`NioMessageUnsafe#read()`，新建JavaNio的SocketChannel并封装为Netty的NioSocketChannel对象，选择某个workerEventLoop注册并监听读事件：
+
+```java
+private final class NioMessageUnsafe extends AbstractNioUnsafe {
+    // 保存新连接
+    private final List<Object> readBuf = new ArrayList<Object>();
+
+    // NioServerSocketChannel的NioMessageUnsafe#read()用于接受新连接
+    @Override
+    public void read() {
+        // 省略
+        // 省略try/catch/finally
+        do {
+            // 1.通过ServerSocketChannel#accept()获取新连接
+            // 并封装为NioSocketChannel后保存到readBuf中
+            int localRead = doReadMessages(readBuf);// 默认只读1个新连接
+            if (localRead == 0) // 没有新连接
+                break;
+            if (localRead < 0) {// 读取出错则标记关闭
+                closed = true;
+                break;
+            }
+            // 读取连接数量 + localRead
+            allocHandle.incMessagesRead(localRead);
+        } while (continueReading(allocHandle));
+
+        // 2.处理每个新连接
+        int size = readBuf.size();
+        for (int i = 0; i < size; i++) {
+            readPending = false;
+            // 3.发布服务端管道事件pipeline#fireChannelRead()
+            // 服务端管道中的ServerBootstrapAcceptor处理器，将创建的NioSocketChannel 注册到 workerEventLoop 上
+            pipeline.fireChannelRead(readBuf.get(i));
+        }
+        readBuf.clear();
+        allocHandle.readComplete();
+        pipeline.fireChannelReadComplete();// 4.发布pipeline#fireChannelReadComplete()事件
+		// 省略
+    }
+}
+```
+
+这里通过`pipeline#fireChannelRead()`将新连接NioSocketChannel发布到管道中，入站事件，流向为`head-->tail`。
+
+在前面分析的服务端启动器初始化Channel的过程中会往pipeline中添加`ServerBootstrapAcceptor`处理器，它的作用就是将新连接注册到workerEventLoop中。
+
+### 注册到workerEventLoop
+
+服务端Channel对应的pipeline中ServerBootstrapAcceptor处理器在channelRead()回调事件中将新连接NioSocketChannel注册到选出的某个EventLoop的Selector上。
+
+```java
+private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapter {
+
+    private final EventLoopGroup childGroup;// 即workerGroup
+    private final ChannelHandler childHandler;// 保存用户指定的handler，一般是ChannelInitializer
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        // 1.取出新连接NioSocketChannel
+        final Channel child = (Channel) msg;
+
+        // 2.将用户配置的childHandler放入管道，一般是ChannelInitializer，用于用户添加一些ChannelHandler
+        child.pipeline().addLast(childHandler);
+		// 3.配置Channel
+        setChannelOptions(child, childOptions, logger);
+        setAttributes(child, childAttrs);
+
+        try {
+            // 4.将此新连接NioSocketChannel注册到workerEventLoopGroup中
+            childGroup.register(child).addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    if (!future.isSuccess()) {
+                        forceClose(child, future.cause());
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            forceClose(child, t);
+        }
+    }
+}
+```
+
+注册到workerEventLoop是`EventLoopGroup#register(Channel)`方法，在前面分析EventLoopGroup部分分析过此方法会选择下一个EventLoop，并将Channel注册到其持有的Selector上。
+
+## read处理
+
+在前面分析EventLoop轮询到IO事件并处理`NioEventLoop#processSelectedKey()`部分可知，客户端或服务端建立的NioSocketChannel注册的EventLoop监听到其读事件后，将调用`NioByteUnsafe#read()`处理读事件，并发布`pipeline#fireChannelRead()`事件。
+
+
+
+
+
+
+
+
+
+## write处理
+
+
+
+## flush处理
+
+
+
+
+
+# Bytebuf
+
+
+
+
+
+
+
