@@ -2743,7 +2743,14 @@ Unsafe接口不应在用户代码中调用unsafe方法。
 
 ![NioSocketChannelUnsafe](netty.assets/NioSocketChannelUnsafe.png)
 
-Unsafe的API和Channel的API类似，作用在于真正调用Channel的API之前呢用于和发布pipeline事件和一些缓冲实现，和netty的各个组件进行交互，而netty的Channel则负责与其包装有JavaNIO的原始SocketChannel进行交互。
+**Unsafe和Channel的关系：**
+
+- EventLoop检测到一些入站事件如accept和read，交由该Channel关联的Unsafe处理并**发布入站pipeline事件**。
+
+- Channel实现了ChannelOutboundInvoker接口，其实现了各个出站方法如write()，Channel出站方法仅仅负责发布`pipeline#write()`这类出站事件，最后交由管道内的HeadContext里持有的Unsafe处理具体的逻辑。
+
+即Unsafe通过与Channel关联的pipeline交互，并通过ByteBuf等缓冲，实现了Netty Channel的各个具体处理逻辑，并发布入站pipeline事件。
+注意其实真正和JavaNio的SocketChannel交互部分还是有Netty Channel去实现，并命名为doWrite()这种方法名字。
 
 ## accept处理
 
@@ -2868,23 +2875,659 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
 
 在前面分析EventLoop轮询到IO事件并处理`NioEventLoop#processSelectedKey()`部分可知，客户端或服务端建立的NioSocketChannel注册的EventLoop监听到其读事件后，将调用`NioByteUnsafe#read()`处理读事件，并发布`pipeline#fireChannelRead()`事件。
 
+```java
+protected class NioByteUnsafe extends AbstractNioUnsafe {
+    // NioSocketChannel 读取新的数据
+    public final void read() {
+        // 省略
+        // 1.获得并重置 RecvByteBufAllocator.Handle 对象
+        final ByteBufAllocator allocator = config.getAllocator();
+        final RecvByteBufAllocator.Handle allocHandle = recvBufAllocHandle();
+        allocHandle.reset(config);
 
+        ByteBuf byteBuf = null;
+        boolean close = false;// 是否关闭连接
+        // 省略try/catch/finally
+        do {
+            // 2.申请 ByteBuf 对象
+            byteBuf = allocHandle.allocate(allocator);
+            // 3.读取数据到ByteBuf
+            // 设置最后读取字节数
+            allocHandle.lastBytesRead(doReadBytes(byteBuf));
+            // 没读取到数据则释放ByteBuf对象并关闭连接
+            if (allocHandle.lastBytesRead() <= 0) {
+                // nothing was read. release the buffer.
+                byteBuf.release();
+                byteBuf = null;
+                // 如果读取字节数小于0，说明对端已关闭连接
+                close = allocHandle.lastBytesRead() < 0;
+                if (close) {
+                    // There is nothing left to read as we received an EOF.
+                    readPending = false;
+                }
+                break;
+            }
+            // 读取消息数量 + localRead
+            allocHandle.incMessagesRead(1);
+            readPending = false;
+            // 4.发布pipeline#fireChannelRead(byteBuf)事件
+            pipeline.fireChannelRead(byteBuf);
+            byteBuf = null;
+        } while (allocHandle.continueReading());
 
+        allocHandle.readComplete();
+        // 5.发布pipeline#fireChannelReadComplete()
+        pipeline.fireChannelReadComplete();
+        // 6.如果读取字节数小于0，说明对端已关闭连接，此时关闭Channel
+        if (close) {
+            closeOnRead(pipeline);
+        }
+    }
+}
+```
 
+对于NioSocketChannel的读事件，将数据读入ByteBuf后发布`pipeline#fireChannelRead(byteBuf)`事件，将byteBuf交由各个ChannelHandler进行处理，一般情况下都会设置一些编解码器，再设置业务处理器。
 
-
-
-
+关键的读取操作交给ByteBuf进行处理，这里不对其进行深入分析。总之对于套接字数据的读取最终肯定是调用JavaNio的API：`SocketChannel#read(ByteBuffer buf)`。
 
 ## write处理
 
+Netty的Channel有3中写入API方法，都继承自`ChannelOutboundInvoker`接口：
 
+```java
+ChannelFuture write(Object msg)
+ChannelFuture write(Object msg, ChannelPromise promise);
+
+ChannelOutboundInvoker flush();
+
+ChannelFuture writeAndFlush(Object msg);
+ChannelFuture writeAndFlush(Object msg, ChannelPromise promise);
+```
+
+- write()：将数据写入内存缓存ByteBuf中，还没写入套接字
+- flush()：将内存缓存ByteBuf中数据写入到套接字
+- writeAndFlush()：前两者的结合
+
+> 有一点要注意，write()返回的ChannelFuture只有在数据真正flush()到套接字后才会执行相应的回调通知。
+
+AbstractChannel中各个方法的实现如下：
+
+```java
+@Override
+public ChannelFuture write(Object msg) {
+    return pipeline.write(msg);
+}
+
+@Override
+public ChannelFuture write(Object msg, ChannelPromise promise) {
+    return pipeline.write(msg, promise);
+}
+
+@Override
+public ChannelFuture writeAndFlush(Object msg) {
+    return pipeline.writeAndFlush(msg);
+}
+
+@Override
+public ChannelFuture writeAndFlush(Object msg, ChannelPromise promise) {
+    return pipeline.writeAndFlush(msg, promise);
+}
+
+@Override
+public Channel flush() {
+    pipeline.flush();
+    return this;
+}
+```
+
+write和flush都是outbound事件，最终会由`HeadContext`节点的`Unsafe`处理。
+
+```java
+protected abstract class AbstractUnsafe implements Unsafe {
+
+    private volatile ChannelOutboundBuffer outboundBuffer = new ChannelOutboundBuffer(AbstractChannel.this);
+
+    @Override
+    public final void write(Object msg, ChannelPromise promise) {
+        // 省略
+        ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+        // 内存队列为空，一般是 Channel 已经关闭，所以通知 Promise 异常结果
+        if (outboundBuffer == null) {
+            // 省略
+            return;
+        }
+
+        // 省略try/catch
+        int size;
+        // 1.过滤写入的消息，默认转为直接内存ByteBuf
+        msg = filterOutboundMessage(msg);
+        size = pipeline.estimatorHandle().size(msg);
+        if (size < 0) size = 0;
+        // 2.写入内存队列中暂存
+        outboundBuffer.addMessage(msg, size, promise);
+    }
+}
+// AbstractNioByteChannel.java
+protected final Object filterOutboundMessage(Object msg) {
+    // 将堆内存ByteBuf转换为直接内存的ByteBuf
+    if (msg instanceof ByteBuf) {
+        ByteBuf buf = (ByteBuf) msg;
+        if (buf.isDirect()) {
+            return msg;
+        }
+        return newDirectBuffer(buf);
+    }
+
+    if (msg instanceof FileRegion) {
+        return msg;
+    }
+    throw new UnsupportedOperationException(
+        "unsupported message type: " + StringUtil.simpleClassName(msg) + EXPECTED_TYPES);
+}
+```
+
+**将堆内存的ByteBuf转换为直接内存ByteBuf的原因是JVM堆内存写入Socket套接字时拷贝次数较多。**
+
+**注意：在自定义ChannelHandler中想要写数据到对端时，一般有2种写法：**
+
+```java
+public void channelRead(ChannelHandlerContext ctx, Object msg) {
+    ctx.write(msg); // 1
+    ctx.channel().write(msg); // 2
+}
+```
+
+- 第2 种，实际就是本文所描述的，将 write 事件，从 pipeline 的 `tail` 节点到 `head` 节点的过程。
+- 第1种，将 write 事件，从当前的 `ctx` 节点的**下一个**节点传播到 `head` 节点的过程。
+
+这两种都会交由`head`节点处理，都能成功发送到对端Socket，具体使用哪一种呢，看自己的ChannelHandler是否有拦截`write()出站事件`的需求(一般不会拦截)，有则必须第2种。
 
 ## flush处理
 
+Netty `Channel#write()`方法最后仅将数据写入了内存缓冲ByteBuf中，调用`Channel#flush()`才会将数据写入Socket套接字。
 
+flush同write一样是出站事件，最后由`HeadContext`节点的`Unsafe`进行处理：
 
+```java
+protected abstract class AbstractUnsafe implements Unsafe {
+    private volatile ChannelOutboundBuffer outboundBuffer = new ChannelOutboundBuffer(AbstractChannel.this);
 
+    private boolean inFlush0;
+    @Override
+    public final void flush() {
+        assertEventLoop();
+        // 内存队列为 null ，一般是 Channel 已经关闭，所以直接返回
+        ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+        if (outboundBuffer == null || outboundBuffer.isEmpty()) return;
+        // 标记内存队列开始 flush
+        outboundBuffer.addFlush();
+        flush0();
+    }
+
+    protected void flush0() {
+        // 正在刷，避免重复刷
+        if (inFlush0) return;
+
+        // 内存队列为 null ，一般是 Channel 已经关闭，所以直接返回
+        final ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+        if (outboundBuffer == null || outboundBuffer.isEmpty()) return;
+
+        inFlush0 = true;
+        // 省略部分检查代码
+
+        try {
+            // 真正写入到套接字
+            doWrite(outboundBuffer);
+        } catch (Throwable t) {
+            handleWriteError(t);
+        } finally {
+            inFlush0 = false;
+        }
+    }
+}
+```
+
+一般真正和JavaNio的SocketChannel套接字交互的方法还是有Netty Channel实现，并命名为doXxx()：
+
+```java
+// NioSocketChannel.java
+protected void doWrite(ChannelOutboundBuffer in) throws Exception {
+    // 1.取出此Netty Channel包装的JavaNio SocketChannel
+    SocketChannel ch = javaChannel();
+    // 2.配置的自旋写入次数，默认16
+    int writeSpinCount = config().getWriteSpinCount();
+    do {
+        // 内存队列为空，结束循环，直接返回
+        if (in.isEmpty()) {
+            // 取消对 SelectionKey.OP_WRITE 的感兴趣
+            clearOpWrite();
+            // Directly return here so incompleteWrite(...) is not called.
+            return;
+        }
+
+        // 配置的每次写入最大字节数，默认无限制
+        int maxBytesPerGatheringWrite = ((NioSocketChannelConfig) config).getMaxBytesPerGatheringWrite();
+        // 3.从内存队列中获得待写入的JavaNio的ByteBuffer数组
+        ByteBuffer[] nioBuffers = in.nioBuffers(1024, maxBytesPerGatheringWrite);
+        int nioBufferCnt = in.nioBufferCount();
+
+        switch (nioBufferCnt) {
+            case 0:
+                // 内部的数据为 FileRegion，可以暂时无视
+                writeSpinCount -= doWrite0(in);
+                break;
+            case 1: {
+                ByteBuffer buffer = nioBuffers[0];
+                int attemptedBytes = buffer.remaining();
+                // 4.将数据写入SocketChannel套接字
+                final int localWrittenBytes = ch.write(buffer);
+                // 写入字节小于等于 0 ，说明 NIO Channel 不可写，
+                // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写，并返回以结束循环
+                if (localWrittenBytes <= 0) {
+                    incompleteWrite(true);
+                    return;
+                }
+                adjustMaxBytesPerGatheringWrite(attemptedBytes, localWrittenBytes, maxBytesPerGatheringWrite);
+                in.removeBytes(localWrittenBytes);// 从内存队列中，移除已经写入的数据( 消息 )
+                --writeSpinCount;
+                break;
+            }
+            default: {
+                long attemptedBytes = in.nioBufferSize();
+                // 5.将多个ByteBuffer聚合写入到SocketChannel套接字
+                final long localWrittenBytes = ch.write(nioBuffers, 0, nioBufferCnt);
+                // 写入字节小于等于 0 ，说明 NIO Channel 不可写，
+                // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写，并返回以结束循环
+                if (localWrittenBytes <= 0) {
+                    incompleteWrite(true);
+                    return;
+                }
+                adjustMaxBytesPerGatheringWrite((int) attemptedBytes, (int) localWrittenBytes,
+                                                maxBytesPerGatheringWrite);
+                in.removeBytes(localWrittenBytes);
+                --writeSpinCount;
+                break;
+            }
+        }
+    } while (writeSpinCount > 0);// 循环自旋写入
+    // 6.内存队列中的数据未完全写入，说明 NIO Channel 不可写，
+    // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写
+    incompleteWrite(writeSpinCount < 0);
+}
+```
+
+为什么写入时要判断ByteBuffer的数量为1或多个呢？因为`SocketChannel#write()`有2个重载方法，分别写入单个ByteBuffer对象，或者批量写入ByteBuffer对象。
+
+注意：写入过程中会判断写入量是否小于0，如果小于0说明此时SocketChannel的内核缓冲区已经写满，所以注册 `SelectionKey.OP_WRITE` ，等待 NIO Channel 可写。因此，调用 `#incompleteWrite(true)` 方法。
+
+## ChannelOutboundBuffer
+
+`Channel#write()`写入消息时，pipeline末尾的HeadContext的`AbstractUnsafe#write()`先将消息写入`ChannelOutboundBuffer内存队列`中，调用flush()方法时才将内存队列所有消息写入SocketChannel套接字。
+
+写入内存队列过程如下：
+
+`Unsafe#write()`-->转化为直接内存ByteBuf-->`outboundBuffer#addMessage(msg)`
+
+flush过程如下：
+
+`Unsafe#flush()`-->`outboundBuffer#addFlush()`-->`Unsafe#flush0()`-->`NioSocketChannel#doWrite()`-->`outboundBuffer#nioBuffers()`-->`SocketChannel#write(buf)`-->`outboundBuffer#removeBytes()`
+
+```java
+public final class ChannelOutboundBuffer {
+    // Assuming a 64-bit JVM:
+    //  - 16 bytes object header --> 16B
+    //  - 6 reference fields     --> 48B
+    //  - 2 long fields          --> 16B
+    //  - 2 int fields           --> 8B
+    //  - 1 boolean field        --> 1B
+    //  - padding  补齐8B整数倍    --> 7B
+    // 默认每个Entry占用96B
+    static final int CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD =
+        SystemPropertyUtil.getInt("io.netty.transport.outboundBufferEntrySizeOverhead", 96);
+
+    /**
+     * 线程对应的 ByteBuffer 数组缓存
+     * 每次调用 {@link #nioBuffers(int, long)} 会重新生成
+     */
+    private static final FastThreadLocal<ByteBuffer[]> NIO_BUFFERS = new FastThreadLocal<ByteBuffer[]>() {
+        @Override
+        protected ByteBuffer[] initialValue() throws Exception {
+            return new ByteBuffer[1024];
+        }
+    };
+
+    private final Channel channel;// 所属Channel
+
+    // Entry(flushedEntry) --> ... Entry(unflushedEntry) --> ... Entry(tailEntry)
+    // 第1个标记flush的Entry，即还未写入套接字的第一个Entry
+    private Entry flushedEntry;
+    // 第1个未flush的Entry
+    private Entry unflushedEntry;
+
+    private Entry tailEntry;
+    // 已标记 flush 但未写入SocketChannel套接字的 Entry 数量
+    private int flushed;
+
+    private int nioBufferCount;
+    private long nioBufferSize;
+
+    // 以下几个字段用于限流
+    // 所有 Entry 预计占用的内存大小，通过 Entry.pendingSize 来合计
+    private volatile long totalPendingSize;
+	// 此ChannelOutboundBuffer是否可写入，即限流
+    private static final AtomicIntegerFieldUpdater<ChannelOutboundBuffer> UNWRITABLE_UPDATER =
+        AtomicIntegerFieldUpdater.newUpdater(ChannelOutboundBuffer.class, "unwritable");
+    private volatile int unwritable;
+}
+```
+
+### Entry单链表
+
+内存队列以`Entry单向链表`组织待写入消息：
+
+```java
+static final class Entry {
+    // Recycler 对象池，用于重用 Entry 对象
+    private static final ObjectPool<Entry> RECYCLER = ObjectPool.newPool(new ObjectCreator<Entry>() {
+        @Override
+        public Entry newObject(Handle<Entry> handle) {
+            return new Entry(handle);
+        }
+    });
+    // Recycler处理器，用于回收Entry对象
+    private final Handle<Entry> handle;
+    Entry next;
+    Object msg;// 保存的消息，一般是ByteBuf
+    ByteBuffer[] bufs;// 当 count > 1 时使用，表示 msg 属性转化的 NIO ByteBuffer 数组
+    ByteBuffer buf;// 当 count = 1 时使用，表示 msg 属性转化的 NIO ByteBuffer 对象
+    ChannelPromise promise;
+    long progress;// 当前这个Entry已写入套接字的字节数
+    long total;// msg可读字节数
+    int pendingSize;//  每个 Entry 预计占用的内存大小，计算方式为消息msg的字节数 + Entry 对象自身占用内存的大小。
+    /**
+     * {@link #msg} 转化的 NIO ByteBuffer 的数量
+     * <p>
+     * 当 = 1 时，使用 {@link #buf}
+     * 当 > 1 时，使用 {@link #bufs}
+     */
+    int count = -1;
+    boolean cancelled;
+
+    // 从对象池内获取一个新的Entry并初始化
+    static Entry newInstance(Object msg, int size, long total, ChannelPromise promise) {
+        Entry entry = RECYCLER.get();
+        entry.msg = msg;
+        entry.pendingSize = size + CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD;
+        entry.total = total;
+        entry.promise = promise;
+        return entry;
+    }
+}
+```
+
+### addMessage
+
+`AbstractUnsafe#write()`写入消息时调用`ChannelOutboundBuffer#addMessage()`方法将消息放入内存队列：`Unsafe#write()`-->转化为直接内存ByteBuf-->`outboundBuffer#addMessage(msg)`
+
+```java
+/**
+ * 将指定消息放入内存队列中.
+ * 注意：只有真正写入套接字后才会通知ChannelPromise
+ */
+public void addMessage(Object msg, int size, ChannelPromise promise) {
+    // 1.从对象池获取一个Entry对象
+    Entry entry = Entry.newInstance(msg, size, total(msg), promise);
+    if (tailEntry == null) {
+        flushedEntry = null;
+    } else {
+        Entry tail = tailEntry;
+        tail.next = entry;
+    }
+    tailEntry = entry;
+    if (unflushedEntry == null)
+        unflushedEntry = entry;// 此时相当于首节点
+
+    // 增加 totalPendingSize 计数
+    incrementPendingOutboundBytes(entry.pendingSize, false);
+}
+```
+
+在前面分析该`AbstractUnsafe#write()`可知Netty的堆内存ByteBuf消息会转换为直接内存ByteBuf，总之`Entry#msg字段`一般是直接内存ByteBuf。
+
+调用多次`#addMessage(Object msg, int size, ChannelPromise promise)` 之后：
+
+![ChannelOutboundBuffer](netty.assets/ChannelOutboundBufferEntry.png)
+
+### addFlush
+
+`Unsafe#flush()`将内存队列中数据刷入套接字过程如下：
+
+`Unsafe#flush()`-->`outboundBuffer#addFlush()`-->`Unsafe#flush0()`-->`NioSocketChannel#doWrite()`-->`outboundBuffer#nioBuffers()`-->`SocketChannel#write(buf)`-->`outboundBuffer#removeBytes()`
+
+addFlush如下：它就是标记现有的Entry全部为已刷新
+
+```java
+// 标记内存队列中Entry都已刷新
+public void addFlush() {
+    Entry entry = unflushedEntry;
+    if (entry != null) {
+        if (flushedEntry == null) {
+            // there is no flushedEntry yet, so start with the entry
+            flushedEntry = entry;
+        }
+        // 计算 flush 的数量，并设置每个 Entry 对应的 Promise 不可取消
+        do {
+            flushed++;
+            if (!entry.promise.setUncancellable()) {
+               // 省略
+            }
+            entry = entry.next;
+        } while (entry != null);
+
+        // 设置 unflushedEntry 为空，表示所有都 flush
+        unflushedEntry = null;
+    }
+}
+```
+
+调用此方法后Entry队列如下：
+
+![ChannelOutboundBuffer](netty.assets/ChannelOutboundBuffer#addFlush.png)
+
+我觉得叫flushedEntry不如叫flushingEntry更见名知意。
+
+### 其他flush相关方法
+
+`Unsafe#flush()`将内存队列中数据刷入套接字过程如下：
+
+`Unsafe#flush()`-->`outboundBuffer#addFlush()`-->`Unsafe#flush0()`-->`NioSocketChannel#doWrite()`-->`outboundBuffer#nioBuffers()`-->`SocketChannel#write(buf)`-->`outboundBuffer#removeBytes()`
+
+前面分析了addFlush()方法，就是将所有unFlushedEntry指向的新的Entry移到flushedEntry后面表示待写入套接字。
+
+剩下两个方法内容较多，就不列出了，其实完全可以根据ChanneOutboundBuffer和Entry的各个属性猜测出其实现逻辑，具体实现逻辑就不列出了：
+
+```java
+// 将每个标记flush的Entry持有的Netty ByteBuf对象转为JavaNio的ByteBuffer并返回其数组
+// 用于SocketChannel写入
+public ByteBuffer[] nioBuffers(int maxCount, long maxBytes) {}
+
+// 根据写入SocketChannel套接字的字节数，对Entry单链表进行删除
+// 对于某个只写了一部分的ByteBuffer所属的Entry，其中有个属性`long progress`记录当前写入进度
+public void removeBytes(long writtenBytes) {}
+```
+
+### 高低水位限流
+
+在上面介绍的几个方法里，似乎有几个字段从未使用：
+
+```java
+// 以下几个字段用于限流
+// 所有 Entry 预计占用的内存大小，通过 Entry.pendingSize 来合计
+private volatile long totalPendingSize;
+// 此ChannelOutboundBuffer是否可写入，即限流
+private static final AtomicIntegerFieldUpdater<ChannelOutboundBuffer> UNWRITABLE_UPDATER =
+    AtomicIntegerFieldUpdater.newUpdater(ChannelOutboundBuffer.class, "unwritable");
+private volatile int unwritable;
+```
+
+当不断调用 `#addMessage(Object msg, int size, ChannelPromise promise)` 方法，添加消息到 ChannelOutboundBuffer 内存队列中，如果**不及时** flush 写到对端( 例如程序一直未调用 `Channel#flush()` 方法，或者对端接收数据比较慢导致 Channel 不可写 )，可能会导致 **OOM 内存溢出**。所以，在 ChannelOutboundBuffer 使用 `totalPendingSize` 属性，存储所有 Entry 预计占用的内存大小(`pendingSize`)。
+
+- 当`totalPendingSize`大于高水位阈值`ChannelConfig.writeBufferHighWaterMark`默认64KB，关闭写开关`unwritable`
+- 当`totalPendingSize`小于低水位阈值`ChannelConfig.writeBufferLowWaterMark`默认32KB，打开写开关`unwritable`
+
+`ChannelOutboundBuffer#addMessage()`添加待写入套接字的消息时，会增加`totalPendingSize`属性：
+
+```java
+private void incrementPendingOutboundBytes(long size, boolean invokeLater) {
+    if (size == 0) return;
+    // 增加 totalPendingSize 计数
+    long newWriteBufferSize = TOTAL_PENDING_SIZE_UPDATER.addAndGet(this, size);
+    // totalPendingSize 大于高水位阀值时，设置为不可写
+    if (newWriteBufferSize > channel.config().getWriteBufferHighWaterMark()) {
+        setUnwritable(invokeLater);
+    }
+}
+
+private void setUnwritable(boolean invokeLater) {
+    for (; ; ) {
+        final int oldValue = unwritable;
+        // 或位操作，修改第 0 位 bits 为 1
+        final int newValue = oldValue | 1;
+        if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
+            // 若之前可写，现在不可写，触发pipeline#fireChannelWritabilityChanged()事件
+            if (oldValue == 0) {
+                fireChannelWritabilityChanged(invokeLater);
+            }
+            break;
+        }
+    }
+}
+
+public long bytesBeforeUnwritable() {
+    // 根据高水位阈值计算还有多少字节不可写，如果已经不可写则返回0
+    long bytes = channel.config().getWriteBufferHighWaterMark() - totalPendingSize;
+    if (bytes > 0) return isWritable() ? bytes : 0;
+    return 0;
+}
+```
+
+当消息写入套接字后会调用`ChannelOutboundBuffer#removeBytes(long writtenBytes)`移除Entry，它会减少`totalPendingSize`属性：
+
+```java
+private void decrementPendingOutboundBytes(long size, boolean invokeLater, boolean notifyWritability) {
+    if (size == 0) return;
+    // 减少 totalPendingSize 计数
+    long newWriteBufferSize = TOTAL_PENDING_SIZE_UPDATER.addAndGet(this, -size);
+    // totalPendingSize 小于低水位阀值时，设置为可写
+    if (notifyWritability && newWriteBufferSize < channel.config().getWriteBufferLowWaterMark()) {
+        setWritable(invokeLater);
+    }
+}
+
+private void setWritable(boolean invokeLater) {
+    for (; ; ) {
+        final int oldValue = unwritable;
+        // 并位操作，修改第 0 位 bits 为 0
+        final int newValue = oldValue & ~1;
+        if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
+            // 若之前不可写，现在可写，触发pipeline#fireChannelWritabilityChanged()事件
+            if (oldValue != 0 && newValue == 0) {
+                fireChannelWritabilityChanged(invokeLater);
+            }
+            break;
+        }
+    }
+}
+
+public long bytesBeforeWritable() {
+    // 根据低水位阈值计算还有多少字节可以变为可写，如果已经可写则返回0
+    long bytes = totalPendingSize - channel.config().getWriteBufferLowWaterMark();
+    if (bytes > 0) return isWritable() ? 0 : bytes;
+    return 0;
+}
+```
+
+从上面这点代码来看，这个`unwritable`属性仅仅当前ChannelOutboundBuffer是否可写的标记，并没有去实现限流，而是通过`pipeline#fireChannelWritabilityChanged()`这个inbound事件通知ChannelHandler，**具体的限流逻辑交由用户实现！**
+
+即我们要实现`ChannelHandler#channelWritabilityChanged()`方法监听`unwritable`状态变化，从而进行限流：
+
+```java
+@Override
+public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+    if (!ctx.channel().unsafe().outboundBuffer().isWritable()) {
+		// 限制业务继续往Channel写入数据
+    }
+    ctx.fireChannelWritabilityChanged();// 继续传播该事件
+}
+```
+
+#### 自定义流控标记bit位
+
+`unwritable`属性是`int`类型，而判断其高低水位限流仅用了1位bit，剩下的31个bit可用于用户扩展。
+
+有时用户业务需求不仅想基于内存使用限流，还想根据一些业务规则来判断是否可发消息到套接字，且还想用到netty的pipeline自动事件发布功能，那么下面几个API可以考虑：
+
+`#getUserDefinedWritability(int index)` 方法，获得指定 bits 是否可写。代码如下：
+
+```java
+public boolean getUserDefinedWritability(int index) {
+    return (unwritable & writabilityMask(index)) == 0;
+}
+
+private static int writabilityMask(int index) {
+    // 不能 < 1 ，因为第 0 bits 为 ChannelOutboundBuffer 自己使用
+    // 不能 > 31 ，因为超过 int 的 bits 范围
+    if (index < 1 || index > 31) {
+        throw new IllegalArgumentException("index: " + index + " (expected: 1~31)");
+    }
+    return 1 << index;
+}
+```
+
+`#setUserDefinedWritability(int index, boolean writable)` 方法，设置指定 bits 是否可写。代码如下：
+
+```java
+public void setUserDefinedWritability(int index, boolean writable) {
+    // 设置可写
+    if (writable) {
+        setUserDefinedWritability(index);
+    // 设置不可写
+    } else {
+        clearUserDefinedWritability(index);
+    }
+}
+
+private void setUserDefinedWritability(int index) {
+    final int mask = ~writabilityMask(index);
+    for (;;) {
+        final int oldValue = unwritable;
+        final int newValue = oldValue & mask;
+        // CAS 设置 unwritable 为新值
+        if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
+            // 若之前不可写，现在可写，触发 Channel WritabilityChanged 事件到 pipeline 中。
+            if (oldValue != 0 && newValue == 0) {
+                fireChannelWritabilityChanged(true);
+            }
+            break;
+        }
+    }
+}
+
+private void clearUserDefinedWritability(int index) {
+    final int mask = writabilityMask(index);
+    for (;;) {
+        final int oldValue = unwritable;
+        final int newValue = oldValue | mask;
+        if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
+            // 若之前可写，现在不可写，触发 Channel WritabilityChanged 事件到 pipeline 中。
+            if (oldValue == 0 && newValue != 0) {
+                fireChannelWritabilityChanged(true);
+            }
+            break;
+        }
+    }
+}
+```
 
 # Bytebuf
 
