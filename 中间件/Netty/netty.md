@@ -3531,9 +3531,197 @@ private void clearUserDefinedWritability(int index) {
 
 # Bytebuf
 
+`io.netty.buffer.ByteBuf`位于buffer模块，功能定位上和JavaNio的ByteBuffer一样，并提供了额外优点：
+
+- A01. 它可以被用户自定义的**缓冲区类型**扩展
+- A02. 通过内置的符合缓冲区类型实现了透明的**零拷贝**
+- A03. 容量可以**按需增长**
+- A04. 读和写使用了**不同的索引**，读写模式切换无须像JavaNio那样调用 `Buffer#flip()` 方法
+- A05. 支持方法的**链式**调用
+- A06. 支持**引用计数**
+- A07. 支持**池化**
+
+```java
+/**
+ * 建议使用Unpooled中的辅助方法创建一个新缓冲区，而不是调用单个实现的构造函数
+ *
+ * ByteBuf提供了两个指针变量来支持顺序读取和写入操作——分别用于读取操作的readerIndex和用于写入操作的writerIndex 。下图显示了缓冲区如何通过两个指针分割成三个区域：
+ * <pre>
+ *      +-------------------+------------------+------------------+
+ *      | discardable bytes |  readable bytes  |  writable bytes  |
+ *      |                   |     (CONTENT)    |                  |
+ *      +-------------------+------------------+------------------+
+ *      |                   |                  |                  |
+ *      0      <=      readerIndex   <=   writerIndex    <=    capacity
+ * </pre>
+ *
+ * 如果一个ByteBuf可以转换成一个 NIO ByteBuffer共享它的内容（即视图缓冲区），你可以通过nioBuffer()方法得到它。
+ * 要确定缓冲区是否可以转换为 NIO 缓冲区，请使用nioBufferCount() 。
+ */
+public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, ByteBufConvertible {
+
+    /**
+     * 丢弃第 0 个索引和readerIndex之间的字节。
+     * 它将readerIndex和writerIndex之间的字节移动到第 0 个索引，并将readerIndex和writerIndex分别设置为0和oldWriterIndex - oldReaderIndex 。
+     * 
+     * <pre>
+ 	 *  BEFORE discardReadBytes()
+     *
+     *      +-------------------+------------------+------------------+
+     *      | discardable bytes |  readable bytes  |  writable bytes  |
+     *      +-------------------+------------------+------------------+
+     *      |                   |                  |                  |
+     *      0      <=      readerIndex   <=   writerIndex    <=    capacity
+     *
+     *
+     *  AFTER discardReadBytes()
+     *
+     *      +------------------+--------------------------------------+
+     *      |  readable bytes  |    writable bytes (got more space)   |
+     *      +------------------+--------------------------------------+
+     *      |                  |                                      |
+     * readerIndex (0) <= writerIndex (decreased)        <=        capacity
+     * </pre>
+     */
+    public abstract ByteBuf discardReadBytes();
+
+    /**
+     * 将此缓冲区的readerIndex和writerIndex设置为0 。此方法与setIndex(0, 0)相同。
+     * 请注意，此方法的行为与 NIO 缓冲区的行为不同，后者将limit设置为缓冲区的capacity 。
+     * <pre>
+     *  BEFORE clear()
+     *
+     *      +-------------------+------------------+------------------+
+     *      | discardable bytes |  readable bytes  |  writable bytes  |
+     *      +-------------------+------------------+------------------+
+     *      |                   |                  |                  |
+     *      0      <=      readerIndex   <=   writerIndex    <=    capacity
+     *
+     *
+     *  AFTER clear()
+     *
+     *      +---------------------------------------------------------+
+     *      |             writable bytes (got more space)             |
+     *      +---------------------------------------------------------+
+     *      |                                                         |
+     *      0 = readerIndex = writerIndex            <=            capacity
+     * </pre>
+     */
+    public abstract ByteBuf clear();
+}
+```
+
+1、ByteBuf提供的读写方法较多，总结有4类：
+
+- `#getXxx(index)`方法，读取指定位置数据，不改变`readerIndex`索引
+- `#readXxx()`方法，读取`readerIndex`位置数据，改变`readerIndex`索引
+- `#setXxx(index,value)`方法，写入数据到指定位置，不改变`writeIndex`索引
+- `#writeXxx(value)`方法，写入数据到`writeIndex`位置，会改变`writeIndex`索引
+
+2、释放/清除操作：
+
+`#discardSomeReadBytes()`方法，将可读段数据移动到废弃段，解析见上面
+
+`#clear()`清空各个段，直接重置`readerIndex`和`writeIndex`为0
+
+3、视图/拷贝操作：
+
+```java
+// 返回此缓冲区的可读字节的拷贝副本，独立的
+public abstract ByteBuf copy(int index, int length);
+
+/** 
+ * 返回此缓冲区子区域的切片，共享同一个缓冲数组，持有单独的索引和标记
+ * 注意：此方法不会调用retain()，因此不会增加引用计数
+ */
+public abstract ByteBuf slice(int index, int length);
+
+```
+
+4、转换为Java Nio ByteBuffer操作：
+
+```java
+// ByteBuf 包含 ByteBuffer 数量。
+// 如果返回 = 1 ，则调用 `#nioBuffer()` 方法，获得 ByteBuf 包含的 ByteBuffer 对象。
+// 如果返回 > 1 ，则调用 `#nioBuffers()` 方法，获得 ByteBuf 包含的 ByteBuffer 数组。
+public abstract int nioBufferCount();
+
+// 将此缓冲区的子区域公开为 NIO ByteBuffer
+public abstract ByteBuffer nioBuffer(int index, int length);
+// 为什么会产生数组的情况呢？例如 CompositeByteBuf 
+public abstract ByteBuffer[] nioBuffers(int index, int length);
+```
+
+5、引用计数相关：继承自`ReferenceCounted`接口
+
+```java
+public interface ReferenceCounted {
+    // 此对象的引用计数
+    int refCnt();
+
+    // 引用数+1
+    ReferenceCounted retain();
+
+    /**
+     * 记录此对象的当前访问位置以及用于调试目的的附加任意信息。
+     * 如果确定该对象被泄露，该操作记录的信息将通过ResourceLeakDetector提供给您
+     */
+    ReferenceCounted touch(Object hint);
+
+    // 引用数-1
+    boolean release();
+}
+```
+
+## AbstractByteBuf
+
+![ByteBuf实现类](netty.assets/ByteBuf实现类.png)
+
+```java
+public abstract class AbstractByteBuf extends ByteBuf {
+    int readerIndex;// 读指针
+    int writerIndex;// 写指针
+    private int markedReaderIndex;// 读标记指针
+    private int markedWriterIndex;// 写标记指针
+    private int maxCapacity;// 最大容量
+}
+```
+
+- `capacity` 属性，在 AbstractByteBuf 未定义，而是由子类来实现。为什么呢？ByteBuf 根据**内存类型**分成 Heap 和 Direct ，它们获取 `capacity` 的值的方式不同。
+
+AbstractByteBuf子类非常多，总结起来是3种组合8个核心子类：
+
+![ByteBuf核心子类](netty.assets/ByteBuf核心子类.png)
+
+上面8个类从名字来看由以下3个维度进行正交组合：
+
+- 按**内存类型**分类：
+  - 堆内存(HeapByteBuf)：字节数组分配在JVM堆，受GC管理影响，写入或从Socket缓冲区读数据会先把数据拷贝到直接内存，再从直接内存拷贝到堆内存(此过程没有safepoint，以避免出现GC)。
+  - **直接内存**(DirectByteBuf)：堆外内存，写入或从Socket缓冲区读数据，相比于堆内存少1次内存拷贝，IO效率高一点
+- 按**对象池**分类：
+  - 对象池(PooledByteBuf)：基于**对象池技术**可以重用ByteBuf，减少对象创建和回收，减少GC次数
+  - 不使用对象池(UnpooledByteBuf)：在不需要大量创建缓冲区对象时才建议使用
+
+- 按照**Unsafe**分类：
+  - 使用Unsafe：基于jdk的`sun.misc.Unsafe.Unsafe`的API，直接访问内存数据
+  - 不使用该API，基于Java的标准API进行数据访问。
+  - 关于 Unsafe ，JVM 大佬 R 大在知乎上有个回答：[《为什么 JUC 中大量使用了 sun.misc.Unsafe 这个类，但官方却不建议开发者使用？》](https://www.zhihu.com/question/29266773) 。关于为什么 Unsafe 的性能会更好：”其中一种是嫌 Java 性能不够好，例如说数组访问的边界检查语义，嫌这个开销太大，觉得用 Unsafe 会更快；”。
+
+默认情况下使用的是`PooledUnsafeDirectByteBuf`。
+
+## 内存泄漏检测
+
+暂未深入分析：http://svip.iocoder.cn/Netty/ByteBuf-1-3-ByteBuf-resource-leak-detector/
 
 
 
+## Jemalloc
 
+先想3个问题：
 
+- netty为何要实现内存管理
+- netty为何选择Jemalloc算法
+- jemalloc实现原理
+
+## PooledByteBufAllocator
 
