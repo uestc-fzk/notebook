@@ -4,6 +4,8 @@
 
 芋道源码-Netty源码分析：http://svip.iocoder.cn/Netty
 
+技术文章摘抄：https://learn.lianglianglee.com/%E4%B8%93%E6%A0%8F/Netty%20%E6%A0%B8%E5%BF%83%E5%8E%9F%E7%90%86%E5%89%96%E6%9E%90%E4%B8%8E%20RPC%20%E5%AE%9E%E8%B7%B5-%E5%AE%8C
+
 本文将根据当前netty最新稳定版本`4.1.83.Final-SNAPSHOT`进行源码分析。
 
 # 概述
@@ -3713,15 +3715,778 @@ AbstractByteBuf子类非常多，总结起来是3种组合8个核心子类：
 
 暂未深入分析：http://svip.iocoder.cn/Netty/ByteBuf-1-3-ByteBuf-resource-leak-detector/
 
+# 内存管理
 
+资料：https://juejin.cn/post/7051200855415980069；http://svip.iocoder.cn/Netty/ByteBuf-3-2-Jemalloc-chunk/
 
-## Jemalloc
+Netty为何要实现内存管理？**Java的GC只能对堆内存进行管理，直接内存需要手动管理，需要有一个高效的内存管理算法，高效分配内存且仅有较小的内存碎片。**
 
-先想3个问题：
+Netty 4.x增加了Pooled Buffer，实现了高性能buffer池，分配策略结合了buddy allocation和slab allocation的jemalloc变种，代码位于`io.netty.buffer.PoolArena`中。
 
-- netty为何要实现内存管理
-- netty为何选择Jemalloc算法
-- jemalloc实现原理
+借鉴 **`jemalloc4`** 用来解决两个问题：
+
+- 多线程下的内存回收与分配
+- 内存的碎片化问题(不断分配和回收过程中会产生，jemalloc4 进一步优化了内存碎片产生)
+
+netty内存池的层级结构如下：(这是以前的旧版)
+
+![netty内存池层级结构](netty.assets/netty内存池层级结构.png)
+
+这是现在的Netty内存池层级图：
+
+![netty内存池层级结构new](netty.assets/netty内存池层级结构new.png)
+
+**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
 
 ## PooledByteBufAllocator
+
+一个简单的内存分配示例：
+
+```java
+public class MyExample {
+    public static void main(String[] args) {
+        // 传入true表示使用直接内存
+        PooledByteBufAllocator allocator = new PooledByteBufAllocator(true);
+
+        ByteBuf buf = allocator.buffer(1 << 10, 1 << 11);
+        buf.clear();
+
+        ByteBuf buf2 = allocator.buffer(1 << 12, 1 << 13);
+        buf2.clear();
+
+        ByteBuf buf3 = allocator.buffer(1 << 14, 1 << 14);// 16K还是Small?
+        buf3.clear();
+
+        ByteBuf buf4 = allocator.buffer(1 << 19, 1 << 19);// Normal
+        buf4.clear();
+    }
+}
+```
+
+
+
+
+
+
+
+## SizeClasses内存对齐
+
+Netty的内存对齐类为`io.netty.buffer.SizeClasses`，为Netty内存池中的内存块提供大小对齐，索引计算等服务方法。
+
+**`4.1.72.Final`** 是 **`jemalloc4`** 的实现。**`jemalloc4`** 进一步优化了内存碎片的问题。jemalloc4 相较于 jemalloc3 最大的提升是进一步优化内存碎片问题，因为在 jemalloc3 中最多可能会导致 50% 内存碎片，但 jemalloc4 通过划分更细粒度的内存规格在一定程度上改善了这一问题，这也是 SizeClasses 的由来。
+
+> Tips: [github.com/netty/netty…](https://link.juejin.cn?target=https%3A%2F%2Fgithub.com%2Fnetty%2Fnetty%2Fissues%2F3910) (Netty Issues) 这里说明了jemalloc4的提升`
+
+`jemalloc4`内存块划分：
+
+![Netty内存块规格划分](netty.assets/Netty内存块规格划分.png)
+
+**`jemalloc4`** 取消了 **`Tiny`** 内存的规格。只保留了 **`small`** 、 **`normal`** 、 **`huge`** 三种规格。下面要分析的 **`SizeClasses`** 就是记录了 small和normal规格值的一张表。
+
+```java
+/**
+ * Netty的内存对齐类，为Netty内存池中的内存块提供大小对齐，索引计算等服务方法。
+ * <p>
+ * LOG2_SIZE_CLASS_GROUP: 每次大小加倍时，size类计数的对数。值为：2
+ * LOG2_MAX_LOOKUP_SIZE: Log of max size class in the lookup table.
+ * sizeClasses: Complete table of [index, log2Group, log2Delta, nDelta, isMultiPageSize,
+ * isSubPage, log2DeltaLookup] tuples.
+ * index: 内存块size的索引
+ * log2Group: 内存块分组
+ * log2Delta: 增量大小的log2值.
+ * nDelta: 增量乘数.
+ * isMultiPageSize: 表示size是否为pageSize的整数.
+ * isSubPage: 是否为subpage类型
+ * log2DeltaLookup: Same as log2Delta if a lookup table size class, 'no'
+ * otherwise. 
+ * <p>
+ * smallMaxSizeIdx: small规格内存的索引.
+ * <p>
+ * lookupMaxClass: Maximum size class included in lookup table.
+ * log2NormalMinClass: Log of minimum normal size class.
+ */
+abstract class SizeClasses implements SizeClassesMetric {
+
+    static final int LOG2_QUANTUM = 4;
+
+    private static final int LOG2_SIZE_CLASS_GROUP = 2;
+    private static final int LOG2_MAX_LOOKUP_SIZE = 12;
+
+
+    protected final int pageSize;// 默认8KB
+    protected final int pageShifts;// 默认13
+    protected final int chunkSize;// 默认4MB
+    protected final int directMemoryCacheAlignment;
+
+    final int nSizes;// sizeClass个数.默认68
+    final int nSubpages;// subPage sizeClass的数量.默认39
+    final int nPSizes;// size为pageSize整数倍的sizeClass的个数.默认32
+    final int lookupMaxSize;// 4096
+    final int smallMaxSizeIdx;// Small区域最大size索引，默认38，指向28KB
+
+    // 以下3个是查找表
+    // 保存的是isMultiPageSize为true的列的size
+    private final int[] pageIdx2sizeTab;
+    // sizeIdx --> size的查找表
+    // 从16B...4MB 共68个
+    private final int[] sizeIdx2sizeTab;
+    // size<=lookupMaxClass的查找表，可根据size快速查到sizeIdx，大于该值的只能计算得出sizeIdx了
+    private final int[] size2idxTab;
+
+    protected SizeClasses(int pageSize, int pageShifts, int chunkSize, int directMemoryCacheAlignment) {
+        int group = log2(chunkSize) + 1 - LOG2_QUANTUM;// 22+1-4
+
+        // 1.生成 size classes 共19<<2=76条
+        //[index, log2Group, log2Delta, nDelta, isMultiPageSize, isSubPage, log2DeltaLookup]
+        short[][] sizeClasses = new short[group << LOG2_SIZE_CLASS_GROUP][7];
+        // 省略
+
+        // 2.计算SizeClasses
+        // 省略
+
+        // 3.统计nPSize、nSubpages
+        for (int idx = 0; idx < nSizes; idx++) {
+            // 省略
+        }
+
+        // 4.生成3个查找表
+        sizeIdx2sizeTab = newIdx2SizeTab(sizeClasses, nSizes, directMemoryCacheAlignment);
+        pageIdx2sizeTab = newPageIdx2sizeTab(sizeClasses, nSizes, nPSizes, directMemoryCacheAlignment);
+        size2idxTab = newSize2idxTab(lookupMaxSize, sizeClasses);
+    }
+
+    // 根据给定size向上对齐并查找到sizeIdx
+    public int size2SizeIdx(int size) {
+        // 省略检查
+        // 根据查找表直接查
+        if (size <= lookupMaxSize)
+            //size-1 / MIN_TINY
+            return size2idxTab[size - 1 >> LOG2_QUANTUM];
+        // 向上对齐并计算sizeIdx
+        // 省略
+    }
+}
+```
+
+构造方法中生成的SizeClasses数组非常重要：内容如下
+
+`isMultiPageSize`列表示是否为pageSize整数倍。
+
+`isSubPage`列可知，内存块小于28KB时表示Subpage。
+
+数组中是没有size列的，不过都有源码了，完全可以一起打印出来。
+
+`size=(1 << log2Group) + (nDelta << log2Delta)`
+
+| index | log2Group | log2Delta | nDelta | isMultiPageSize | isSubPage | log2DeltaLookup | size   |
+| ----- | --------- | --------- | ------ | --------------- | --------- | --------------- | ------ |
+| 0     | 4         | 4         | 0      | 0               | 1         | 4               | 16B    |
+| 1     | 4         | 4         | 1      | 0               | 1         | 4               | 32B    |
+| 2     | 4         | 4         | 2      | 0               | 1         | 4               | 48B    |
+| 3     | 4         | 4         | 3      | 0               | 1         | 4               | 64B    |
+| 4     | 6         | 4         | 1      | 0               | 1         | 4               | 80B    |
+| 5     | 6         | 4         | 2      | 0               | 1         | 4               | 96B    |
+| 6     | 6         | 4         | 3      | 0               | 1         | 4               | 112B   |
+| 7     | 6         | 4         | 4      | 0               | 1         | 4               | 128B   |
+| 8     | 7         | 5         | 1      | 0               | 1         | 5               | 160B   |
+| 9     | 7         | 5         | 2      | 0               | 1         | 5               | 192B   |
+| 10    | 7         | 5         | 3      | 0               | 1         | 5               | 224B   |
+| 11    | 7         | 5         | 4      | 0               | 1         | 5               | 256B   |
+| 12    | 8         | 6         | 1      | 0               | 1         | 6               | 320B   |
+| 13    | 8         | 6         | 2      | 0               | 1         | 6               | 384B   |
+| 14    | 8         | 6         | 3      | 0               | 1         | 6               | 448B   |
+| 15    | 8         | 6         | 4      | 0               | 1         | 6               | 512B   |
+| 16    | 9         | 7         | 1      | 0               | 1         | 7               | 640B   |
+| 17    | 9         | 7         | 2      | 0               | 1         | 7               | 768B   |
+| 18    | 9         | 7         | 3      | 0               | 1         | 7               | 896B   |
+| 19    | 9         | 7         | 4      | 0               | 1         | 7               | 1KB    |
+| 20    | 10        | 8         | 1      | 0               | 1         | 8               | 1.25KB |
+| 21    | 10        | 8         | 2      | 0               | 1         | 8               | 1.5KB  |
+| 22    | 10        | 8         | 3      | 0               | 1         | 8               | 1.75KB |
+| 23    | 10        | 8         | 4      | 0               | 1         | 8               | 2KB    |
+| 24    | 11        | 9         | 1      | 0               | 1         | 9               | 2.5KB  |
+| 25    | 11        | 9         | 2      | 0               | 1         | 9               | 3KB    |
+| 26    | 11        | 9         | 3      | 0               | 1         | 9               | 3.5KB  |
+| 27    | 11        | 9         | 4      | 0               | 1         | 9               | 4KB    |
+| 28    | 12        | 10        | 1      | 0               | 1         | 0               | 5KB    |
+| 29    | 12        | 10        | 2      | 0               | 1         | 0               | 6KB    |
+| 30    | 12        | 10        | 3      | 0               | 1         | 0               | 7KB    |
+| 31    | 12        | 10        | 4      | 1               | 1         | 0               | 8KB    |
+| 32    | 13        | 11        | 1      | 0               | 1         | 0               | 10KB   |
+| 33    | 13        | 11        | 2      | 0               | 1         | 0               | 12KB   |
+| 34    | 13        | 11        | 3      | 0               | 1         | 0               | 14KB   |
+| 35    | 13        | 11        | 4      | 1               | 1         | 0               | 16KB   |
+| 36    | 14        | 12        | 1      | 0               | 1         | 0               | 20KB   |
+| 37    | 14        | 12        | 2      | 1               | 1         | 0               | 24KB   |
+| 38    | 14        | 12        | 3      | 0               | 1         | 0               | 28KB   |
+| 39    | 14        | 12        | 4      | 1               | 0         | 0               | 32KB   |
+| 40    | 15        | 13        | 1      | 1               | 0         | 0               | 40KB   |
+| 41    | 15        | 13        | 2      | 1               | 0         | 0               | 48KB   |
+| 42    | 15        | 13        | 3      | 1               | 0         | 0               | 56KB   |
+| 43    | 15        | 13        | 4      | 1               | 0         | 0               | 64KB   |
+| 44    | 16        | 14        | 1      | 1               | 0         | 0               | 80KB   |
+| 45    | 16        | 14        | 2      | 1               | 0         | 0               | 96KB   |
+| 46    | 16        | 14        | 3      | 1               | 0         | 0               | 112KB  |
+| 47    | 16        | 14        | 4      | 1               | 0         | 0               | 128KB  |
+| 48    | 17        | 15        | 1      | 1               | 0         | 0               | 160KB  |
+| 49    | 17        | 15        | 2      | 1               | 0         | 0               | 192KB  |
+| 50    | 17        | 15        | 3      | 1               | 0         | 0               | 224KB  |
+| 51    | 17        | 15        | 4      | 1               | 0         | 0               | 256KB  |
+| 52    | 18        | 16        | 1      | 1               | 0         | 0               | 320KB  |
+| 53    | 18        | 16        | 2      | 1               | 0         | 0               | 384KB  |
+| 54    | 18        | 16        | 3      | 1               | 0         | 0               | 448KB  |
+| 55    | 18        | 16        | 4      | 1               | 0         | 0               | 512KB  |
+| 56    | 19        | 17        | 1      | 1               | 0         | 0               | 640KB  |
+| 57    | 19        | 17        | 2      | 1               | 0         | 0               | 768KB  |
+| 58    | 19        | 17        | 3      | 1               | 0         | 0               | 896KB  |
+| 59    | 19        | 17        | 4      | 1               | 0         | 0               | 1MB    |
+| 60    | 20        | 18        | 1      | 1               | 0         | 0               | 1.25MB |
+| 61    | 20        | 18        | 2      | 1               | 0         | 0               | 1.5MB  |
+| 62    | 20        | 18        | 3      | 1               | 0         | 0               | 1.75MB |
+| 63    | 20        | 18        | 4      | 1               | 0         | 0               | 2MB    |
+| 64    | 21        | 19        | 1      | 1               | 0         | 0               | 2.5MB  |
+| 65    | 21        | 19        | 2      | 1               | 0         | 0               | 3MB    |
+| 66    | 21        | 19        | 3      | 1               | 0         | 0               | 3.5MB  |
+| 67    | 21        | 19        | 4      | 1               | 0         | 0               | 4MB    |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+
+后面几个全是0，这是因为原本Chunk默认是16MB，现在是4MB，所以后面就空白了。
+
+## 内存池数据结构
+
+### 内存层次结构
+
+这是现在的Netty内存池层级图：
+
+![netty内存池层级结构new](netty.assets/netty内存池层级结构new.png)
+
+**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
+
+每个Arena由以下几个ChunkList组成：
+
+```java
+private final PoolChunkList<T> qInit;// 存储内存利用率0-25%的chunk
+private final PoolChunkList<T> q000;// 存储内存利用率1-50%的chunk
+private final PoolChunkList<T> q025;// 存储内存利用率25-75%的chunk
+private final PoolChunkList<T> q050;// 存储内存利用率50-100%的chunk
+private final PoolChunkList<T> q075;// 存储内存利用率75-100%的chunk
+private final PoolChunkList<T> q100;// 存储内存利用率100%的chunk
+```
+
+Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
+
+**Chunk**：Netty每次向操作系统申请的最小单位(4MB)，是run的集合
+
+**Run**：对应一块连续的内存，是page的集合，最少1page
+
+**Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page
+
+**SubPage**：负责Run内的内存分配，目的是为了减少内存的浪费。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
+
+Subpage内存块的划分由内存对齐类SizeClasses定义好了：
+
+![Netty内存块规格划分](netty.assets/Netty内存块规格划分.png)
+
+### PoolArena
+
+PooledByteBufAllocator创建 Arena 的默认数量通常是CPU核数*2，创建多个 Arena 来缓解资源竞争问题，从而提高内存分配效率。
+
+线程在首次申请分配内存时，会通过 round-robin 的方式轮询 Arena 数组，选择一个固定的 Arena，**在线程的生命周期内只与该 Arena 打交道**，所以每个线程都保存了 Arena 信息，从而提高访问效率。
+
+```java
+/**
+ * 为了提高内存分配效率并减少内部碎片，Jemalloc 算法将 Arena 切分为小块 Chunk，
+ * 根据每块的内存使用率又将小块组合为以下几种状态：QINIT、Q00、Q25、Q50、Q75、Q100 。
+ * Chunk 块可以在这几种状态间随着内存使用率的变化进行转移，从而提高分配效率。
+ * PoolArena有2个子类：
+ * HeapArena 对堆内存的分配管理
+ * DirectArena 对直接内存的分配管理
+ * @param <T>
+ */
+abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
+    final PooledByteBufAllocator parent;// 所属 PooledByteBufAllocator 对象
+
+    final int numSmallSubpagePools;// Small类型内存块有默认39种
+    final int directMemoryCacheAlignment;
+    // 保存有Small类型内存块的subpage链表，数组中每个位置都是相同大小内存块的链表，不同位置代表不同大小
+    // 保存的subpage来自于所有Chunk，subpage有39种内存块大小
+    private final PoolSubpage<T>[] smallSubpagePools;
+
+    private final PoolChunkList<T> q050;// 存储内存利用率50-100%的chunk
+    private final PoolChunkList<T> q025;// 存储内存利用率25-75%的chunk
+    private final PoolChunkList<T> q000;// 存储内存利用率1-50%的chunk
+    private final PoolChunkList<T> qInit;// 存储内存利用率0-25%的chunk
+    private final PoolChunkList<T> q075;// 存储内存利用率75-100%的chunk
+    private final PoolChunkList<T> q100;// 存储内存利用率100%的chunk
+
+    private final ReentrantLock lock = new ReentrantLock();
+}
+```
+
+包含了一个 **`smallSubpagePools（ PoolSubpage<T>[]）`** 和6个PoolChunkList 。
+
+- smallSubpagePools存放small Subpage类型的内存块
+
+![smallSubpagePools](netty.assets/smallSubpagePools.png)
+
+- 6个PoolChunkList 存放使用率不同的Chunk,构成一个双向循环链表
+
+![PoolChunkList](netty.assets/PoolChunkList.png)
+
+**qIint和q000为何设计为2个而不是合二为一：**
+
+qInit 用于存储初始分配的 PoolChunk，因为在第一次内存分配时，PoolChunkList 中并没有可用的 PoolChunk，所以需要新创建一个 PoolChunk 并添加到 qInit 列表中。qInit 中的 PoolChunk 即使内存被完全释放也不会被回收，避免 PoolChunk 的重复初始化工作。
+
+PoolArena中分配内存方法如下：它将根据请求的内存大小调用不同分配方法：
+
+```java
+// PoolArena.class
+private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
+    final int sizeIdx = size2SizeIdx(reqCapacity);
+    // 1.分配small类型内存块，<=28KB
+    if (sizeIdx <= smallMaxSizeIdx) 
+        tcacheAllocateSmall(cache, buf, reqCapacity, sizeIdx);
+    // 2.分配Normal类型内存块，<=4MB
+    else if (sizeIdx < nSizes) 
+        tcacheAllocateNormal(cache, buf, reqCapacity, sizeIdx);
+    // 3.分配Huge类型内存块，大于4MB
+    else {
+        int normCapacity = directMemoryCacheAlignment > 0
+            ? normalizeSize(reqCapacity) : reqCapacity;
+        // Huge allocations are never served via the cache so just call allocateHuge
+        allocateHuge(buf, normCapacity);
+    }
+}
+```
+
+#### 分配Small
+
+从内存对齐类SizeClasses可知，Small类型内存块在16B...28KB之间。
+
+PoolArena分配Small内存块时先从smallSubpagePools缓存中分配，没有再去各个ChunkList分配。
+
+因为16B...28KB之间很多内存规格并不是pageSize的整数倍，这就会对Run进行subpage划分，并放入smallSubpagePools数组中缓存。
+
+```java
+// PoolArena.class
+private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity, final int sizeIdx) {
+    // 从PoolThreadCache分配
+    if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) {
+        // was able to allocate out of the cache so move on
+        return;
+    }
+
+    // 1.直接从smallSubpagePools缓存数组中分配
+    // 查找该sizeIdx对应的SubPage的头结点，就是这个smallSubpagePools[sizeIdx]
+    final PoolSubpage<T> head = findSubpagePoolHead(sizeIdx);
+    final boolean needsNormalAllocation;
+    head.lock();
+    try {
+        final PoolSubpage<T> s = head.next;
+        // 1.1 以头结点判断是否存在可分配的SubPage，若相等则说明没有找到可分配的Subpage
+        needsNormalAllocation = s == head;
+        if (!needsNormalAllocation) {// 有可分配的Subpage
+            // 1.2 调用PoolSubpage#allocate()进行分配并返回内存块的句柄
+            long handle = s.allocate();
+            s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
+        }
+    } finally {
+        head.unlock();
+    }
+
+    // 2.smallSubpagePools中没有则调用allocateNormal方法分配
+    // 则需要从各个ChunkList去分配，甚至新建Chunk
+    if (needsNormalAllocation) {
+        lock();
+        try {
+            allocateNormal(buf, reqCapacity, sizeIdx, cache);
+        } finally {
+            unlock();
+        }
+    }
+    incSmallAllocation();
+}
+```
+
+分配Small类型内存块呢，优先从smallSubpagePools数组缓存中找到满足该内存块大小的Subpage，直接分配即可。
+
+因为Subpage是将Run按照第1次请求划分为等大小内存块，所以调用`PoolSubpage#allocate()`将直接分配其中某块内存。
+
+**smallSubpagePools数组缓存是从哪来的呢？**
+
+> allocateNormal()方法从某个Chunk划分出一个Run后，将根据此次请求的大小将Run划分为均等份，并封装为PoolSubpage放入该缓存数组中。
+
+#### 分配Normal
+
+从内存对齐类SizeClasses可知，Normal类型内存块在28KB...ChunkSize（默认4MB）之间。
+
+Normal类型内存块没有smallSubpagePools缓存，因为从内存对齐类的下一个内存规格32KB开始，所有内存块都是pageSize的整数倍，无须再对page进行划分为subpage的情况。
+
+```java
+// PoolArena.java
+private void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadCache threadCache) {
+    assert lock.isHeldByCurrentThread();
+    // 1.从各个ChunkList中分配
+    if (q050.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+        q025.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+        q000.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+        qInit.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+        q075.allocate(buf, reqCapacity, sizeIdx, threadCache)) {
+        return;
+    }
+
+    // 2.如果现有的ChunkList都不满足需要的内存块，则新建一个Chunk
+    // Add a new chunk.
+    PoolChunk<T> c = newChunk(pageSize, nPSizes, pageShifts, chunkSize);
+    boolean success = c.allocate(buf, reqCapacity, sizeIdx, threadCache);
+    assert success;
+    qInit.add(c);// 将新建的Chunk添加到qInit队列头部
+}
+```
+
+为什么选择q050作为首选分配队列呢？**分配顺序为：q050-->q025-->q000-->qInit-->q075**，除了最后一个几乎是倒序分配，原因在于从q050倒序开始既能使Chunk使用率上升，又不会像q075那样可能出现某个Chunk空间不足分配的情况。
+
+#### 分配Huge
+
+大于ChunkSize默认4MB时即为大内存块，直接申请Chunk即可，并不再将其缓存到PoolArena的ChunkList中。
+
+```java
+// PoolArena.java
+private void allocateHuge(PooledByteBuf<T> buf, int reqCapacity) {
+    PoolChunk<T> chunk = newUnpooledChunk(reqCapacity);
+    activeBytesHuge.add(chunk.chunkSize());
+    buf.initUnpooled(chunk, reqCapacity);
+    allocationsHuge.increment();
+}
+```
+
+### PoolChunk
+
+Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
+
+**Chunk**：Netty每次向操作系统申请的最小单位(4MB)，是run的集合
+
+**Run**：对应一块连续的内存，是page的集合，最少1page。最开始时整个Chunk就是一个Run。
+
+**Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page
+
+**SubPage**：负责Run内的内存分配，目的是为了减少内存的浪费。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
+
+Subpage内存块的划分由内存对齐类SizeClasses定义好了：
+
+![Netty内存块规格划分](netty.assets/Netty内存块规格划分.png)
+
+Chunk的内存布局如下：
+
+![Chunk内存结构](netty.assets/Chunk内存结构.png)
+
+```java
+/**
+ * handle: 64bit的run的句柄各个位布局如下:
+ * oooooooo ooooooos ssssssss ssssssue bbbbbbbb bbbbbbbb bbbbbbbb bbbbbbbb
+ * o: runOffset (此run的首页page在此Chunk的位移，0~511), 15bit
+ * s: size (此run包含page数量，1~512), 15bit
+ * u: isUsed?, 1bit
+ * e: isSubpage?, 1bit
+ * b: subpage的位图索引bitmapIdx, 如果不是subpage则为0, 32bit
+ */
+final class PoolChunk<T> implements PoolChunkMetric {
+    final PoolArena<T> arena;// 所属Arena
+    final Object base;
+    // 当前申请的内存块，比如对于堆内存，T就是一个byte数组，对于直接内存，T就是ByteBuffer，
+    // 但无论是哪种形式，其内存大小都默认是4MB
+    final T memory;
+    final boolean unpooled;// 是否池化
+
+    /**
+     * a map 管理所有的run
+     * 每个run，第1页page和最后1页page的runOffset作为key，
+     * run的句柄handle作为value都保存于runsAvailMap
+     */
+    private final LongLongHashMap runsAvailMap;
+
+    /**
+     * 每个优先级队列管理着相同大小的runs，以runOffset排序，
+     * 所以总用持有较小偏移量的首页page的run进行分配
+     * 数组长度为68，即16B...4MB之间的68个内存块规格，储存各个内存规格的run
+     */
+    private final LongPriorityQueue[] runsAvail;
+
+    // 此Chunk的所有subPage
+    // 长度为chunkSize >> pageShifts，默认512
+    private final PoolSubpage<T>[] subpages;
+
+    private final int pageSize;// Page大小默认8KB
+    /**
+     * 从 1 开始左移到 {@link #pageSize} 的位数。默认 13 ，1 << 13 = 8192 。
+     * 具体用途，见 {@link #allocateRun(int)} 方法，计算指定容量所在满二叉树的层级。
+     */
+    private final int pageShifts;
+    private final int chunkSize;// Chunk 内存块占用大小。默认为 4M
+
+    int freeBytes;// 此chunk剩余的空间
+
+    PoolChunkList<T> parent;
+    PoolChunk<T> prev;
+    PoolChunk<T> next;
+
+    PoolChunk(PoolArena<T> arena, Object base, T memory, int pageSize, int pageShifts, int chunkSize, int maxPageIdx) {
+        // 省略
+        // 插入初始Run, offset = 0, pages = chunkSize / pageSize
+        int pages = chunkSize >> pageShifts;
+        long initHandle = (long) pages << SIZE_SHIFT;
+        insertAvailRun(0, pages, initHandle);
+
+        cachedNioBuffers = new ArrayDeque<ByteBuffer>(8);
+    }
+}
+```
+
+**注意：初始整个Chunk就是一个Run，随着后续的申请对Run进行切分为小Run，又随着Run的回收合并等，`runAvails`中可能会存有很多不同内存规格的Run。**
+
+从Chunk中申请内存块的方法如下：
+
+```java
+// PoolChunk.java
+boolean allocate(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadCache cache) {
+    final long handle;
+    if (sizeIdx <= arena.smallMaxSizeIdx) {
+        // 1.small内存块分配，则尝试从某个page分配subpage
+        handle = allocateSubpage(sizeIdx);
+        if (handle < 0) return false;
+        assert isSubpage(handle);
+    } else {
+        // 2.normal内存块分配
+        // runSize必须是pageSize倍数
+        int runSize = arena.sizeIdx2size(sizeIdx);
+        handle = allocateRun(runSize);
+        if (handle < 0) return false;
+        assert !isSubpage(handle);
+    }
+
+    // 3.将分配到的内存块初始化到buf中
+    ByteBuffer nioBuffer = cachedNioBuffers != null ? cachedNioBuffers.pollLast() : null;
+    initBuf(buf, nioBuffer, handle, reqCapacity, cache);
+    return true;
+}
+```
+
+#### runAvails
+
+```java
+    /**
+     * 每个优先级队列管理着相同大小的runs，以runOffset排序，
+     * 所以总用持有较小偏移量的首页page的run进行分配
+     * 数组长度为68，即16B...4MB之间的68个内存块规格，储存各个内存规格的run
+     */
+    private final LongPriorityQueue[] runsAvail;
+```
+
+`runAvails`属性非常重要，默认情况下保存有来自SizeClasses内存对其类的68个内存规格的Run队列，各个优先队列以runOffset排序。
+
+申请内存时如申请28KB则计算其在SizeClasses的sizeIdx，从之前分析可知如28KB为38，则从`runAvails`的28偏移量开始查找各个队列，找到第1个满足该请求且非空的Run队列，将队首Run从`runAvails`移除并切分，剩余的run再放回`runAvails`。
+
+LongPriorityQueue是Netty是实现的一个`long[]`数组元素的优先级队列，上沉下浮，比较简单，自己实现估计是觉得jdk提供的优先队列的泛型有点搓吧。
+
+将run放入runAvails中：
+
+```java
+private void insertAvailRun(int runOffset, int pages, long handle) {
+    // 1.将此run包含的页面数量转换为SizeClasses的sizeIdx，找到该内存规格的run队列
+    // floor是指如果页面数无法完全找到对应的sizeIdx则向下找，如9个页面72KB就没有，将其向下找到64KB的sizeIdx 43
+    int pageIdxFloor = arena.pages2pageIdxFloor(pages);
+    LongPriorityQueue queue = runsAvail[pageIdxFloor];
+    queue.offer(handle);// 将此run加入该队列中
+
+    // 2.插入每个run的第1页和最后1页到runsAvailMap中
+    insertAvailRun0(runOffset, handle);
+    if (pages > 1) {
+        //insert last page of run
+        insertAvailRun0(lastPage(runOffset, pages), handle);
+    }
+}
+```
+
+将run从其中移除：
+
+```java
+private void removeAvailRun(long handle) {
+    // 1.将此run包含的页面数量转换为SizeClasses的sizeIdx，找到该内存规格的run队列
+    // floor是指如果页面数无法完全找到对应的sizeIdx则向下找，如9个页面72KB就没有，将其向下找到64KB的sizeIdx 43
+    int pageIdxFloor = arena.pages2pageIdxFloor(runPages(handle));
+    LongPriorityQueue queue = runsAvail[pageIdxFloor];
+    // 2.从队列移除该run的句柄handle
+    removeAvailRun(queue, handle);
+}
+
+private void removeAvailRun(LongPriorityQueue queue, long handle) {
+    queue.remove(handle);// 队列中移除即可
+
+    int runOffset = runOffset(handle);
+    int pages = runPages(handle);
+    //remove first page of run
+    runsAvailMap.remove(runOffset);
+    if (pages > 1) {
+        //remove last page of run
+        runsAvailMap.remove(lastPage(runOffset, pages));
+    }
+}
+```
+
+#### 申请run
+
+`allocateRun(int runSize)`方法用于从runAvails中找到第1个满足请求runSize的Run并对其进行分裂，剩余run再放回`runAvails`中。
+
+申请内存时如申请28KB则计算其在SizeClasses的sizeIdx，从之前分析可知如28KB为38，则从`runAvails`的28偏移量开始查找各个队列，找到第1个满足该请求且非空的Run队列，将队首Run从`runAvails`移除并切分，剩余的run再放回`runAvails`。
+
+```java
+/**
+ * 1) 找到在runsAvails中第1个满足的run
+ * 2) 如果找到的run的pages大于请求的pages，则分裂该run，并保存剩下的run之后使用
+ */
+private long allocateRun(int runSize) {
+    // 1.计算请求的runSize需要page页数量
+    int pages = runSize >> pageShifts;// 右移13位，即除以pageSize 8K
+    // 根据需要page数量计算SizeClasses的sizeIdx，作为从runAvail数组寻找的起始偏移量
+    int pageIdx = arena.pages2pageIdx(pages);
+
+	// 省略同步操作
+    // 2.从runsAvail中找到第1个满足该请求页面数量大小且非空的run的队列
+    int queueIdx = runFirstBestFit(pageIdx);// 从pageIdx开始查找runAvails数组队列
+    if (queueIdx == -1) return -1;
+
+    // 3.获取队列第1个run，即最小runOffset的run
+    LongPriorityQueue queue = runsAvail[queueIdx];
+    long handle = queue.poll();// 弹出队列第1个run
+
+    // 4.从runAvail队列中移除选出的这个run
+    removeAvailRun(queue, handle);
+
+    // 5.按照请求的页面数量将此run分裂，返回分裂后请求到的run句柄
+    if (handle != -1) handle = splitLargeRun(handle, pages);
+
+    // 剩余空间减少
+    int pinnedSize = runSize(pageShifts, handle);
+    freeBytes -= pinnedSize;
+    return handle;// 返回请求到的run的句柄
+}
+```
+
+第2步根据计算得到的sizeIdx查找run队列：
+
+```java
+private int runFirstBestFit(int pageIdx) {
+    if (freeBytes == chunkSize) return arena.nPSizes - 1;
+    for (int i = pageIdx; i < arena.nPSizes; i++) {
+        LongPriorityQueue queue = runsAvail[i];
+        if (queue != null && !queue.isEmpty()) {
+            return i;
+        }
+    }
+    return -1;
+}
+```
+
+第5步，将查到的Run切分为2个Run，返回分裂后请求到的run句柄，并且将剩余Run放回`runAvails`中：
+
+```java
+private long splitLargeRun(long handle, int needPages) {
+    int totalPages = runPages(handle);// 此run的总页面
+    int remPages = totalPages - needPages;// 分配后剩余页面数
+
+    if (remPages > 0) {// run分裂，将剩下的run插入availRun和runasAvailMap中
+        int runOffset = runOffset(handle);
+
+        // 1.计算剩余run的句柄handle并插入runAvails
+        int availOffset = runOffset + needPages;// 剩下的首页面位移
+        long availRun = toRunHandle(availOffset, remPages, 0);// 分配后的run的新句柄handle
+        insertAvailRun(availOffset, remPages, availRun);// 将分裂后的run插入availRun队列和runsAvailMap中
+
+        // 2.计算并返回划分出来的run的句柄
+        return toRunHandle(runOffset, needPages, 1);// 计算分配出去的run的句柄handle
+    }
+
+    //mark it as used
+    handle |= 1L << IS_USED_SHIFT;
+    return handle;
+}
+```
+
+对于从runAvails中插入或移除run看上面的分析。
+
+#### 申请Subpage
+
+
+
+
+
+
+
+#### 释放free
+
+
+
+
+
+
+
+
+
+
+
+### PoolSubpage
+
+```java
+final class PoolSubpage<T> implements PoolSubpageMetric {
+
+    final PoolChunk<T> chunk;// 所属chunk
+    final int elemSize;// 切分的等量小块内存大小，最小16B
+    private final int pageShifts;// 默认13
+    private final int runOffset;// 所属run的首页page在Chunk的位移
+    private final int runSize;// 所属run的大小
+    // 长度由runSize决定
+    private final long[] bitmap; // 每一块小内存状态，即记录每KB内存是否使用
+
+    PoolSubpage<T> prev;
+    PoolSubpage<T> next;
+
+    boolean doNotDestroy;
+    private int maxNumElems;// 此run划分的等大小内存块数量 = `pageSize(8KB) / elemSize`
+    private int bitmapLength;
+    private int nextAvail;// 下个可使用内存块指针
+    private int numAvail;// 此subpage剩余的可分配等大小内存块
+    private final ReentrantLock lock = new ReentrantLock();
+
+    PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int pageShifts, int runOffset, int runSize, int elemSize) {
+        this.chunk = chunk;
+        this.pageShifts = pageShifts;
+        this.runOffset = runOffset;
+        this.runSize = runSize;
+        this.elemSize = elemSize;
+        bitmap = new long[runSize >>> 6 + LOG2_QUANTUM]; // runSize / 64 / QUANTUM
+
+        doNotDestroy = true;
+        if (elemSize != 0) {// 将此run按照第1次请求的大小均等划分
+            maxNumElems = numAvail = runSize / elemSize;
+            nextAvail = 0;
+            bitmapLength = maxNumElems >>> 6;
+            if ((maxNumElems & 63) != 0) {
+                bitmapLength ++;
+            }
+
+            for (int i = 0; i < bitmapLength; i ++) {
+                bitmap[i] = 0;
+            }
+        }
+        addToPool(head);
+    }
+}
+```
 
