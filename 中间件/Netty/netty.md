@@ -4030,7 +4030,7 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
 }
 ```
 
-包含了一个 **`smallSubpagePools（ PoolSubpage<T>[]）`** 和6个PoolChunkList 。
+包含了一个 **`smallSubpagePools（ PoolSubpage<T>[]）`** 和**6个PoolChunkList**，Arena申请内存时，**先从`smallSubpagePools`分配，如果没有再从PoolChunkList中某个Chunk分配调用`Chunk#allocate()` 。**
 
 - smallSubpagePools存放small Subpage类型的内存块
 
@@ -4051,11 +4051,9 @@ PoolArena中分配内存方法如下：它将根据请求的内存大小调用�
 private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
     final int sizeIdx = size2SizeIdx(reqCapacity);
     // 1.分配small类型内存块，<=28KB
-    if (sizeIdx <= smallMaxSizeIdx) 
-        tcacheAllocateSmall(cache, buf, reqCapacity, sizeIdx);
+    if (sizeIdx <= smallMaxSizeIdx) tcacheAllocateSmall(cache, buf, reqCapacity, sizeIdx);
     // 2.分配Normal类型内存块，<=4MB
-    else if (sizeIdx < nSizes) 
-        tcacheAllocateNormal(cache, buf, reqCapacity, sizeIdx);
+    else if (sizeIdx < nSizes) tcacheAllocateNormal(cache, buf, reqCapacity, sizeIdx);
     // 3.分配Huge类型内存块，大于4MB
     else {
         int normCapacity = directMemoryCacheAlignment > 0
@@ -4078,44 +4076,35 @@ PoolArena分配Small内存块时先从smallSubpagePools缓存中分配，没有�
 // PoolArena.class
 private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity, final int sizeIdx) {
     // 从PoolThreadCache分配
-    if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) {
+    if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) 
         // was able to allocate out of the cache so move on
         return;
-    }
 
     // 1.直接从smallSubpagePools缓存数组中分配
     // 查找该sizeIdx对应的SubPage的头结点，就是这个smallSubpagePools[sizeIdx]
     final PoolSubpage<T> head = findSubpagePoolHead(sizeIdx);
     final boolean needsNormalAllocation;
-    head.lock();
-    try {
-        final PoolSubpage<T> s = head.next;
-        // 1.1 以头结点判断是否存在可分配的SubPage，若相等则说明没有找到可分配的Subpage
-        needsNormalAllocation = s == head;
-        if (!needsNormalAllocation) {// 有可分配的Subpage
-            // 1.2 调用PoolSubpage#allocate()进行分配并返回内存块的句柄
-            long handle = s.allocate();
-            s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
-        }
-    } finally {
-        head.unlock();
+    // 省略锁操作
+    final PoolSubpage<T> s = head.next;
+    // 1.1 以头结点判断是否存在可分配的SubPage，若相等则说明没有找到可分配的Subpage
+    needsNormalAllocation = s == head;
+    if (!needsNormalAllocation) {// 有可分配的Subpage
+        // 1.2 调用PoolSubpage#allocate()进行分配并返回内存块的句柄
+        long handle = s.allocate();
+        s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
     }
 
     // 2.smallSubpagePools中没有则调用allocateNormal方法分配
     // 则需要从各个ChunkList去分配，甚至新建Chunk
     if (needsNormalAllocation) {
-        lock();
-        try {
-            allocateNormal(buf, reqCapacity, sizeIdx, cache);
-        } finally {
-            unlock();
-        }
+        // 省略锁操作
+        allocateNormal(buf, reqCapacity, sizeIdx, cache);
     }
     incSmallAllocation();
 }
 ```
 
-分配Small类型内存块呢，优先从smallSubpagePools数组缓存中找到满足该内存块大小的Subpage，直接分配即可。
+分配Small类型内存块呢，优先从`smallSubpagePools`数组缓存中找到满足该内存块大小的Subpage，直接分配即可。
 
 因为Subpage是将Run按照第1次请求划分为等大小内存块，所以调用`PoolSubpage#allocate()`将直接分配其中某块内存。
 
@@ -4175,9 +4164,9 @@ Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
 
 **Run**：对应一块连续的内存，是page的集合，最少1page。最开始时整个Chunk就是一个Run。
 
-**Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page
+**Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page。
 
-**SubPage**：负责Run内的内存分配，目的是为了减少内存的浪费。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
+**SubPage**：**特殊的Run，不过将Run内存均等划分为几份，目的是为了减少内存的浪费**。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
 
 Subpage内存块的划分由内存对齐类SizeClasses定义好了：
 
@@ -4257,8 +4246,8 @@ final class PoolChunk<T> implements PoolChunkMetric {
 // PoolChunk.java
 boolean allocate(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadCache cache) {
     final long handle;
+    // 1.small内存块分配，则尝试从某个subpage分配内存块
     if (sizeIdx <= arena.smallMaxSizeIdx) {
-        // 1.small内存块分配，则尝试从某个page分配subpage
         handle = allocateSubpage(sizeIdx);
         if (handle < 0) return false;
         assert isSubpage(handle);
@@ -4340,7 +4329,7 @@ private void removeAvailRun(LongPriorityQueue queue, long handle) {
 }
 ```
 
-#### 申请run
+#### 分配run
 
 `allocateRun(int runSize)`方法用于从runAvails中找到第1个满足请求runSize的Run并对其进行分裂，剩余run再放回`runAvails`中。
 
@@ -4421,13 +4410,55 @@ private long splitLargeRun(long handle, int needPages) {
 
 对于从runAvails中插入或移除run看上面的分析。
 
-#### 申请Subpage
+#### 分配Subpage
 
+**SubPage**：**特殊的Run，不过将Run内存均等划分为几份，目的是为了减少内存的浪费**。
 
+Small类型内存块在PoolArena中分配内存时优先从`smallSubpagePools`数组缓存中找到满足该内存块大小的Subpage，没有时再从ChunkList的某个Chunk分配Subpage后再分配。
 
+从Chunk中分配Subpage：`Chunk#allocateSubpage(int sizeIdx)`
 
+- 先调用`Chunk#allocateRun(int runSize)`分配run
+- 再调用`new PoolSubpage()`将run封装为`PoolSubpage`
 
+```java
+/**
+ * 创建并初始化一个新的 PoolSubpage，并放入PoolArena的smallSubpagePools的
+ * @param sizeIdx SizeClasses的内存规格偏移索引
+ * @return index in memoryMap
+ */
+private long allocateSubpage(int sizeIdx) {
+    // 1.获取 PoolArena持有的 smallSubpagePools 池的sizeIdx队列的头部节点，
+    // 准备将新分配的subPage插入该队列
+    PoolSubpage<T> head = arena.findSubpagePoolHead(sizeIdx);// smallSubpagePools[sizeIdx];
+    // 省略锁操作
+    
+    // 2.分配一个新run
+    int runSize = calculateRunSize(sizeIdx);// 根据sizeIdx计算出runSize，它必须是pageSize整数倍
+    long runHandle = allocateRun(runSize);
+    if (runHandle < 0) return -1;
+    
+    int runOffset = runOffset(runHandle);
+    // 3.根据sizeIdx计算elemSize，即将Run划分均等份的大小
+    int elemSize = arena.sizeIdx2size(sizeIdx);
+    // 4.将run新建SubPage，并将其添加到该head节点后面，即放入PoolArena的subpagesPool池中
+    // 同时这里会将Run均等划分为多个或1个elemSize内存块
+    PoolSubpage<T> subpage = new PoolSubpage<T>(head, this, pageShifts, runOffset,
+                                                runSize(pageShifts, runHandle), elemSize);
 
+    subpages[runOffset] = subpage;
+    // 5.将subpage的某一块elemSize分配出去
+    return subpage.allocate();// 这里不用传入大小，是因为该subpage已经根据第1次请求的大小划分为均等份了
+}
+```
+
+这里的RunSize肯定是大于等于elemSize的。
+
+比如sizeIdx为19时，申请1KB内存块，计算出的RunSize为1个page即8KB，而elemSize则为1KB，所以将Run封装为Subpage后将按照第1次申请的elemSize划分为8个1KB的均等块。
+
+并将这个Subpage加入PoolArena的`smallSubpagePools[sizeIdx]`位置的链表，供后续直接分配该sizeIdx的内存规格。
+
+关于PoolSubpage的分析后续会专门解析。
 
 #### 释放free
 
