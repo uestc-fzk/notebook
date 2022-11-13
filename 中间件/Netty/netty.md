@@ -3738,14 +3738,14 @@ netty内存池的层级结构如下：(这是以前的旧版)
 
 **Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
 
-## PooledByteBufAllocator
+## 内存分配器Allocator
 
 一个简单的内存分配示例：
 
 ```java
 public class MyExample {
     public static void main(String[] args) {
-        // 传入true表示使用直接内存
+        // 传入true表示默认使用直接内存池
         PooledByteBufAllocator allocator = new PooledByteBufAllocator(true);
 
         ByteBuf buf = allocator.buffer(1 << 10, 1 << 11);
@@ -3754,32 +3754,100 @@ public class MyExample {
         ByteBuf buf2 = allocator.buffer(1 << 12, 1 << 13);
         buf2.clear();
 
-        ByteBuf buf3 = allocator.buffer(1 << 14, 1 << 14);// 16K还是Small?
+        ByteBuf buf3 = allocator.buffer(1 << 14, 1 << 14);
         buf3.clear();
 
-        ByteBuf buf4 = allocator.buffer(1 << 19, 1 << 19);// Normal
+        ByteBuf buf4 = allocator.buffer(1 << 19, 1 << 19);
         buf4.clear();
     }
 }
 ```
 
+缓冲池内存分配器PooledByteBufAllocator：
 
+```java
+public class PooledByteBufAllocator extends AbstractByteBufAllocator implements ByteBufAllocatorMetricProvider {
+    // 默认的堆内存Arena数量为CPU核心数*2
+    private static final int DEFAULT_NUM_HEAP_ARENA;
+    // 默认的直接内存Arena数量为CPU核心数*2
+    private static final int DEFAULT_NUM_DIRECT_ARENA;
+    private static final int DEFAULT_PAGE_SIZE;// Page默认8KB
+    private static final int DEFAULT_MAX_ORDER;// 默认9，即8192 << 9 = 4 MiB per chunk
 
+    // 默认Allocator是直接内存分配器
+    public static final PooledByteBufAllocator DEFAULT =
+        new PooledByteBufAllocator(PlatformDependent.directBufferPreferred());
+    // 堆内存Arena数组
+    private final PoolArena<byte[]>[] heapArenas;
+    // 直接内存Arena数组
+    private final PoolArena<ByteBuffer>[] directArenas;
+    private final int chunkSize;// 默认4MB
 
+    public PooledByteBufAllocator(
+        boolean preferDirect, int nHeapArena, 
+        int nDirectArena, int pageSize, 
+        int maxOrder,int smallCacheSize, 
+        int normalCacheSize, boolean useCacheForAllThreads, 
+        int directMemoryCacheAlignment) {
+        // 省略赋值操作
 
+        // 1.计算Chunk大小，默认4MB
+        chunkSize = validateAndCalculateChunkSize(pageSize, maxOrder);
+        // 省略一堆检查
 
+        // 2.计算pageShifts，默认13，即 2<<<13 == 8K
+        int pageShifts = validateAndCalculatePageShifts(pageSize, directMemoryCacheAlignment);
 
-## SizeClasses内存对齐
+        // 3.创建CPU核心数*2个堆内存PoolArena
+        if (nHeapArena > 0) {
+            heapArenas = new PoolArena[nHeapArena];
+            for (int i = 0; i < heapArenas.length; i++) {
+                heapArenas[i] = new PoolArena.HeapArena(/*省略参数*/);
+            }
+        } 
+        // 4.创建CPU核心数*2个直接内存PoolArena
+        if (nDirectArena > 0) {
+            directArenas = new PoolArena[nDirectArena];
+            for (int i = 0; i < directArenas.length; i++) {
+                directArenas[i] =new PoolArena.DirectArena(/*省略参数*/);
+            }
+        }
+    }
+}
+```
+
+分配内存方法有`allocator#heapBuffer()`和`allocator#directBuffer()`，它们具体实现将调用`allocator#newHeapBuffer()`和`allocator#newDirectBuffer()`：
+
+```java
+// 创建满足指定大小的直接内存
+protected ByteBuf newDirectBuffer(int initialCapacity, int maxCapacity) {
+    // 1.获取此线程绑定的直接内存directPoolArena
+    PoolThreadCache cache = threadCache.get();
+    PoolArena<ByteBuffer> directArena = cache.directArena;
+		
+    // 2.分配内存块
+    final ByteBuf buf = directArena.allocate(cache, initialCapacity, maxCapacity);
+    return toLeakAwareBuffer(buf);
+}
+```
+
+堆内存、直接内存分配都是以当前线程绑定的`PoolArena#allocate()`分配内存。
+
+在Allocator分配器的构造函数中，创建了CPU核心数*2的堆内存和直接内存的PoolArena，**每个线程都将绑定一个PoolArena进行内存分配，可以避免线程竞争。**
+
+## 内存规格对齐SizeClasses
 
 Netty的内存对齐类为`io.netty.buffer.SizeClasses`，为Netty内存池中的内存块提供大小对齐，索引计算等服务方法。
 
-**`4.1.72.Final`** 是 **`jemalloc4`** 的实现。**`jemalloc4`** 进一步优化了内存碎片的问题。jemalloc4 相较于 jemalloc3 最大的提升是进一步优化内存碎片问题，因为在 jemalloc3 中最多可能会导致 50% 内存碎片，但 jemalloc4 通过划分更细粒度的内存规格在一定程度上改善了这一问题，这也是 SizeClasses 的由来。
+**`4.1.72.Final`** 是 **`jemalloc4`** 的实现。**`jemalloc4`** 进一步优化了内存碎片的问题。jemalloc4 相较于 jemalloc3 最大的提升是进一步优化内存碎片问题，因为**在 jemalloc3 中使用伙伴分配算法最多可能会导致 50% 内存碎片**，但 jemalloc4 通过划分更细粒度的内存规格在一定程度上改善了这一问题，这也是 SizeClasses 的由来。
 
 > Tips: [github.com/netty/netty…](https://link.juejin.cn?target=https%3A%2F%2Fgithub.com%2Fnetty%2Fnetty%2Fissues%2F3910) (Netty Issues) 这里说明了jemalloc4的提升`
 
-`jemalloc4`内存块划分：
+`jemalloc4`内存规格划分：
 
 ![Netty内存块规格划分](netty.assets/Netty内存块规格划分.png)
+
+> `jemalloc4`划分的更细粒度的内存规格产生的`内零头`要远小于伙伴分配算法，比如申请(32KB+1B)内存，在伙伴分配算法中将申请64KB内存，而在上图内存规格划分中可知需分配40KB内存块，内零头更小。
 
 **`jemalloc4`** 取消了 **`Tiny`** 内存的规格。只保留了 **`small`** 、 **`normal`** 、 **`huge`** 三种规格。下面要分析的 **`SizeClasses`** 就是记录了 small和normal规格值的一张表。
 
@@ -3948,14 +4016,14 @@ abstract class SizeClasses implements SizeClassesMetric {
 | 65    | 21        | 19        | 2      | 1               | 0         | 0               | 3MB    |
 | 66    | 21        | 19        | 3      | 1               | 0         | 0               | 3.5MB  |
 | 67    | 21        | 19        | 4      | 1               | 0         | 0               | 4MB    |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
-| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 1      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
+| 0     | 0         | 0         | 0      | 0               | 0         | 0               | 0      |
 
 后面几个全是0，这是因为原本Chunk默认是16MB，现在是4MB，所以后面就空白了。
 
@@ -3967,7 +4035,7 @@ abstract class SizeClasses implements SizeClassesMetric {
 
 ![netty内存池层级结构new](netty.assets/netty内存池层级结构new.png)
 
-**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
+**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程以线程缓存中绑定的Arena进行内存分配。
 
 每个Arena由以下几个ChunkList组成：
 
@@ -3982,13 +4050,13 @@ private final PoolChunkList<T> q100;// 存储内存利用率100%的chunk
 
 Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
 
-**Chunk**：Netty每次向操作系统申请的最小单位(4MB)，是run的集合
+**Chunk**：Netty每次向操作系统申请内存块的最小单位(4MB)，是run的集合
 
 **Run**：对应一块连续的内存，是page的集合，最少1page
 
 **Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page
 
-**SubPage**：负责Run内的内存分配，目的是为了减少内存的浪费。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
+**SubPage**：**特殊的run，将run划分为1个或多个等大小内存块elem，进一步减少内存的浪费**。如果需分配内存小于Page的大小(8KB)，比如只有100B，如果直接分配一个Page(8KB)太浪费了，此时先根据SizeClasses将100B对齐为112B，申请run为1个page大小8KB，将其包装为Subpage，Subpage中将其划分为(8*1024/112=73)个elemSize为112B的elem内存块。
 
 Subpage内存块的划分由内存对齐类SizeClasses定义好了：
 
@@ -3996,14 +4064,16 @@ Subpage内存块的划分由内存对齐类SizeClasses定义好了：
 
 ### PoolArena
 
-PooledByteBufAllocator创建 Arena 的默认数量通常是CPU核数*2，创建多个 Arena 来缓解资源竞争问题，从而提高内存分配效率。
+**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
+
+PooledByteBufAllocator创建 Arena 的默认数量通常是CPU核数*2（因为现在多核处理器都是超线程），创建多个 Arena 来缓解资源竞争问题，从而提高内存分配效率。
 
 线程在首次申请分配内存时，会通过 round-robin 的方式轮询 Arena 数组，选择一个固定的 Arena，**在线程的生命周期内只与该 Arena 打交道**，所以每个线程都保存了 Arena 信息，从而提高访问效率。
 
 ```java
 /**
- * 为了提高内存分配效率并减少内部碎片，Jemalloc 算法将 Arena 切分为小块 Chunk，
- * 根据每块的内存使用率又将小块组合为以下几种状态：QINIT、Q00、Q25、Q50、Q75、Q100 。
+ * Jemalloc 算法中 Arena 是 Chunk的集合
+ * 根据每块Chunk的内存使用率有这几种状态集合：QINIT、Q00、Q25、Q50、Q75、Q100。
  * Chunk 块可以在这几种状态间随着内存使用率的变化进行转移，从而提高分配效率。
  * PoolArena有2个子类：
  * HeapArena 对堆内存的分配管理
@@ -4014,9 +4084,9 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
     final PooledByteBufAllocator parent;// 所属 PooledByteBufAllocator 对象
 
     final int numSmallSubpagePools;// Small类型内存块有默认39种
-    final int directMemoryCacheAlignment;
-    // 保存有Small类型内存块的subpage链表，数组中每个位置都是相同大小内存块的链表，不同位置代表不同大小
-    // 保存的subpage来自于所有Chunk，subpage有39种内存块大小
+
+    // 保存有Small类型内存块的subpage链表数组，数组中每个位置都是相同大小内存块的链表，不同位置代表不同大小
+    // 保存的subpage来自于所有Chunk，从SizeClasses得知subpage有39种内存块大小
     private final PoolSubpage<T>[] smallSubpagePools;
 
     private final PoolChunkList<T> q050;// 存储内存利用率50-100%的chunk
@@ -4025,20 +4095,18 @@ abstract class PoolArena<T> extends SizeClasses implements PoolArenaMetric {
     private final PoolChunkList<T> qInit;// 存储内存利用率0-25%的chunk
     private final PoolChunkList<T> q075;// 存储内存利用率75-100%的chunk
     private final PoolChunkList<T> q100;// 存储内存利用率100%的chunk
-
-    private final ReentrantLock lock = new ReentrantLock();
 }
 ```
 
-包含了一个 **`smallSubpagePools（ PoolSubpage<T>[]）`** 和**6个PoolChunkList**，Arena申请内存时，**先从`smallSubpagePools`分配，如果没有再从PoolChunkList中某个Chunk分配调用`Chunk#allocate()` 。**
+包含了一个 **`smallSubpagePools（ PoolSubpage<T>[]）`** 和**6个PoolChunkList**，Arena申请small类型内存块时，**先从`smallSubpagePools`分配，如果没有再从PoolChunkList中某个Chunk分配调用`Chunk#allocate()` 。**
 
 - smallSubpagePools存放small Subpage类型的内存块
 
 ![smallSubpagePools](netty.assets/smallSubpagePools.png)
 
-- 6个PoolChunkList 存放使用率不同的Chunk,构成一个双向循环链表
+- 6个PoolChunkList 存放使用率不同的Chunk，构成一个双向循环链表
 
-![PoolChunkList](netty.assets/PoolChunkList.png)
+![PoolArena](netty.assets/PoolArena.png)
 
 **qIint和q000为何设计为2个而不是合二为一：**
 
@@ -4068,18 +4136,13 @@ private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int req
 
 从内存对齐类SizeClasses可知，Small类型内存块在16B...28KB之间。
 
-PoolArena分配Small内存块时先从smallSubpagePools缓存中分配，没有再去各个ChunkList分配。
+PoolArena分配Small内存块时先从smallSubpagePools缓存中分配，没有再去各个ChunkList申请subpage后再分配。
 
-因为16B...28KB之间很多内存规格并不是pageSize的整数倍，这就会对Run进行subpage划分，并放入smallSubpagePools数组中缓存。
+因为16B...28KB之间很多内存规格并不是pageSize的整数倍，这就会对Run按照各个内存规格进行subpage划分，并放入smallSubpagePools数组中缓存，比如28KB，会申请56KB的run，subpage划分为2个elem。
 
 ```java
 // PoolArena.class
 private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity, final int sizeIdx) {
-    // 从PoolThreadCache分配
-    if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) 
-        // was able to allocate out of the cache so move on
-        return;
-
     // 1.直接从smallSubpagePools缓存数组中分配
     // 查找该sizeIdx对应的SubPage的头结点，就是这个smallSubpagePools[sizeIdx]
     final PoolSubpage<T> head = findSubpagePoolHead(sizeIdx);
@@ -4094,17 +4157,16 @@ private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, fi
         s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
     }
 
-    // 2.smallSubpagePools中没有则调用allocateNormal方法分配
+    // 2.subpage缓冲池中没有则调用allocateNormal方法分配
     // 则需要从各个ChunkList去分配，甚至新建Chunk
     if (needsNormalAllocation) {
         // 省略锁操作
         allocateNormal(buf, reqCapacity, sizeIdx, cache);
     }
-    incSmallAllocation();
 }
 ```
 
-分配Small类型内存块呢，优先从`smallSubpagePools`数组缓存中找到满足该内存块大小的Subpage，直接分配即可。
+如果`smallSubpagePools`数组缓存中有对应内存规格的Subpage，则调用`PoolSubpage#allocate()`直接分配获取句柄handle。
 
 因为Subpage是将Run按照第1次请求划分为等大小内存块，所以调用`PoolSubpage#allocate()`将直接分配其中某块内存。
 
@@ -4158,6 +4220,8 @@ private void allocateHuge(PooledByteBuf<T> buf, int reqCapacity) {
 
 ### PoolChunk
 
+![PoolChunk](netty.assets/PoolChunk.png)
+
 Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
 
 **Chunk**：Netty每次向操作系统申请的最小单位(4MB)，是run的集合
@@ -4166,33 +4230,18 @@ Jemalloc算法将每个Arena切分为多个小块Chunk，netty中默认4MB。
 
 **Page**：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page。
 
-**SubPage**：**特殊的Run，不过将Run内存均等划分为几份，目的是为了减少内存的浪费**。如果需要分配的内存小于Page的大小(8K)比如只有100B,如果直接分配一个Page(8K)那就直接浪费了。Subpage的最小是16B的倍数。Subpage没有固定的大小，需要根据用户分配的缓冲区决定。
+**SubPage**：**特殊的run，将run划分为1个或多个等大小Small内存规格内存块elem，进一步减少内存的浪费**。如果需分配内存小于Page的大小(8KB)，比如只有100B，如果直接分配一个Page(8KB)太浪费了，此时先根据SizeClasses将100B对齐为112B，申请run为1个page大小8KB，将其包装为Subpage，Subpage中将其划分为(8*1024/112=73)个elemSize为112B的elem内存块。
 
 Subpage内存块的划分由内存对齐类SizeClasses定义好了：
 
 ![Netty内存块规格划分](netty.assets/Netty内存块规格划分.png)
 
-Chunk的内存布局如下：
-
-![Chunk内存结构](netty.assets/Chunk内存结构.png)
-
 ```java
-/**
- * handle: 64bit的run的句柄各个位布局如下:
- * oooooooo ooooooos ssssssss ssssssue bbbbbbbb bbbbbbbb bbbbbbbb bbbbbbbb
- * o: runOffset (此run的首页page在此Chunk的位移，0~511), 15bit
- * s: size (此run包含page数量，1~512), 15bit
- * u: isUsed?, 1bit
- * e: isSubpage?, 1bit
- * b: subpage的位图索引bitmapIdx, 如果不是subpage则为0, 32bit
- */
 final class PoolChunk<T> implements PoolChunkMetric {
     final PoolArena<T> arena;// 所属Arena
-    final Object base;
-    // 当前申请的内存块，比如对于堆内存，T就是一个byte数组，对于直接内存，T就是ByteBuffer，
-    // 但无论是哪种形式，其内存大小都默认是4MB
+    
+    // 当前Chunk申请的内存块，比如对于堆内存，T就是一个byte数组，对于直接内存，T就是ByteBuffer，
     final T memory;
-    final boolean unpooled;// 是否池化
 
     /**
      * a map 管理所有的run
@@ -4208,16 +4257,11 @@ final class PoolChunk<T> implements PoolChunkMetric {
      */
     private final LongPriorityQueue[] runsAvail;
 
-    // 此Chunk的所有subPage
+    // 存储此Chunk分配的所有Subpage的引用
     // 长度为chunkSize >> pageShifts，默认512
     private final PoolSubpage<T>[] subpages;
 
     private final int pageSize;// Page大小默认8KB
-    /**
-     * 从 1 开始左移到 {@link #pageSize} 的位数。默认 13 ，1 << 13 = 8192 。
-     * 具体用途，见 {@link #allocateRun(int)} 方法，计算指定容量所在满二叉树的层级。
-     */
-    private final int pageShifts;
     private final int chunkSize;// Chunk 内存块占用大小。默认为 4M
 
     int freeBytes;// 此chunk剩余的空间
@@ -4232,13 +4276,25 @@ final class PoolChunk<T> implements PoolChunkMetric {
         int pages = chunkSize >> pageShifts;
         long initHandle = (long) pages << SIZE_SHIFT;
         insertAvailRun(0, pages, initHandle);
-
-        cachedNioBuffers = new ArrayDeque<ByteBuffer>(8);
     }
 }
 ```
 
-**注意：初始整个Chunk就是一个Run，随着后续的申请对Run进行切分为小Run，又随着Run的回收合并等，`runAvails`中可能会存有很多不同内存规格的Run。**
+PoolChunk的`memory`属性就是申请的内存块，堆内存为`byte[]`，直接内存为`ByteBuffer`，默认4MB，Netty按照每页8KB将其划分为512页，分配内存块必须以page进行分配，每个内存块叫做run，含多页page。
+
+PoolChunk内存结构如下：
+
+![Chunk内存结构](netty.assets/Chunk内存结构.png)
+
+#### handle访问句柄
+
+在Chunk中内存块以long变量`handle`句柄便捷表示：
+
+![runHandle](netty.assets/runHandle.png)
+
+> 初始Run的handle如下：runOffset=0，size=512，isUsed=0，isSubpage=0，bitmapIdx=0
+>
+> **注意：初始整个Chunk就是一个Run，随着后续的申请对Run进行切分为小Run，又随着Run的回收合并等，`runAvails`中可能会存有很多不同内存规格的Run。**
 
 从Chunk中申请内存块的方法如下：
 
@@ -4267,7 +4323,7 @@ boolean allocate(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadC
 }
 ```
 
-#### runAvails
+#### runAvails可分配run
 
 ```java
     /**
@@ -4446,7 +4502,7 @@ private long allocateSubpage(int sizeIdx) {
     PoolSubpage<T> subpage = new PoolSubpage<T>(head, this, pageShifts, runOffset,
                                                 runSize(pageShifts, runHandle), elemSize);
 
-    subpages[runOffset] = subpage;
+    subpages[runOffset] = subpage;// 将subpage引用存入数组，后续可以直接根据handle取出
     // 5.将subpage的某一块elemSize分配出去
     return subpage.allocate();// 这里不用传入大小，是因为该subpage已经根据第1次请求的大小划分为均等份了
 }
@@ -4460,64 +4516,212 @@ private long allocateSubpage(int sizeIdx) {
 
 关于PoolSubpage的分析后续会专门解析。
 
-#### 释放free
+#### 释放run
 
+当申请的内存块不再使用时调用`PoolChunk#free()`释放指定handle的run或subpage的elem：
 
+```java
+// PoolChunk.java
+// 是否指定handle的run，如果此run是subpage则释放该handle指定的elem
+void free(long handle, int normCapacity, ByteBuffer nioBuffer) {
+    int runSize = runSize(pageShifts, handle);
+    // 1.如果此run划分了subpage，则先释放handle指定的subpage的elem
+    // 从run handle判断是否划分为subpage
+    if (isSubpage(handle)) {
+        int sizeIdx = arena.size2SizeIdx(normCapacity);
+        // 1.1 从Arena的subpage池数组找到该大小对应的head节点
+        // smallSubpagePools[sizeIdx]
+        PoolSubpage<T> head = arena.findSubpagePoolHead(sizeIdx);
 
+        // 1.2  根据runOffset从数组中取出待释放的subpage
+        int sIdx = runOffset(handle);// 从handle中得到runOffset
+        PoolSubpage<T> subpage = subpages[sIdx];
 
+        // 1.3 调用subpage.free()释放bitmapIdx指定的subpage的某elem
+        // 返回true表示subpage尚在使用，不释放该subpage的run，直接返回
+        // 返回false则表示该subpage内所有elem都未使用，则需要释放该subpage的run
+        if (subpage.free(head, bitmapIdx(handle)))
+            return;
+        // 1.4 走到这说明此subpage的run需要释放，则先置空subpages数组的指定槽位
+        subpages[sIdx] = null;
+    }
 
+    // 2.释放此run
+    // 2.1 合并前后相邻runs, 成功合并的run将从runsAvails和runsAvailMap移除
+    long finalRun = collapseRuns(handle);
 
+    // 2.2 设置Run句柄为未使用
+    finalRun &= ~(1L << IS_USED_SHIFT);
+    // 如果此run为Subpage，设置其句柄为非subpage
+    finalRun &= ~(1L << IS_SUBPAGE_SHIFT);
+    // 2.3 将合并后run插入到runsAvails中
+    insertAvailRun(runOffset(finalRun), runPages(finalRun), finalRun);
+    freeBytes += runSize;
+    // 省略部分代码
+}
+```
 
+1.3步调用`subpage.free(head, bitmapIdx)`释放该subpage的指定elem，此方法在PoolSubpage处进行详细解析。
 
-
-
+释放run的时候会先去合并前后相邻的run为一个可以分配的更大的run，从而减少内存碎片。
 
 ### PoolSubpage
 
+**SubPage**：**特殊的run，将run划分为1个或多个等大小Small内存规格内存块elem，进一步减少内存的浪费**。如果需分配内存小于Page的大小(8KB)，比如只有100B，如果直接分配一个Page(8KB)太浪费了，此时先根据SizeClasses将100B对齐为112B，申请run为1个page大小8KB，将其包装为Subpage，Subpage中将其划分为(8*1024/112=73)个elemSize为112B的elem内存块。
+
+在PoolChunk中申请Small类型内存块时，将调用`PoolChunk#allocateSubpage(sizeIdx)`将申请的run创建为PoolSubpage：并按照第1次请求大小将此run划分为多个elem内存块，如下图所示：
+
+![image-20221113154352338](netty.assets/Subpage.png)
+
 ```java
 final class PoolSubpage<T> implements PoolSubpageMetric {
-
     final PoolChunk<T> chunk;// 所属chunk
     final int elemSize;// 切分的等量小块内存大小，最小16B
     private final int pageShifts;// 默认13
-    private final int runOffset;// 所属run的首页page在Chunk的位移
+    private final int runOffset;// 此subpage所属run的首页page在Chunk的位移
     private final int runSize;// 所属run的大小
-    // 长度由runSize决定
-    private final long[] bitmap; // 每一块小内存状态，即记录每KB内存是否使用
+
+    /**
+     * 位图数组
+     * 每个bit位记录一个elem的使用情况
+     * 因为elemSize最小为16B，即每个bit可能最小表示16B使用情况，则bitmap初始化时如下：
+     * bitmap = new long[runSize >>> 6 + LOG2_QUANTUM]; // 即runSize / 1024
+     * 即初始化位图数组时按最大长度初始化，然后再以bitmapLength来计算真正使用的位图长度
+     * 我觉得有点多余了，完全可以根据具体使用长度初始化位图数组呀
+     */
+    private final long[] bitmap;
+    // 位图数组实际使用长度= maxNumElems/64 + (maxNumElems % 64 == 0 ? 0 : 1)
+    private int bitmapLength;
+    private int maxNumElems;// 此run划分的等大小内存块数量 = `runSize / elemSize`
+
+    private int nextAvail;// 下个可使用内存块指针
+    private int numAvail;// 此subpage剩余的可分配等大小内存块
 
     PoolSubpage<T> prev;
     PoolSubpage<T> next;
 
-    boolean doNotDestroy;
-    private int maxNumElems;// 此run划分的等大小内存块数量 = `pageSize(8KB) / elemSize`
-    private int bitmapLength;
-    private int nextAvail;// 下个可使用内存块指针
-    private int numAvail;// 此subpage剩余的可分配等大小内存块
-    private final ReentrantLock lock = new ReentrantLock();
-
     PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int pageShifts, int runOffset, int runSize, int elemSize) {
-        this.chunk = chunk;
-        this.pageShifts = pageShifts;
-        this.runOffset = runOffset;
-        this.runSize = runSize;
-        this.elemSize = elemSize;
-        bitmap = new long[runSize >>> 6 + LOG2_QUANTUM]; // runSize / 64 / QUANTUM
+        // 省略属性赋值
+        // 1.初始化位图数组
+        bitmap = new long[runSize >>> 6 + LOG2_QUANTUM]; // runSize / 64 / QUANTUM(默认4)
 
         doNotDestroy = true;
-        if (elemSize != 0) {// 将此run按照第1次请求的大小均等划分
+        // 2.将此run按照第1次请求的大小均等划分
+        if (elemSize != 0) {
+            // 计算elem内存块切分数量
             maxNumElems = numAvail = runSize / elemSize;
             nextAvail = 0;
+            // 计算位图数组实际使用长度
             bitmapLength = maxNumElems >>> 6;
-            if ((maxNumElems & 63) != 0) {
-                bitmapLength ++;
-            }
-
-            for (int i = 0; i < bitmapLength; i ++) {
+            if ((maxNumElems & 63) != 0)
+                bitmapLength++;
+            for (int i = 0; i < bitmapLength; i++) 
                 bitmap[i] = 0;
-            }
         }
+        // 3.添加到PoolArena是subpage池数组中，这里就是将此subpage插入给定的head节点之后
         addToPool(head);
     }
 }
 ```
+
+我觉得在构造函数的第1步初始化位图数组长度时以每个bit位表示最小elemSize 16B进行长度计算，之后再以实际elemSize计算实际使用长度bitmapLength，有点多于了，**可以直接以实际elemSize计算位图长度来初始化位图数组呀**。
+
+位图数组bitmap**以每个bit位置记录每个elem内存块的使用状态**，每个内存块elemSize为small类型内存块大小，即最小16B，最大28KB。
+
+**每个PoolSubpage创建后都会按照其elemSize放入PoolArena的`smallSubpagePools`属性指定槽位**，用于small类型内存块的申请分配：
+
+![smallSubpagePools](netty.assets/smallSubpagePools.png)
+
+#### allocate
+
+在PoolSubpage中申请内存块时，无须传入sizeIdx内存对齐索引，因为Subpage早已按照elemSize划分为等大小内存块，只需要调用allocate()方法申请某块内存即可：
+
+```java
+// PoolSubpage.java
+long allocate() {
+    // 省略检查
+    // 1.找到未使用的elem的索引bitmapIdx，就是第几个elem，从0开始
+    final int bitmapIdx = getNextAvail();
+
+    // 2.标记位图中该elem索引为1，表示该elem已使用
+    int q = bitmapIdx >>> 6;
+    int r = bitmapIdx & 63;
+    bitmap[q] |= 1L << r;
+
+    // 3.如果此subpage分配完了就从PoolArena的subPage池子中移除
+    if (--numAvail == 0)
+        removeFromPool();
+
+    // 4.返回此subpage中分配的elem内存块的访问句柄handle
+    // 该句柄和此subpage所属run在前32位是一样的，
+    // 后面32位为给定的bitmapIdx表示此subpage的哪个elem
+    return toHandle(bitmapIdx);
+}
+```
+
+#### free
+
+从subpage中释放某个elem内存块，需要传入该内存块的索引bitmapIdx：
+
+```java
+/**
+ * 释放指定bitmapIdx的elem
+ * @return true 如果subpage中有elem仍在使用
+ * false subpage中所有elem都未使用，可以释放subpage的run
+ */
+boolean free(PoolSubpage<T> head, int bitmapIdx) {
+    // 1.标记位图中该bitmapIdx索引处为0，表示该elem未使用
+    int q = bitmapIdx >>> 6;
+    int r = bitmapIdx & 63;
+    assert (bitmap[q] >>> r & 1) != 0;
+    bitmap[q] ^= 1L << r;
+
+    // 2.可使用elem数量numAvail+1
+    // 如果之前为0，从allocate()方法知道该subpage已经从PoolArena的subpage池子移除，
+    // 此时释放了一个elem，再将其放回池子，供后续内存申请分配
+    if (numAvail++ == 0) 
+        addToPool(head);
+
+    // 3.如果subpage中有elem正在使用则返回true，表示不释放run
+    if (numAvail != maxNumElems) {
+        return true;
+    } else {
+        // 4.此时subpage中所有elem都未使用
+        // 4.1 如果此subpage是该内存规格在PoolArena的subpage池子中唯一的subpage则返回true
+        if (prev == next) 
+            return true;
+
+        // 4.2 若有其它相同内存规格的subpage从arena的subpage池子移除，并返回false
+        doNotDestroy = false;
+        removeFromPool();
+        return false;
+    }
+}
+```
+
+## 总结
+
+Netty内存管理基于jemalloc4实现，结合以下关键类实现：
+
+- `PooledByteBufAllocator`：内存分配器，会创建CPU核心数*2个Arena，线程在首次申请分配内存时，会通过 round-robin 的方式轮询 Arena 数组，选择一个固定的 Arena，**在线程的生命周期内只与该 Arena 打交道**，避免锁竞争。
+- `SizeClasses`：内存规格对齐类，在Netty的jemalloc4实现中不再以伙伴分配算法管理内存，而是将内存划分为更细粒度的内存规格，**其产生的`内零头`要远小于伙伴分配算法**。在`SizeClasses`中各个内存规格对应一个`sizeIdx`，如16B对应0，28KB对应38，4MB对应67。
+
+- `PoolArena`：**Arena**表示一个内存区域，netty内存池由多个Arena组成，分配时每个线程按照轮询策略选择某个Arena进行内存分配。
+  - `PoolSubpage<T>[] smallSubpagePools`属性缓存各个不同内存规格的subpage，便于**快速分配Small类型内存；**
+  - `PoolChunkList<T> qxxx`这6个属性分别存放存储内存利用率不同的chunk，**分配顺序为：q050-->q025-->q000-->qInit-->q075**；
+
+- `PoolChunk`：Jemalloc算法将每个Arena切分为多个小块Chunk（默认4MB），**Chunk是Netty每次向操作系统申请内存块的最小单位(4MB)**，是run的集合。
+  - `page`：Chunk的最小分配单元，默认8KB，每个Chunk默认512个page。
+  - `run`：对应一块连续的内存，是page的集合，最少1page。最开始时整个Chunk就是一个Run。每次从Chunk申请内存时，将内存规格对齐后以一个run来管理申请的page页。
+  - `Subpage`：**特殊的run，将run划分为1个或多个等大小Small内存规格内存块elem，进一步减少内存的浪费**。
+  - 如果需分配内存小于Page的大小(8KB)，比如只有100B，如果直接分配一个Page(8KB)太浪费了，此时先根据SizeClasses将100B对齐为112B，申请run为1个page，将其包装为Subpage，Subpage中将其划分为(8*1024/112=73)个elemSize为112B的elem内存块。
+  - 如申请28KB内存，内存规格对齐后runSize为56KB，7个page，则将连续的7个page作为run分配出去并划分为2个elem，包装为subpage。
+
+### 内存申请流程图
+
+从`PooledByteBufAllocator#directBuffer(capacity)`申请内存块流程如下：[原图](https://www.processon.com/view/link/63706c2e6376897f2b680e96)
+
+![内存申请流程图](netty.assets/内存申请流程图.png)
+
+
 
