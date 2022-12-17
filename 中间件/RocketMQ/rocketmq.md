@@ -3868,6 +3868,25 @@ class DeliverDelayedMessageTimerTask implements Runnable {
 
 ## 事务消息
 
+**可靠消息最终一致性分布式事务**实现原理为Producer端以**消息发送的一致性**来保证本地事务执行成功，消息一定发送成功；各个Consumer端以**消息接受的一致性**来保证消息一定消费成功，进而保证各个Consumer的本地事务执行成功，这样就可以实现分布式事务。
+
+RocketMQ的事务消息主要是采用2PC逻辑**让Producer端的本地事务和消息发送逻辑形成完整的原子操作**，即Producer端的本地事务和消息发送逻辑要么全部成功，要么全部不执行。
+
+RocketMQ事务消息可以**保证消息发送的一致性**，也就是本地事务执行成功，则一定会将其产生的消息发送成功（实际上是发送消息到MQ之后才会让本地事务执行，本地事务执行成功才让消息在MQ对消费者可见）。
+
+消息发送不一致的情况：
+
+```java
+@Transactional
+public void save(){
+    /* 1.本地数据库操作 */
+    
+    /* 2.同步发送消息到MQ */
+}
+```
+
+这种方式看着似乎能以Spring的事务管理实现消息发送的一致性，但是如果出现数据库操作成功、消息发到了broker，但因网络等问题消息ACK未响应给Producer，抛出异常后事务回滚，数据库回滚，但是消息却出现在MQ中，这就会导致以MQ实现的最终一致性分布式事务出现问题。
+
 ### 使用
 
 事务消息有3种状态：
@@ -3921,6 +3940,7 @@ public static void main(String[] args) throws MQClientException, InterruptedExce
 }
 
 static class TransactionListenerImpl implements TransactionListener {
+    // 保存本地事务执行结果，以便MQ回查
     private final ConcurrentHashMap<String, Integer> localTrans = new ConcurrentHashMap<>();
 
     /**
@@ -3932,9 +3952,7 @@ static class TransactionListenerImpl implements TransactionListener {
      */
     public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
         try {
-            /*
-                 省略本地事务处理
-                 */
+            /* 省略本地事务处理 */
 
             // 本地事务处理成功，则向broker发送commit
             return LocalTransactionState.COMMIT_MESSAGE;
