@@ -1782,6 +1782,354 @@ void testStream() throws InterruptedException {
 }
 ```
 
+## pipeline流水线
+
+可以通过批处理优化往返时间。
+Redis 流水线是一种通过**一次发出多个命令**而无需等待对每个命令的响应来提高性能的技术。大多数 Redis 客户端都支持流水线。
+
+### 优化客户端RTT
+
+Redis 是一个使用客户端-服务器模型和所谓的请求/响应协议的 TCP 服务器，通常一个请求有以下步骤：
+- client向server发送命令，通常以同步阻塞方式从套接字读取server响应
+- server处理命令并将响应发给client
+
+这段时间为**往返时间RTT**，若RTT为250ms，client连续多个请求时在1s内只能完成4条请求命令，但是server可能每s能处理100k个请求。
+
+流水线是一种广泛应用数十年的技术，client可以在1次请求发送多条命令，在发送过程中不阻塞等待响应回复，发送完成再读取响应。
+pipeline可以将多条命令的多个RTT代价优化为1次RTT成本。
+
+> **注意**：client使用pipeline发送命令时，server将被迫使用内存对回复进行排队。因此**pipeline每批应包含合理数量**，例如每 10k 个命令进行1次发送并读取回复。速度将几乎相同，但使用的额外内存最多为将这些 10k 命令的回复排队所需的内存量。
+
+### 优化服务端性能
+
+流水线还提高了 Redis 服务器中每秒可以执行的操作数。单命令请求对redis服务器CPU消耗极低，但从执行套接字 I/O 的角度来看，却非常昂贵。这涉及调用`read()和write()系统调用`，这意味着**从用户空间到内核空间的上下文切换**的巨大损失。
+
+当使用流水线时，许多命令请求通常用一个read() 系统调用读取，多个回复用一个系统调用传递write()。
+
+### 20w key操作优化案例
+
+测试采用redis7.0 单机服务器，go-redis库，每个key 30B，value 15B，每个测试案例设置20w key。
+
+#### 案例分析
+
+以下为20w次请求命令案例：
+
+```go
+// 1.20w次单条命令io测试
+func demo1(cli *redis.Client, ctx context.Context) {
+	// 注意：这里测试的是1000次，因为20w次耗时太久了
+	start20 := time.Now()
+	for i := 0; i < SET_TIMES/200; i++ {
+		if err := cli.Set(ctx, fmt.Sprintf("demo1_%s%.15d", KEY_PREFIX, i), fmt.Sprintf("%.15d", i), 0).Err(); err != nil {
+			panic(err)
+		}
+	}
+	end20 := time.Now()
+	fmt.Printf("20w次io预计用时：%ds \n", 200*(end20.Unix()-start20.Unix()))
+}
+```
+
+测试结果：
+
+```
+dxm@fengzhike_dxm redisDemo % go run main.go
+20w次io预计用时：8800s 
+当前redis数据库有1000个key
+```
+
+耗时问题定位：
+
+- **io次数多**：循环执行20w次redis的io操作，即20w次RTT。
+- **单goroutine同步io等待**。
+
+优化思路：
+- **批量key操作命令，如mset，目的：减少命令数量以减少io次数**
+- **pipeline流水线，目的：减少RTT，减少同步io等待**
+- **多线程**：瓶颈在io不在CPU，减少单个线程的io次数
+
+#### 优化方案测试
+
+从上诉优化思路出发，列出以下几个测试案例：
+- demo1: 20w次单条命令
+- demo1_multi: 多线程
+- demo2: 单流水线
+- demo2_multi: 多线程+流水线
+- demo3: 单流水线+批量key命令
+- demo3_multi: 多线程+流水线+批量key命令
+
+```go
+var (
+	SET_TIMES            = 20 * 10000  // 总共的key数量
+	PIPELINE_BATCH_COUNT = 1000        // pipeline每批次发送前缓存的命令数量
+	MULTI_KEYS           = 100         // 批量key操作命令如mset每次操作的key数量
+	KEY_PREFIX           = "123456789" // 9B
+	GOROUTINE_COUNT      = 10          // 并发数
+)
+
+func main() {
+	redisCli := redis.NewClient(&redis.Options{
+		Addr:     "服务器ip:6379",
+		Password: "输入密码",
+		DB:       1, // 用1号数据库测试
+		//ReadTimeout: time.Minute,
+		//WriteTimeout: time.Minute,
+	})
+	var ctx = context.Background()
+
+	// 先清空1号数据库
+	if err := redisCli.FlushDB(ctx).Err(); err != nil {
+		panic(err)
+	}
+
+	// 手动传参
+	if len(os.Args) == 2 {
+		var err error
+		if PIPELINE_BATCH_COUNT, err = strconv.Atoi(os.Args[1]); err != nil {
+			panic(err)
+		}
+		fmt.Printf("PIPELINE_BATCH_COUNT=%d \n", PIPELINE_BATCH_COUNT)
+	}
+	//demo1(redisCli, ctx)
+	//demo1_multi(redisCli, ctx)
+	//demo2(redisCli, ctx)
+	//demo2_multi(redisCli, ctx)
+	//demo3(redisCli, ctx)
+	demo3_multi(redisCli, ctx)
+
+	// 查看有此时多少个key
+	if keyCount, err := redisCli.DBSize(ctx).Result(); err != nil {
+		panic(err)
+	} else {
+		fmt.Printf("当前redis数据库有%d个key\n", keyCount)
+	}
+}
+
+// 1.20w次单条命令io测试
+func demo1(cli *redis.Client, ctx context.Context) {
+	// 注意：这里测试的是1000次，因为20w次耗时太久了
+	start20 := time.Now()
+	for i := 0; i < SET_TIMES/200; i++ {
+		if err := cli.Set(ctx, fmt.Sprintf("demo1_%s%.15d", KEY_PREFIX, i), fmt.Sprintf("%.15d", i), 0).Err(); err != nil {
+			panic(err)
+		}
+	}
+	end20 := time.Now()
+	fmt.Printf("20w次io预计用时：%ds \n", 200*(end20.Unix()-start20.Unix()))
+}
+
+// 1.多线程io
+func demo1_multi(cli *redis.Client, ctx context.Context) {
+	start := time.Now()
+	wg := &sync.WaitGroup{}
+	for k := 0; k < GOROUTINE_COUNT; k++ {
+		wg.Add(1)
+		go func(k int) {
+			defer func() {
+				if err := recover(); err != nil {
+					fmt.Println(err)
+				}
+				wg.Done()
+			}()
+			for i := 0; i < SET_TIMES/200/GOROUTINE_COUNT; i++ {
+				if err := cli.Set(ctx, fmt.Sprintf("demo1_multi_%s%.2d%.7d", KEY_PREFIX, k, i), fmt.Sprintf("%.15d", i), 0).Err(); err != nil {
+					panic(err)
+				}
+			}
+		}(k)
+	}
+	wg.Wait()
+	end := time.Now()
+	fmt.Printf("20w次io %d协程预计用时：%ds \n", GOROUTINE_COUNT, 200*(end.UnixMilli()-start.UnixMilli())/1000)
+}
+
+// 2.单流水线
+func demo2(cli *redis.Client, ctx context.Context) {
+	start := time.Now()
+	pipeline := cli.Pipeline()
+	for i := 1; i <= SET_TIMES; i++ {
+		pipeline.Set(ctx,
+			fmt.Sprintf("demo2_%s%.15d", KEY_PREFIX, i),
+			fmt.Sprintf("demo2_%.15d", i),
+			time.Hour*24*3)
+		if i%PIPELINE_BATCH_COUNT == 0 {
+			if _, err := pipeline.Exec(ctx); err != nil {
+				panic(err)
+			}
+		}
+	}
+	if _, err := pipeline.Exec(ctx); err != nil {
+		panic(err)
+	}
+	end := time.Now()
+	fmt.Printf("单流水线用时：%dms \n", end.UnixMilli()-start.UnixMilli())
+}
+
+// 2.多线程+流水线测试
+func demo2_multi(cli *redis.Client, ctx context.Context) {
+	start := time.Now()
+	wg := &sync.WaitGroup{}
+	for k := 0; k < GOROUTINE_COUNT; k++ {
+		wg.Add(1)
+		go func(k int) {
+			defer func() {
+				if err := recover(); err != nil {
+					fmt.Println(err)
+				}
+				wg.Done()
+			}()
+
+			pipeline := cli.Pipeline()
+			for i := 1; i <= SET_TIMES/GOROUTINE_COUNT; i++ {
+				pipeline.Set(ctx,
+					fmt.Sprintf("demo2_multi_%s%.2d%.7d", KEY_PREFIX, k, i),
+					fmt.Sprintf("demo2_multi_%.2d%.7d", k, i),
+					time.Hour*24*3)
+				if i%PIPELINE_BATCH_COUNT == 0 {
+					if _, err := pipeline.Exec(ctx); err != nil {
+						panic(err)
+					}
+				}
+			}
+			if _, err := pipeline.Exec(ctx); err != nil {
+				panic(err)
+			}
+		}(k)
+	}
+	wg.Wait()
+	end := time.Now()
+	fmt.Printf("%d协程+流水线用时：%dms \n", GOROUTINE_COUNT, end.UnixMilli()-start.UnixMilli())
+}
+
+// 3.单流水线+批量key命令
+func demo3(cli *redis.Client, ctx context.Context) {
+	start := time.Now()
+	pipeline := cli.Pipeline()
+	i := 1
+	for ; i <= SET_TIMES/MULTI_KEYS; i++ {
+		var arr = make([]string, 0, MULTI_KEYS*2)
+		// 单条mset命令设置多个key
+		for j := 0; j < MULTI_KEYS; j++ {
+			arr = append(arr, fmt.Sprintf("demo3_%s%.10d%.5d", KEY_PREFIX, i, j)) // key
+			arr = append(arr, fmt.Sprintf("demo3_%.3d%.12d", i, j))               // value
+		}
+		if err := pipeline.MSet(ctx, arr).Err(); err != nil {
+			panic(err)
+		}
+		// 提交pipeline缓存队列并等待响应
+		if i%PIPELINE_BATCH_COUNT == 0 {
+			if _, err := pipeline.Exec(ctx); err != nil {
+				panic(err)
+			}
+		}
+	}
+	if i%PIPELINE_BATCH_COUNT != 0 {
+		if _, err := pipeline.Exec(ctx); err != nil {
+			panic(err)
+		}
+	}
+	end := time.Now()
+	fmt.Printf("单流水线+批量key命令用时：%dms \n", end.UnixMilli()-start.UnixMilli())
+}
+
+// 3.多线程+流水线+批量key命令
+func demo3_multi(cli *redis.Client, ctx context.Context) {
+	start := time.Now()
+	wg := &sync.WaitGroup{}
+	for k := 0; k < GOROUTINE_COUNT; k++ {
+		wg.Add(1)
+		go func(k int) {
+			defer func() {
+				if err := recover(); err != nil {
+					fmt.Println(err)
+				}
+				wg.Done()
+			}()
+
+			pipeline := cli.Pipeline() // 每个线程用不同pipeline
+			i := 1
+			for ; i <= SET_TIMES/MULTI_KEYS/GOROUTINE_COUNT; i++ {
+				var arr = make([]string, 0, MULTI_KEYS*2)
+				for j := 0; j < MULTI_KEYS; j++ {
+					arr = append(arr, fmt.Sprintf("demo3_multi_%s%.2d%.4d%.3d", KEY_PREFIX, k, i, j)) // key
+					arr = append(arr, fmt.Sprintf("demo3_%.3d%.12d", i, j))                           // value
+				}
+				if err := pipeline.MSet(ctx, arr).Err(); err != nil {
+					panic(err)
+				}
+				// pipeline提交并等待响应
+				if i%PIPELINE_BATCH_COUNT == 0 {
+					if _, err := pipeline.Exec(ctx); err != nil {
+						panic(err)
+					}
+				}
+			}
+			if i%PIPELINE_BATCH_COUNT != 0 {
+				if _, err := pipeline.Exec(ctx); err != nil {
+					panic(err)
+				}
+			}
+		}(k)
+	}
+	wg.Wait()
+	end := time.Now()
+	fmt.Printf("%d协程+流水线+批量key命令用时：%dms \n", GOROUTINE_COUNT, end.UnixMilli()-start.UnixMilli())
+}
+
+```
+
+在`PIPELINE_BATCH_COUNT=1000`时测试结果如下：
+
+|测试案例|      耗时|
+|--------|--------|
+|20w次io|~7400s|
+|20w次io+10协程|~807s|
+|单流水线|9.434s|
+|10协程+流水线|6.418s|
+|单流水线+批量key命令|4.684s|
+|10协程+流水线+批量key命令|8.587s|
+
+从上诉测试结果可以得知：
+- 多线程在io等待上有优势，流水线可以极大提高效率，批量key命令也能提高效率
+- 开启流水线后，多线程对于io等待影响不大
+- 在流水线和批量key命令结合时，多线程反而会增加耗时，可能瓶颈在发送数据上
+
+#### 流水线囤积命令数量测试
+
+`pipeline#Exec()`会将队列中缓存的命令发送并等待所有返回结果，而这个等待是有可能超时的。
+以`PIPELINE_BATCH_COUNT`参数调控作为pipeline每次提交前缓存的命令数量。
+
+```
+> go run main.go 100000
+PIPELINE_BATCH_COUNT=100000
+panic: redis: Conn is in a bad state: write tcp 172.30.14.70:50749->124.223.192.8:6379: i/o timeout
+```
+
+- 参数设置的过大时会出现写超时（默认的写超时为3s）
+- 参数设置得过小，则流水线退化为单命令同步io
+
+
+接下来对`PIPELINE_BATCH_COUNT`进行测试从而选出合适的参数值：
+|PIPELINE_BATCH_COUNT|100|1000|10000|100000|
+|-|-|-|-|-|
+|单流水线|95.976s|9.434s|7.390s|i/o timeout|
+|10协程+流水线|8.457s|6.418s|7.482s|i/o timeout|
+|单流水线+批量key命令|4.236s|4.684s|i/o timeout|i/o timeout|
+|10协程+流水线+批量key命令|4.993s|8.587s|5.491s|7.455s|
+
+从上诉测试结果得知：
+
+1. PIPELINE_BATCH_COUNT较小时，多线程对于pipeline的io等待有明显优势
+2. PIPELINE_BATCH_COUNT达到一定值时，多线程影响不大甚至反而会增加耗时，此时瓶颈应该在发送数据上
+3. PIPELINE_BATCH_COUNT过大时，写超时(默认3s)
+
+> 注意：批量key命令中`MULIT_KEYS`参数（批量key操作命令如mset每次操作的key数量）也是需要调控的，不过这里主要分析pipeline则默认其100.
+
+#### 最佳方案
+
+从上诉测试可知，最佳方案时：
+单线程+pipeline+批量key操作命令
+而流水线每批次包含的命令数量和批量key操作命令包含key数量需要实测。
+
 ## 缓存问题
 
 Redis缓存的使用，极大的提升了应用程序的性能和效率，特别是数据查询方面。但同时，它也带来了一些问题。其中，最要害的问题，就是数据的一致性问题，从严格意义上讲，这个问题无解。如果对数据的一致性要求很高，那么就不能使用缓存。
@@ -2747,7 +3095,7 @@ redis
 
 这个不会报不能连接，而且试过很多很多次，都没有出现上面那个指令超时的情况。可能是对指令超时的内部设计不一样吧。
 
-## go redis
+## go-redis
 
 Redis的go客户端：
 
@@ -2755,187 +3103,6 @@ Redis的go客户端：
 
 GitHub：https://github.com/go-redis/redis
 
-### pipeline测试
-
-下面是模拟20w个redis key的设置实验：
-
-- 单个连接，循环20w次调用redis set命令
-- 优化：多线程+pipeline+批操作
-
-```go
-var (
-    SET_TIMES       = 20 * 10000
-    BATCH_COUNT     = 1000
-    KEY_PREFIX      = "000000000000000" // 15B
-    GOROUTINE_COUNT = 10
-)
-
-func main() {
-    redisCli := redis.NewClient(&redis.Options{
-        Addr:     "124.223.192.8:6379",
-        Password: "!MyRedis123456",
-        DB:       1, // 用1号数据库测试
-    })
-    var ctx = context.Background()
-
-    // 先清空1号数据库
-    if err := redisCli.FlushDB(ctx).Err(); err != nil {
-        panic(err)
-    }
-
-    // 手动传参
-    if len(os.Args) == 2 {
-        var err error
-        if BATCH_COUNT, err = strconv.Atoi(os.Args[1]); err != nil {
-            panic(err)
-        }
-        fmt.Printf("BATCH_COUNT=%d \n", BATCH_COUNT)
-    }
-    //demo1(redisCli, ctx)
-    demo1_multi(redisCli, ctx)
-    demo2(redisCli, ctx)
-    demo2_multi(redisCli, ctx)
-
-    // 查看有此时多少个key
-    if keyCount, err := redisCli.DBSize(ctx).Result(); err != nil {
-        panic(err)
-    } else {
-        fmt.Printf("当前redis数据库有%d个key\n", keyCount)
-    }
-}
-
-// 1.20w次单条命令io测试
-func demo1(cli *redis.Client, ctx context.Context) {
-    conn := cli.Conn()
-    // 注意：这里测试的是1000次，因为20w次耗时太久了
-    start20 := time.Now()
-    for i := 0; i < SET_TIMES/200; i++ {
-        if err := conn.Set(ctx, fmt.Sprintf("demo1_%s%.15d", KEY_PREFIX, i), fmt.Sprintf("%.15d", i), 0).Err(); err != nil {
-            panic(err)
-        }
-    }
-    end20 := time.Now()
-    fmt.Printf("20w次io预计用时：%ds \n", 200*(end20.Unix()-start20.Unix()))
-}
-
-// 1.多线程io
-func demo1_multi(cli *redis.Client, ctx context.Context) {
-    start := time.Now()
-    wg := &sync.WaitGroup{}
-    for k := 0; k < GOROUTINE_COUNT; k++ {
-        wg.Add(1)
-        go func(k int) {
-            defer func() {
-                if err := recover(); err != nil {
-                    fmt.Println(err)
-                }
-                wg.Done()
-            }()
-            conn := cli.Conn()
-            for i := 0; i < SET_TIMES/200/GOROUTINE_COUNT; i++ {
-                if err := conn.Set(ctx, fmt.Sprintf("demo1_multi_%s%.2d%.7d", KEY_PREFIX, k, i), fmt.Sprintf("%.15d", i), 0).Err(); err != nil {
-                    panic(err)
-                }
-            }
-        }(k)
-    }
-    wg.Wait()
-    end := time.Now()
-    fmt.Printf("20w次io多线程预计用时：%ds \n", 200*(end.UnixMilli()-start.UnixMilli())/1000)
-}
-
-// 2.流水线+批操作
-func demo2(cli *redis.Client, ctx context.Context) {
-    conn := cli.Conn()
-    demo3Start := time.Now()
-    pipeline := conn.Pipeline()
-    for i := 0; i < SET_TIMES/BATCH_COUNT; i++ {
-        var arr = make([]string, 0, BATCH_COUNT*2)
-        for j := 0; j < BATCH_COUNT; j++ {
-            arr = append(arr, fmt.Sprintf("demo2_%s%.5d%.10d", KEY_PREFIX, i, j)) // key
-            arr = append(arr, fmt.Sprintf("demo2_%.3d%.12d", i, j))               // value
-        }
-        if err := pipeline.MSet(ctx, arr).Err(); err != nil {
-            panic(err)
-        }
-    }
-    if _, err := pipeline.Exec(ctx); err != nil {
-        panic(err)
-    }
-    demo3End := time.Now()
-    fmt.Printf("流水线+批操作用时：%dms \n", demo3End.UnixMilli()-demo3Start.UnixMilli())
-}
-
-// 2.多线程+流水线+批操作测试
-func demo2_multi(cli *redis.Client, ctx context.Context) {
-    startBatch := time.Now()
-    wg := &sync.WaitGroup{}
-    for k := 0; k < GOROUTINE_COUNT; k++ {
-        wg.Add(1)
-        go func(k int) {
-            defer func() {
-                if err := recover(); err != nil {
-                    fmt.Println(err)
-                }
-                wg.Done()
-            }()
-
-            conn := cli.Conn() // 每个线程用不同的连接会话
-            pipeline := conn.Pipeline()
-            for i := 0; i < SET_TIMES/BATCH_COUNT/GOROUTINE_COUNT; i++ {
-                var arr = make([]string, 0, BATCH_COUNT*2)
-                for j := 0; j < BATCH_COUNT; j++ {
-                    arr = append(arr, fmt.Sprintf("demo2_multi_%s%.2d%.3d%.4d", KEY_PREFIX, k, i, j)) // key
-                    arr = append(arr, fmt.Sprintf("demo2_%.3d%.12d", i, j))                           // value
-                }
-                if err := pipeline.MSet(ctx, arr).Err(); err != nil {
-                    panic(err)
-                }
-            }
-            if _, err := pipeline.Exec(ctx); err != nil {
-                panic(err)
-            }
-        }(k)
-    }
-    wg.Wait()
-    endBatch := time.Now()
-    fmt.Printf("多线程+流水线+批操作用时：%dms \n", endBatch.UnixMilli()-startBatch.UnixMilli())
-}
-```
-
-结果如下：
-
-```
-PS D:\developSoftWare\GoLand_workspace\KafkaDemo\redisDemo> go run main.go 1000
-BATCH_COUNT=1000 
-20w次io预计用时：6200s
-20w次io多线程预计用时：743s 
-流水线+批操作用时：1922ms 
-多线程+流水线+批操作用时：3308ms 
-当前redis数据库有402000个key
-
-PS D:\developSoftWare\GoLand_workspace\KafkaDemo\redisDemo> go run main.go 100 
-BATCH_COUNT=100 
-20w次io预计用时：6200s
-20w次io多线程预计用时：847s 
-流水线+批操作用时：2097ms 
-多线程+流水线+批操作用时：3274ms 
-当前redis数据库有402000个key
-
-PS D:\developSoftWare\GoLand_workspace\KafkaDemo\redisDemo> go run main.go 10 
-BATCH_COUNT=10 
-20w次io预计用时：6200s
-20w次io多线程预计用时：783s 
-流水线+批操作用时：2071ms 
-多线程+流水线+批操作用时：3169ms
-当前redis数据库有402000个key
-```
-
-多线程在io等待上确实有很大优势，但是在开启了流水线后，多线程对于io等待似乎影响不大了。
-
-调整BATCH_COUNT增加内循环次数，耗时变化不大，说明主要耗时在io，且开启流水线后，io次数变多对于耗时影响不大。
-
-开启多线程后耗时反而增加了，猜测可能是新建连接导致。
 
 # redis管理
 
