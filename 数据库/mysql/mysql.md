@@ -22,6 +22,7 @@ MySQL 是最流行的开源、**关系型 SQL 数据库管理系统**，由 Orac
 4. 窗口函数
 5. 多值索引
 6. RIGHT JOIN 作为 LEFT JOIN 处理。
+7. 数据字典
 
 ## 常用命令
 
@@ -57,7 +58,7 @@ DESCRIBE [table_name];
 
 # MySQL应用程序
 
-- mysqld：SQL守护进程（即MySQL服务器）
+- [mysqld](https://dev.mysql.com/doc/refman/8.0/en/mysqld-server.html)：SQL守护进程（是MySQL服务器，一般以这个启动）
 - mysqld_safe：服务器启动脚本
 - mysql.server：服务器启动脚本
 - mysqlcheck：表维护程序
@@ -200,13 +201,108 @@ mysqlbinlog --start-position=27284 binlog.000002 binlog.000003 binlog.000004
 
 将备份的dump文件和binlog文件都先复制到服务器主机后再进行恢复操作会更方便。
 
-## dumpslow-汇总慢查询日志
+## dumpslow-慢查询日志
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/mysqldumpslow.html
 
-## 环境变量
+`mysqldumpslow`程序可解析 MySQL 慢查询日志文件并汇总其内容。
 
-文档：https://dev.mysql.com/doc/refman/8.0/en/environment-variables.html
+```sql
+mysqldumpslow [options] [log_file...]
+```
 
 
+
+# 服务器日志
+
+| 日志类型               | 日志信息                                                     |
+| :--------------------- | :----------------------------------------------------------- |
+| Error log              | mysqld程序启动、运行、停止时产生的问题                       |
+| General query log      | 已建立的客户端连接和从客户端收到的语句                       |
+| Binary log             | 更改数据的语句（也用于复制）                                 |
+| Relay log              | Data changes received from a replication source server       |
+| Slow query log         | 执行超过参数 [`long_query_time`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_long_query_time) 的SQL语句 |
+| DDL log (metadata log) | DDL语句执行的元数据操作                                      |
+
+处理错误日志默认启动，其它日志默认不启动。
+
+## 日志存储
+
+```sql
+-- log_output: 日志记录目的地
+-- 可选：FILE(记录到文件)、TABLE(记录到表)、NONE(不记录)
+mysql> SHOW VARIABLES LIKE 'log_output';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| log_output    | FILE  |
++---------------+-------+
+```
+
+默认以文件存储日志，用日志表存储有如下优点：
+
+- 格式标准(表结构)
+- 可通过SQL查询日志，比如查询某些特殊客户端`user_host`日志
+
+可用如下SQL查询日志表的结构：(建议直接用Navicat等GUI工具看表结构)
+
+```sql
+SHOW CREATE TABLE mysql.general_log;
+SHOW CREATE TABLE mysql.slow_log;
+
+-- 比如慢查询表DDL如下:
+CREATE TABLE `slow_log` (
+  `start_time` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  `user_host` mediumtext NOT NULL,
+  `query_time` time(6) NOT NULL,
+  `lock_time` time(6) NOT NULL,
+  `rows_sent` int NOT NULL,
+  `rows_examined` int NOT NULL,
+  `db` varchar(512) NOT NULL,
+  `last_insert_id` int NOT NULL,
+  `insert_id` int NOT NULL,
+  `server_id` int unsigned NOT NULL,
+  `sql_text` mediumblob NOT NULL,
+  `thread_id` bigint unsigned NOT NULL
+) ENGINE=CSV DEFAULT CHARSET=utf8mb3 COMMENT='Slow log';
+```
+
+> 注意：日志表不会写入binlog，因此不会复制到副本。
+
+
+
+## 一般查询日志
+
+
+
+```sql
+-- general_log: 是否开启一般查询日志
+mysql> SHOW VARIABLES LIKE '%general%';
++------------------+-------------------------------+
+| Variable_name    | Value                         |
++------------------+-------------------------------+
+| general_log      | OFF                           |
+| general_log_file | /var/lib/mysql/k8s-master.log |
++------------------+-------------------------------+
+```
+
+## 慢查询日志
+
+
+```sql
+-- slow_query_log: 是否开启慢查询日志
+-- slow_query_log_file: 慢查询日志文件名
+-- long_query_time: 慢查询阈值(second)
+mysql> SHOW VARIABLES LIKE '%slow_query%';
++---------------------+------------------------------------+
+| Variable_name       | Value                              |
++---------------------+------------------------------------+
+| slow_query_log      | OFF                                |
+| slow_query_log_file | /var/lib/mysql/k8s-master-slow.log |
+| long_query_time 	  | 10.000000 						   |
++---------------------+------------------------------------+
+
+```
+
+## 错误日志
 
