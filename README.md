@@ -2,7 +2,8 @@
 
 我的学习笔记：书山有路勤为径，学海无涯苦作舟
 
-
+gitee地址：https://gitee.com/uestc-fzk/notebook
+github地址：https://github.com/uestc-fzk/notebook
 
 ## 结构说明
 
