@@ -1954,3 +1954,74 @@ func ResponseXls(c *gin.Context, content io.ReadSeeker, fileTag string) {
 }
 ```
 
+
+
+# Go与Java
+
+在高性能分布式系统领域，Go有着更高开发效率，海量并行支持。
+
+- 类C语法、内置GC，接近C的性能和PHP的开发效率，**开发效率和运行效率的完美结合**。
+
+- 简单易学，新手即可写出高性能应用。
+
+- **内置强大标准库**，如网络库、encoding库(含json库)、html库
+- 部署方便：二进制文件在云原生时代部署方便
+- 简单并发：**同步方式写异步代码**
+
+- 提供软件生命周期工具：go tool、go fmt、go test
+- 自带依赖管理
+
+Go缺点：
+
+- err处理难受
+
+
+
+Java特点：
+
+- 一次编译，处处运行？但是机器需要安装JVM
+
+- 启动慢，JVM需要预热，JVM即时编译
+- 耗内存（现在内存似乎相对不贵）
+- 生态很完善
+- 依赖管理靠maven、gradle
+
+Spring：为Java提供了全面的编程和配置模型（就是我得按照它的风格来写代码，优点是规范统一，缺点是不够自由灵活，且需要对Spring源码比较了解）。Spring要求各个库如何接入Spring，各个程序员如何使用Spring，从而让程序员专注业务开发。
+
+- IOC，让程序员只管引入starter，直接使用，屏蔽了依赖库的引入细节
+- AOP减少重复代码
+- Spring的配置管理，屏蔽不同库的配置启动方式，对外提供统一配置文件
+
+- Spring的这种开发模式，让程序员只专注于业务开发，不关心各个依赖库如何引用和启动
+- 
+
+Spring核心技术：
+
+- IOC：又称DI，
+- 数据绑定、类型转换：用于web的参数注入
+- AOP：减少重复代码
+- 事务：屏蔽不同ORM库、数据库的事务细节。但是不够灵活，conn是很有用的，不该屏蔽，至少可以注入参数的，应该可以不用它提供的事务管理，用`dataSource.getConnection()`。
+- Web：mvc、webflux、websocket
+
+# release history
+
+仅记录大功能点更新。
+
+go 1.18
+
+- **泛型**
+
+go 1.17
+
+- 新增`runtime/cgo`包，允许将任何 Go 值转换为安全表示，可用于在 C 和 Go 之间安全地传递值。有关详细信息，请参阅 [运行时/cgo.Handle](https://go.dev/pkg/runtime/cgo#Handle)。
+
+go 1.16
+
+- **弃用`io/ioutil`包**
+
+go 1.14
+
+- Goroutines支持异步抢占
+
+
+
