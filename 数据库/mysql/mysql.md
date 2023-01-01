@@ -69,27 +69,10 @@ DESCRIBE [table_name];
 
 ## dump-数据库备份
 
-mysqldump命令将进行**逻辑备份**，生成的是一组SQL语句文件，执行这些SQL来重现数据库原始数据。
+mysqldump程序将进行**逻辑备份**，生成的是一组SQL语句文件，执行这些SQL来重现数据库原始数据。
 
-> 注意：[**mysqldump**](https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html)至少需要 [`SELECT`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_select)转储表、[`SHOW VIEW`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_show-view)转储视图、[`TRIGGER`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_trigger)转储触发器的权限
+更多细节看下面备份与恢复部分描述。
 
-mysqldump优点是便利性和灵活性，可以自行插入一些SQL语句进行微改动。
-
-**mysqldump不是用于备份大量数据的快速或可扩展的解决方案**，对于大量数据，即使备份用时短，但是重放SQL恢复数据耗时长，因为重放 SQL 语句涉及用于插入、索引创建等的磁盘 I/O。
-
-**对于大规模的备份和恢复， [物理](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_physical)备份更为合适**，将数据文件以原始格式复制，以便快速恢复。
-
-```sql
-mysqldump db_name # 备份某个数据库
-mysqldump db_name [tbl_name ...] # 备份某个数据库的某些表
-
-# 选项如下：
---database db_name... 	# 备份某些数据库
---all-databases 		# 备份所有数据库
---add-drop-database 	# 在每个 CREATE DATABASE 语句之前添加 DROP DATABASE 语句
---add-drop-table  		# 在每个 CREATE TABLE 语句之前添加 DROP TABLE 语句
---add-drop-trigger		# 在每个 CREATE TRIGGER 语句之前添加 DROP TRIGGER 语句
-```
 
 ## slap-负载仿真
 
@@ -228,6 +211,8 @@ mysqldumpslow [options] [log_file...]
 
 ## 日志存储
 
+mysql服务器日志的存储载体以`log_output`变量指定：(注redolog属于Innodb日志)
+
 ```sql
 -- log_output: 日志记录目的地
 -- 可选：FILE(记录到文件)、TABLE(记录到表)、NONE(不记录)
@@ -238,6 +223,8 @@ mysql> SHOW VARIABLES LIKE 'log_output';
 | log_output    | FILE  |
 +---------------+-------+
 ```
+
+可以同时将日志写入表和文件中：`log_output=FILE,TABLE`
 
 默认以文件存储日志，用日志表存储有如下优点：
 
@@ -269,11 +256,27 @@ CREATE TABLE `slow_log` (
 
 > 注意：日志表不会写入binlog，因此不会复制到副本。
 
+## 错误日志
 
+```sql
+mysql> show variables like 'log_error%';
++----------------------------+----------------------------------------+
+| Variable_name              | Value                                  |
++----------------------------+----------------------------------------+
+| log_error                  | /var/log/mysqld.log                    |
+| log_error_services         | log_filter_internal; log_sink_internal |
+| log_error_suppression_list |                                        |
+| log_error_verbosity        | 2                                      |
++----------------------------+----------------------------------------+
+```
+
+`log_error`参数指定错误日志文件名，可配置`stderr`表示标准控制台错误输出
+
+`log_error_services`参数指定加载哪些日志组件，比如可以配置json组件使日志输出格式为json，具体配置看文档。
 
 ## 一般查询日志
 
-
+**general_log仅记录SELECT和SHOW等不修改数据的语句**。
 
 ```sql
 -- general_log: 是否开启一般查询日志
@@ -286,23 +289,261 @@ mysql> SHOW VARIABLES LIKE '%general%';
 +------------------+-------------------------------+
 ```
 
-## 慢查询日志
+一般查询日志默认不开启；默认文件名为`${主机名}.log`。
 
+## 二进制日志
+
+**binlog记录数据库写操作**，如表DDL和表DML语句。可用`mysqlbinlog`程序显示binlog文件内容。
+
+用途：
+
+- 主从复制
+- 数据恢复：dump和binlog结合恢复数据
+
+事务是整体写入文件的，从不在文件之间拆分。
 
 ```sql
--- slow_query_log: 是否开启慢查询日志
--- slow_query_log_file: 慢查询日志文件名
--- long_query_time: 慢查询阈值(second)
-mysql> SHOW VARIABLES LIKE '%slow_query%';
-+---------------------+------------------------------------+
-| Variable_name       | Value                              |
-+---------------------+------------------------------------+
-| slow_query_log      | OFF                                |
-| slow_query_log_file | /var/lib/mysql/k8s-master-slow.log |
-| long_query_time 	  | 10.000000 						   |
-+---------------------+------------------------------------+
-
+mysql> show variables like 'log_bin%';
++---------------------------------+-----------------------------+
+| Variable_name                   | Value                       |
++---------------------------------+-----------------------------+
+| log_bin                         | ON                          |
+| log_bin_basename                | /var/lib/mysql/binlog       |
+| log_bin_index                   | /var/lib/mysql/binlog.index |
+| log_bin_trust_function_creators | OFF                         |
+| log_bin_use_v1_row_events       | OFF                         |
++---------------------------------+-----------------------------+
 ```
 
-## 错误日志
+`log_bin`：配置是否启动binlog，默认启动。
+
+`log_bin_basename`：指定binlog基本名，然后以自增数字填充完整文件名，如`binlog.000001`
+
+`max_binlog_size`：单个binlog文件大小，默认1GB。
+
+`log_bin_index`：为了跟踪使用了哪些二进制日志文件，创建了二进制日志索引文件，基本名字和binlog相同，扩展名为`.index`
+
+### 日志格式
+
+`binlog_format`：指定binlog记录的日志格式。
+
+- `STATEMENT`：记录写操作SQL语句。**对于非确定性SQL如`now()`等时间函数会出现主从数据不一致问题。**
+
+- `ROW`：默认，记录行的修改
+- `MIXED`：混合模式，一般记录SQL，非确定性SQL情况下记录行修改。
+
+在少量SQL语句会修改大量行的情况下，记录SQL更有效，而某些SQL的WHERE过滤可能需要大量执行时间，但只会修改几行，此时记录行修改更有效。
+
+> 注意：如果使用innodb引擎且事务隔离级别为`READ_COMMITTED`或`READ_UNCOMMITED`，只能使用基于行的日志格式。
+
+## 慢查询日志
+
+slowlog记录执行时间超过`long_query_time`的SQL，`mysqldumpslow`命令可处理slowlog并汇总其内容。
+
+| 参数                          | 描述                 | 默认值            |
+| ----------------------------- | -------------------- | ----------------- |
+| slow_query_log                | 开启慢查询日志       | OFF               |
+| slow_query_log_file           | slowlog文件名        | {主机名}-slow.log |
+| long_query_time               | 慢查询阈值(second)   | 10                |
+| log_queries_not_using_indexes | 未使用索引的查询语句 | OFF               |
+
+以下参数将确定最终是否写入slowlog：
+
+`min_examined_row_limit`：默认0，查询扫过的行，少于此参数的查询语句不会写入slowlog
+
+`log-throttle-queries-not-using-indexes`：如果 [`log_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_queries_not_using_indexes) 启用，该 [`log_throttle_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_throttle_queries_not_using_indexes) 变量会限制每分钟可以写入慢速查询日志的此类查询的数量。默认0表示无限制。
+
+# 备份与恢复
+
+## 备份与恢复类型
+
+一般来说：全量备份(快照)采用物理备份，增量备份采用逻辑备份。
+
+1、物理备份：
+
+物理备份包括存储数据库内容的目录和文件的原始副本。这种备份适用于发生问题时需要快速恢复的大型、重要的数据库。
+
+**物理备份比逻辑备份更快。**
+
+物理备份工具都是企业版功能。
+
+2、逻辑备份：
+
+逻辑备份保存为逻辑数据库结构和内容信息，这种类型的备份适用于您可以编辑数据值或表结构，或在不同机器架构上重新创建数据的少量数据。
+
+逻辑备份输出大于物理备份，尤其是在以文本格式保存时。
+
+具有高度可移植性。
+
+逻辑备份工具包括`mysqldump`、`mysqlimport`程序
+
+3、在线备份（热备份）、离线备份（冷备份）
+
+热备份不停机，需 MySQL Enterprise Backup企业版产品
+
+4、本地与远程备份
+
+`mysqldump`命令可以连接本地或远程服务器进行备份。
+
+5、快照备份：如写时复制技术。
+
+6、全量备份(快照)和增量备份
+
+增量恢复是恢复在给定时间跨度内所做的更改。这也称为时间点恢复，因为它使服务器的状态在给定时间保持最新。时间点恢复基于binlog。
+
+## 备份方法
+
+企业版可用 [MySQL Enterprise Backup](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_mysql_enterprise_backup)产品对整个实例或选定的数据库、表或两者进行物理备份。该产品包括**增量备份**和**压缩备份**的功能。
+
+### mysqldump
+
+mysqldump程序将进行**逻辑备份**，生成的是一组SQL语句文件，执行这些SQL来重现数据库原始数据。
+
+> 注意：[**mysqldump**](https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html)至少需要 [`SELECT`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_select)转储表、[`SHOW VIEW`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_show-view)转储视图、[`TRIGGER`](https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html#priv_trigger)转储触发器的权限
+
+mysqldump优点是便利性和灵活性，可以自行插入一些SQL语句进行微改动。
+
+**mysqldump不是用于备份大量数据的快速或可扩展的解决方案**，对于大量数据，即使备份用时短，但是重放SQL恢复数据耗时长，因为重放 SQL 语句涉及用于插入、索引创建等的磁盘 I/O。
+
+**对于大规模的备份和恢复， [物理](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_physical)备份更为合适**，将数据文件以原始格式复制，以便快速恢复，企业版mysqlbackup命令支持物理备份。
+
+```sql
+mysqldump db_name # 备份某个数据库
+mysqldump db_name [tbl_name ...] # 备份某个数据库的某些表
+
+# 选项如下：
+--database db_name... 	# 备份某些数据库
+--all-databases 		# 备份所有数据库
+--add-drop-database 	# 在每个 CREATE DATABASE 语句之前添加 DROP DATABASE 语句
+--add-drop-table  		# 在每个 CREATE TABLE 语句之前添加 DROP TABLE 语句
+--add-drop-trigger		# 在每个 CREATE TRIGGER 语句之前添加 DROP TRIGGER 语句
+```
+
+1、全量逻辑备份例子：
+
+```sql
+mysqldump --single-transaction --flush-logs --master-data=2 \
+         --all-databases > demo1.sql
+```
+
+mysqldump命令进行全量备份时会**先读取此时binlog坐标**：此备份操作会获取所有表的全局读锁（使用[`FLUSH TABLES WITH READ LOCK`](https://dev.mysql.com/doc/refman/8.0/en/flush.html#flush-tables-with-read-lock)），一旦获得此锁，就会读取二进制日志坐标并释放锁。
+
+`-flush-logs`：会将旧binlog日志落盘并创建新binlog文件，这个新文件就是增量文件。
+
+若备份前binlog文件为demo-bin.000001：
+
+周一3点逻辑全量备份为demo1.sql，新binlog为demo-bin.000002，将demo1保存到安全地方。
+
+周二3点逻辑全量备份为demo2.sql，新binlog为demo-bin.000003，将demo2.sql和demo-bin.000002都保存到安全地方(如磁带或光盘)。
+
+可以定期清理不需要的binlog以释放空间。
+
+2、复制数据库例子：
+
+```sql
+-- 在服务器1
+mysqldump --databases db1 > dump.sql
+
+-- 在服务器2
+mysql < dump.sql
+```
+
+3、分别转储表定义和数据
+
+```sql
+mysqldump --no-data db1 > dump-defs.sql # 数据库表定义
+mysqldump --no-create-info db1 > dump-data.sql # 数据
+```
+
+### 制作带分隔符的文本文件
+
+```sql
+-- 仅保存表数据，不能保存表结构
+SELECT * INTO OUTFILE `file_name` FROM tbl_name;
+-- 加载数据
+-- LOAD DATA 或 mysqlimport
+```
+
+### 主从复制
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/replication-solutions-backups.html
+
+# 优化
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/statement-optimization.html
+
+
+
+## 索引
+
+### 索引合并
+
+Index merge通过多次扫描索引并将其结果合并，仅能合并单表扫描，不适用于全文索引。
+
+在EXPLAIN输出中，若适用索引合并会在type列显示index merge，在Extra字段显示使用的合并算法：
+
+- Using intersect(...)
+- Using union(...)
+- Using sort_union(...)
+
+```sql
+-- 索引合并 交集
+SELECT * FROM tbl_name WHERE k1 =10 AND k2=10;
+
+-- 索引合并 联合
+SELECT * FROM tbl_name WHERE k1 = 10 OR k2=20;
+
+-- 索引合并 排序联合
+SELECT * FROM tbl_name WHERE k1 <10 OR k2<20;
+
+-- 混合
+SELECT * FROM tbl_name WHERE (k1=10 AND k2=20) OR (k3=30 AND k4=40);
+```
+
+sort-union 算法和 union 算法之间的区别在于，sort-union 算法必须首先获取所有行的行 ID 并在返回任何行之前对它们进行排序。
+
+## 哈希join优化
+
+MySQL 8.0.18 开始会尽可能对join查询使用哈希进行优化，即hash join，通常比以前[块嵌套循环连接算法](https://dev.mysql.com/doc/refman/8.0/en/nested-loop-joins.html#block-nested-loop-join-algorithm) 更快。从 MySQL 8.0.20 开始，删除了对块嵌套循环的支持。
+
+EXPLIAN时的Extra列：`Using join buffer (hash join)`
+
+```sql
+SELECT * FROM tbl1 
+INNER JOIN tbl2 ON tbl.c1=tbl2.c1;
+```
+
+在 MySQL 8.0.20 之前，如果任何一对连接表不具备至少一个 equi-join 条件，则无法使用哈希连接，并且采用较慢的块嵌套循环算法。MySQL 8.0.80后非等值join也能使用hash join。
+
+```sq;
+mysql> EXPLAIN FORMAT=TREE SELECT * FROM t1 JOIN t2 ON t1.c1 < t2.c1\G
+*************************** 1. row ***************************
+EXPLAIN: -> Filter: (t1.c1 < t2.c1)  (cost=4.70 rows=12)
+    -> Inner hash join (no condition)  (cost=4.70 rows=12)
+        -> Table scan on t2  (cost=0.08 rows=6)
+        -> Hash
+            -> Table scan on t1  (cost=0.85 rows=6)
+```
+
+参数`join_buffer_size`控制hash join的内存使用，默认256KB。超过限制时将使用文件处理。此参数可设高点。
+
+
+
+
+
+
+
+
+
+
+
+# 单机运行多MySQL实例
+
+在某些情况下，可能需要在一台机器上跑多个MySQL实例。
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/multiple-servers.html
+
+
+
+
 
