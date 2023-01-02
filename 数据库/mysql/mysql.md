@@ -527,11 +527,58 @@ EXPLAIN: -> Filter: (t1.c1 < t2.c1)  (cost=4.70 rows=12)
 
 参数`join_buffer_size`控制hash join的内存使用，默认256KB。超过限制时将使用文件处理。此参数可设高点。
 
+## Multi-Range读取优化
+
+多范围读取(MRR)：在表很大时，通过索引范围读取数据行可能会导致对基表的多次随机io。
+
+MySQL为了减少范围扫描的随机io次数，会先仅扫描索引并收集相关主键id，对其排序后从基表的主键聚族索引顺序读取数据
 
 
 
+## ORDER BY优化
 
+1、以索引进行order by
 
+MySQL会尽量以索引来满足order by并避免执行filesort排序操作。
+
+```sql
+SELECT key_part1, key_part2 FROM tbl ORDER BY key_part1, key_part;
+SELECT * FROM tbl ORDER BY key_part1, key_part2;
+```
+
+第一条SQL，将会直接以索引查询，避免排序。
+
+第二条SQL，扫描整个索引并查找数据行，在数据量很大时会产生大量随机io，这可能比全表扫描并filesort更耗时。
+
+2、以filesort进行order by
+
+若不能以索引避免排序，将执行filesort，此时EXPLAIN结果的Extra列显示`Using filesort`。
+
+`sort_buffer_size`参数控制filesort操作内存，默认256KB。
+
+如果`filesort`结果集太大而无法放入内存，则操作会根据需要使用临时磁盘文件。
+
+3、提高order by 速度
+
+- 优先考虑使用索引自然排序
+- 增加`sort_buffer_size`，避免排序集写入磁盘和合并过程
+- 增加`read_rnd_buffer_size`以便一次读取更多行
+
+## 避免全表扫描
+
+当MySQL执行全表扫描时，EXPLAIN在type列显示ALL。
+
+在以下情况会全表扫描：
+
+- 表很小，全表扫描比索引快得多
+- 没有索引可用
+- 查询的结果集过大(20%以上)，走索引反而不如全部扫描
+- 索引的cardinality值太低了，走索引反而不如全部扫描
+
+对于大型表，以下技术可以避免优化器选错索引：
+
+- 定时执行`ANALYZE TABLE tbl_name`
+- `FORCE INDEX`强制使用某个索引
 
 
 
