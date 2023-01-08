@@ -472,13 +472,130 @@ SELECT * INTO OUTFILE `file_name` FROM tbl_name;
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/statement-optimization.html
 
+## 库表列
 
+1. 尽可能**最小数据类型**
+2. **索引设为NOT NULL**，避免测试每个值是否为Null，还可以节省一些存储空间，每列一位。
+3. 修改Innodb默认的DYNAMIC行格式，选用紧凑的如COMPACT/COMPRESSED，这会增加CPU消耗。如果您的工作负载是受缓存命中率和磁盘速度限制的典型工作负载，则它可能会更快。
+4. **列名尽可能短**，利于dump、binlog的备份/复制
+5. 数据不冗余（第三范式）和冗余（利于查询）之间的权衡
+6. 能用数字就不要用字符串
+7. **冷热分离**，热字段放主表，冷字段放详情表（从表）
+8. BLOB大文本优化：
+   - 压缩
+   - 拆为单独的表，让主表数据行紧凑，范围扫描时可减少主表io
+   - 放在单独的数据库甚至不同的存储设备：一般以单个id查BLOB，大量顺序读，更适合传统硬盘驱动器而不是 [SSD 设备](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_ssd)。
+9. 表大小受操作系统限制，但最好**对超过1TB的表进行分区**
+10. MySQL限制表最多4096列，Innodb引擎限制1017列
+11. 行大小限制65535B，BLOB和TEXT列存储在其它位置，仅占行空间9-12B。而Innodb限制每页必须存两行以上。innodb_page_size默认16KB，则每行限制8KB。
+12. 
+
+
+
+## EXPLAIN
+
+EXPLAIN可用于了解查询执行计划，它根据表、列、索引等信息，可以在不读取所有行情况下执行对巨大表的查询，优化器选择执行最高效查询的一组操作成为**查询执行计划**，也被称为**EXPLAIN计划**。
+
+可以根据其执行计划，判断优化情况，进而改进。
+
+注意：如果出现索引在您认为应该使用时未被使用的问题，请运行[`ANALYZE TABLE`](https://dev.mysql.com/doc/refman/8.0/en/analyze-table.html)以更新表统计信息，例如键的基数cardinality，这可能会影响优化器所做的选择。
+
+| Column                                                       | JSON Name       | Meaning                      |
+| :----------------------------------------------------------- | :-------------- | :--------------------------- |
+| [`id`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_id) | `select_id`     | The `SELECT` identifier      |
+| [`select_type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_select_type) | None            | The `SELECT` type            |
+| [`table`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_table) | `table_name`    | 表                           |
+| [`partitions`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_partitions) | `partitions`    | 匹配的分区                   |
+| [`type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_type) | `access_type`   | The join type                |
+| [`possible_keys`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_possible_keys) | `possible_keys` | 供选择的索引                 |
+| [`key`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key) | `key`           | 实际选择的索引               |
+| [`key_len`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key_len) | `key_length`    | 选择索引的长度               |
+| [`ref`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_ref) | `ref`           | 与索引相比的列               |
+| [`rows`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_rows) | `rows`          | 估计要扫过的行               |
+| [`filtered`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_filtered) | `filtered`      | 按条件过滤的数据行估计百分比 |
+| [`Extra`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_extra) | None            | 附加信息                     |
+
+如果要强制优化器使用某个索引，可以用`FORCE INDEX`索引提示。
+
+1、type：连接类型，描述表是如何连接的，从最好的类型到最差的排序：
+
+- system：查系统表
+
+- **const**：该表最多有一个匹配行，在查询开始时读取。因为只有一行，所以优化器的其余部分可以将这一行中列的值视为常量。 `const`表非常快，因为它们只读一次。
+- **eq_ref**：对于先前表中行的每个组合，从该表中读取一行，当连接使用索引为主键聚族索引或UNIQUE NOT NULL索引时
+- **ref**：对于先前表中行的每个组合，从该表中读取具有匹配索引值的所有行。有索引，但无法根据索引选出连接的单个行
+- fulltext：连接是使用`FULLTEXT` 索引执行的。
+- index merge：使用索引合并优化
+- unique_subquery
+- index_subquery
+- **range**：仅检索给定范围内的行，使用索引来选择行。
+- **index**：index连接类型与ALL相同，只是扫描了索引树，有2种情况：
+  - 如果查询的是覆盖索引，则只扫描索引树
+  - 使用从索引读取以按索引顺序查找数据行来执行全表扫描。
+- ALL：对先前表中每个行组合进行全表扫描，性能非常糟糕
+
+2、filtered指示按条件过滤的表行的估计百分比，100表示没发生过滤，值越低说明索引的基数越好，选择性越高。
+
+3、Extra：额外信息
+
+- `Using filesort`：排序是通过根据联接类型遍历所有行，并为匹配WHERE子句的所有行存储排序关键字和指向该行的指针来完成的。
+
+- `Using index`：覆盖索引，仅使用索引树中的信息从表中检索列信息，无须回表。
+
+- `Using index condition`：通过索引过滤。
+- `Using index for group-by`：表示MySQL找到了一个索引可用于检索GROUP BY 或 DISTINCT查询的所有列，而无需对实际表进行额外io
+
+- `Using temporary`：为了解析查询，MySQL 需要创建一个临时表来保存结果。GROUP BY通常出现。
+
+- `Using where`：从数据表中读取数据后进行过滤。
 
 ## 索引
+
+提高查询性能最佳方法是建立索引，B-tree数据结构可以让索引快速找到一个值、一组值、一个范围。
+
+不必要的索引浪费空间时间，增加插入、更新、删除的成本。找到合适的平衡点以使用最佳索引集实现快速查询。
+
+查询有多个索引匹配时，MySQL通常使用选择性高的索引。
+
+**复合索引**：即多列索引，一个索引最多包含16列，执行最左前缀匹配。
+
+**覆盖索引**：查询列都在索引数据中，无须回表查询。
+
+**前缀索引**：可以仅使用列的前几个字符，大大减小索引文件。Innodb引擎中前缀最长767B(因为超过这个数就要将数据放入到其它段，具体可看《MySQL技术内幕》)。
+
+**全文索引**：用于全文搜索。
+
+**空间索引**：Innodb支持空间类型的R树索引
+
+### 胖索引改散列索引
+
+单列索引字段特别长（超过100B且前缀索引不适用情况，如前几个字符都相同），或者复合索引列数过多，且每列较长的情况下，索引结构会非常的**宽**，此时有一种优化方式：
+
+```sql
+-- 摒弃复合索引，自建散列`hash_col`单列索引
+CREATE INDEX hash_col_idx ON tbl_name (hash_col);
+
+-- 查询时以散列索引先过滤，再进行比较
+SELECT * FROM tbl_name 
+WHERE hash_col=MD5(CONCAT(val1,val2,val3)) 
+AND col1=val1 AND col2=val2 AND col3=val3;
+```
+
+如果col1和col2和col3加起来超过100B(这是非常可能的)，对其散列后的`hash_col`列建立索引则仅有32B，可以大大**减少索引体积**，且**发生碰撞概率很低**，查找效率会大幅提升！
+
+改后缺点和哈希索引一模一样。
+
+
 
 ### 索引合并
 
 Index merge通过多次扫描索引并将其结果合并，仅能合并单表扫描，不适用于全文索引。
+
+```sql
+SELECT * FROM tbl_name WHERE k1=10 AND k2=20;
+```
+
+如以上查询sql，若k1和k2都存在单列索引，则优化器尝试**分别以两个索引查询后的结果进行合并取交集**。
 
 在EXPLAIN输出中，若适用索引合并会在type列显示index merge，在Extra字段显示使用的合并算法：
 
@@ -501,6 +618,85 @@ SELECT * FROM tbl_name WHERE (k1=10 AND k2=20) OR (k3=30 AND k4=40);
 ```
 
 sort-union 算法和 union 算法之间的区别在于，sort-union 算法必须首先获取所有行的行 ID 并在返回任何行之前对它们进行排序。
+
+### 隐形索引
+
+MySQL支持不可见索引，即对优化器不可见。
+
+```sql
+-- 创建不可见索引
+CREATE INDEX idx_name ON tbl_name (col...) INVISIBLE;
+-- 使索引可见/不可见
+ALTER TABLE t1 ALTER INDEX i_idx INVISIBLE;
+ALTER TABLE t1 ALTER INDEX i_idx VISIBLE;
+```
+
+隐形索引主要目的在于测试该索引对于查询性能影响，且无需破坏性更改索引数据（加或删索引对大型表而言代价昂贵）。若设置索引隐形后性能下降明显，则说明索引是必须的，改回可见。
+
+### 降序索引
+
+MySQL  Innodb引擎支持降序索引：在索引定义加`DESC`，按降序存储键值。
+
+以前，可以按相反顺序扫描索引，但会降低性能。降序索引可以正向扫描，效率更高。
+
+```sql
+CREATE TABLE t (
+  c1 INT, c2 INT,
+  INDEX idx1 (c1 ASC, c2 ASC),
+  INDEX idx2 (c1 ASC, c2 DESC),
+  INDEX idx3 (c1 DESC, c2 ASC),
+  INDEX idx4 (c1 DESC, c2 DESC)
+);
+```
+
+降序索引无法用于没有给出order by语句的`MIN()/MAX()函数`优化，因为此时MySQL无法猜测你想要的是正序或倒序的大小。
+
+使用降序索引时EXPLAIN的Extra列提示：`Backward index scan; Using index`。
+
+### ORDER BY优化
+
+1、以索引进行order by
+
+MySQL会尽量以索引来满足order by并避免执行filesort排序操作。
+
+```sql
+SELECT key_part1, key_part2 FROM tbl ORDER BY key_part1, key_part;
+SELECT * FROM tbl ORDER BY key_part1, key_part2;
+```
+
+第一条SQL，将会直接以索引查询，避免排序。
+
+第二条SQL，扫描整个索引并查找数据行，在数据量很大时会产生大量随机io，这可能比全表扫描并filesort更耗时。
+
+2、以filesort进行order by
+
+若不能以索引避免排序，将执行filesort，此时EXPLAIN结果的Extra列显示`Using filesort`。
+
+`sort_buffer_size`参数控制filesort操作内存，默认256KB。
+
+如果`filesort`结果集太大而无法放入内存，则操作会根据需要使用临时磁盘文件。
+
+3、提高order by 速度
+
+- 优先考虑使用索引自然排序
+- 增加`sort_buffer_size`，避免排序集写入磁盘和合并过程
+- 增加`read_rnd_buffer_size`以便一次读取更多行
+
+### 避免全表扫描
+
+当MySQL执行全表扫描时，EXPLAIN在type列显示ALL。
+
+在以下情况会全表扫描：
+
+- 表很小，全表扫描比索引快得多
+- 没有索引可用
+- 查询的结果集过大(20%以上)，走索引反而不如全部扫描
+- 索引的cardinality值太低了，走索引反而不如全部扫描
+
+对于大型表，以下技术可以避免优化器选错索引：
+
+- 定时执行`ANALYZE TABLE tbl_name`
+- `FORCE INDEX`强制使用某个索引
 
 ## 哈希join优化
 
@@ -533,52 +729,115 @@ EXPLAIN: -> Filter: (t1.c1 < t2.c1)  (cost=4.70 rows=12)
 
 MySQL为了减少范围扫描的随机io次数，会先仅扫描索引并收集相关主键id，对其排序后从基表的主键聚族索引顺序读取数据
 
+## 优化innodb表
 
+1、优化存储布局
 
-## ORDER BY优化
+- 数据稳定时，可使用`OPTIMIZE TABLE`语句重组并压缩任何浪费空间以减少I/O。
+  `OPTIMIZE TABLE`复制表的数据并重建索引，减少表空间和磁盘碎片。
+- 大量重复文本或数字数据的表，考虑使用`COMPRESSED`行格式。最好先衡量COMPRESSED格式相比`COMPACT`行格式(Innodb默认)可以实现的压缩量。
 
-1、以索引进行order by
+2、批量数据导入
 
-MySQL会尽量以索引来满足order by并避免执行filesort排序操作。
+- 关闭自动提交模式，因为它会为每次插入执行日志刷新到磁盘。
+- 关闭唯一性检查：`SET unique_checks=0`，导入后再改回1.
+
+- 在对具有自动递增列的表进行批量插入时，设置 [`innodb_autoinc_lock_mode`](https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_autoinc_lock_mode)为 2（交错）而不是 1（连续）。
+
+3、优化Innodb磁盘i/o：在CPU利用率较低时很可能受磁盘io限制
+
+- 增加缓冲池大小：`innodb_buffer_pool_size`，可设为系统内存的50%-75%
+- 通过将[**文件符号链接到不同的磁盘**](https://dev.mysql.com/doc/refman/8.0/en/symbolic-links.html)或条带化磁盘来增加可用磁盘轴的数量（从而减少寻道开销）
+- 将NFS与MySQL一起用，但需要谨慎。
+
+4、优化Innodb配置变量
+
+- 配置change buffer：`innodb_change_buffering`
+
+- 如果出现频繁上下文切换至瓶颈，配置线程并发量：[`innodb_thread_concurrency`](https://dev.mysql.com/doc/refman/8.0/en/innodb-performance-thread_concurrency.html)
+
+- 利用多核处理器及其缓存内存配置，最大限度地减少上下文切换的延迟：[“配置自旋锁轮询”](https://dev.mysql.com/doc/refman/8.0/en/innodb-performance-spin_lock_polling.html)。
+
+## 优化锁定操作
+
+1、行锁：
+
+Innodb支持行锁，为避免在单表多个并发写入操作时出现死锁而回滚，可以在事务开始时通过`SELECT ... FOR UPDATE`为每组预期要修改的行发出一条语句来获取必要的锁，即使数据更改语句出现在事务的后面也是如此。
+
+行锁优点：
+
+- 当不同的会话访问不同的行时，锁冲突更少
+- 回滚更改更少
+- 可能长时间锁定单行
+
+2、表锁
+
+优点：
+
+- 所需内存相对较少（行锁定需要每行或每组行锁定的内存）
+- 在表的大部分上使用时速度很快，因为只涉及一个锁。
+- 如果您经常`GROUP BY` 对大部分数据进行操作或者必须经常扫描整个表，则速度很快。
+
+**写锁申请优先级高于读锁申请**，这样可以保证写锁申请不会饿死，但是写申请很多时可能会造成读申请饥饿。如Java的ReadWriteLock也是同样逻辑。
 
 ```sql
-SELECT key_part1, key_part2 FROM tbl ORDER BY key_part1, key_part;
-SELECT * FROM tbl ORDER BY key_part1, key_part2;
+mysql> LOCK TABLES t1 READ;
+mysql> SELECT COUNT(*) FROM t1;
++----------+
+| COUNT(*) |
++----------+
+|        3 |
++----------+
+mysql> SELECT COUNT(*) FROM t2;
+ERROR 1100 (HY000): Table 't2' was not locked with LOCK TABLES
 ```
 
-第一条SQL，将会直接以索引查询，避免排序。
 
-第二条SQL，扫描整个索引并查找数据行，在数据量很大时会产生大量随机io，这可能比全表扫描并filesort更耗时。
 
-2、以filesort进行order by
 
-若不能以索引避免排序，将执行filesort，此时EXPLAIN结果的Extra列显示`Using filesort`。
 
-`sort_buffer_size`参数控制filesort操作内存，默认256KB。
 
-如果`filesort`结果集太大而无法放入内存，则操作会根据需要使用临时磁盘文件。
 
-3、提高order by 速度
 
-- 优先考虑使用索引自然排序
-- 增加`sort_buffer_size`，避免排序集写入磁盘和合并过程
-- 增加`read_rnd_buffer_size`以便一次读取更多行
 
-## 避免全表扫描
+## Innodb缓冲池优化
 
-当MySQL执行全表扫描时，EXPLAIN在type列显示ALL。
+Innodb在内存中维护有缓冲池，缓存数据和索引
 
-在以下情况会全表扫描：
+有关其他`InnoDB`缓冲池配置和调整信息，请参阅以下部分：
 
-- 表很小，全表扫描比索引快得多
-- 没有索引可用
-- 查询的结果集过大(20%以上)，走索引反而不如全部扫描
-- 索引的cardinality值太低了，走索引反而不如全部扫描
+- [第 15.8.3.4 节，“配置 InnoDB 缓冲池预取（预读）”](https://dev.mysql.com/doc/refman/8.0/en/innodb-performance-read_ahead.html)
+- [第 15.8.3.5 节，“配置缓冲池刷新”](https://dev.mysql.com/doc/refman/8.0/en/innodb-buffer-pool-flushing.html)
+- [第 15.8.3.3 节，“使缓冲池抗扫描”](https://dev.mysql.com/doc/refman/8.0/en/innodb-performance-midpoint_insertion.html)
+- [第 15.8.3.2 节，“配置多个缓冲池实例”](https://dev.mysql.com/doc/refman/8.0/en/innodb-multiple-buffer-pools.html)
+- [第 15.8.3.6 节，“保存和恢复缓冲池状态”](https://dev.mysql.com/doc/refman/8.0/en/innodb-preload-buffer-pool.html)
+- [第 15.8.3.1 节，“配置 InnoDB 缓冲池大小”](https://dev.mysql.com/doc/refman/8.0/en/innodb-buffer-pool-resize.html)
 
-对于大型表，以下技术可以避免优化器选错索引：
 
-- 定时执行`ANALYZE TABLE tbl_name`
-- `FORCE INDEX`强制使用某个索引
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
