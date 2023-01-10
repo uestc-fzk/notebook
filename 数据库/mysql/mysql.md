@@ -802,7 +802,9 @@ ERROR 1100 (HY000): Table 't2' was not locked with LOCK TABLES
 
 ## Innodb缓冲池优化
 
-Innodb在内存中维护有缓冲池，缓存数据和索引
+Innodb在内存中维护有缓冲池，缓存InnoDB表数据、索引和辅助数据，实现为页面链表，采用LRU算法。
+
+`innodb_buffer_pool_size`变量定义缓冲池大小，推荐为系统内存的50%~75%。缓冲池太小可能导致过度搅动，页面刷新频繁，太大可能导致系统内存竞争而导致页面交换。
 
 有关其他`InnoDB`缓冲池配置和调整信息，请参阅以下部分：
 

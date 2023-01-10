@@ -880,8 +880,9 @@ public class MainReactor implements Runnable {
         while (!Thread.interrupted()) {
             try {
                 // 监听新连接并转发
-                SocketChannel socketChannel = this.acceptor.accept();
-                if (socketChannel != null) {
+                List<SocketChannel> list = this.acceptor.accept();
+              	if(list==null||list.size()==0) continue;
+                for(SocketChannel sc : list){
                     dispatch(socketChannel);
                 }
             } catch (IOException e) {
@@ -902,7 +903,8 @@ static class Acceptor {
         this.mainSelector = selector;
     }
 
-    public SocketChannel accept() throws IOException {
+    public List<SocketChannel> accept() throws IOException {
+      	List<SocketChannel> list=new ArrayList<>();
         // 接收器获取新连接并返回
         if (mainSelector.select(1000) > 0) {
             Iterator<SelectionKey> keys = mainSelector.selectedKeys().iterator();
@@ -915,11 +917,11 @@ static class Acceptor {
                     SocketChannel sc = serverSocketChannel.accept();
                     sc.configureBlocking(false);
                     sc.write(ByteBuffer.wrap("您已经连上服务器".getBytes(StandardCharsets.UTF_8)));
-                    return sc;
+                    list.add(sc);
                 }
             }
         }
-        return null;
+        return list;
     }
 }
 ```
