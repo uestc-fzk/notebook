@@ -12,17 +12,17 @@ MySQL 是最流行的开源、**关系型 SQL 数据库管理系统**，由 Orac
 
 **MySQL8新增的部分功能如下：**(我简单的选了一些看得懂的)
 
-1. 默认字符集已从 更改 `latin1`为`utf8mb4`。
+1. 默认字符集已从 `latin1`更改为`utf8mb4`。
 
-2. JSON功能。
+2. [JSON数据类型](https://dev.mysql.com/doc/refman/8.0/en/json.html)
 
 3. 优化器新增功能：
    - 支持不可见索引
    - 支持降序索引
-4. 窗口函数
-5. 多值索引
+4. [窗口函数](https://dev.mysql.com/doc/refman/8.0/en/window-functions.html)
+5. [多值索引](https://dev.mysql.com/doc/refman/8.0/en/create-index.html#create-index-multi-valued)
 6. RIGHT JOIN 作为 LEFT JOIN 处理。
-7. 数据字典
+7. [数据字典](https://dev.mysql.com/doc/refman/8.0/en/data-dictionary.html)
 
 ## 常用命令
 
@@ -55,6 +55,207 @@ SHOW TABLES;
 # 某个表的详细信息
 DESCRIBE [table_name];
 ```
+
+# 数据类型
+
+## 数值
+
+注意：**整数类型可以指定显示宽度**，最大为255，其与值范围无关。如INT(4)指定其显示宽度为4位，应用程序可以使用此可选显示宽度来显示宽度小于为列指定的宽度的整数值，方法是用空格向左填充它们。（也就是说，这个宽度存在于随结果集返回的元数据中。是否使用它取决于应用程序。）
+
+**显示宽度**不限制值范围，超过宽度的值将使用完整值显示。
+
+| 类型        | 存储（B） | 有符号最小值  | 最小值无符号 | 有符号最大值 | 最大值无符号 |
+| :---------- | :-------- | :------------ | :----------- | :----------- | :----------- |
+| `TINYINT`   | 1         | `-128`        | `0`          | `127`        | `255`        |
+| `SMALLINT`  | 2         | `-32768`      | `0`          | `32767`      | `65535`      |
+| `MEDIUMINT` | 3         | `-8388608`    | `0`          | `8388607`    | `16777215`   |
+| `INT`       | 4         | `-2147483648` | `0`          | `2147483647` | `4294967295` |
+| `BIGINT`    | 8         | `-2^63`       | `0`          | `2^63-1`     | `2^64-1`     |
+
+- BIT[(M)]：位值，M指示位数，1-64，默认1
+- BOOL, BOOLEAN：是TINYINT(1)同义词，即被当做该类型处理。
+
+- SERIAL：是BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE同义词。
+
+- DECIMAL[(M[,D])]：M是总位数，默认10最大65，D是小数位数，默认0。
+- FLOAT(p)：浮点数，p表示位精度，0-24为单精度浮点数，4B存储；25-53为双精度浮点数，8B存储。
+  注：原本的FLOAT(M,D)和DOUBLE(M,D)在MySQL8.0.17已弃用。
+
+## 时间
+
+- DATE：范围`'1000-01-01'到'9999-12-31'`，用于生日字段
+- DATETIME[(fsp)]：范围是 `'1000-01-01 00:00:00.000000'`到 `'9999-12-31 23:59:59.999999'`。fsp指定小数秒精度，默认0。
+- TIMESTAMP[(fsp)]：时间搓，范围是`'1970-01-01 00:00:01.000000'`UTC 到`'2038-01-19 03:14:07.999999'`UTC。fsp指定小数秒精度，默认0.
+  注意：MySQL 将`TIMESTAMP`值从当前时区转换为 UTC 进行存储，然后从 UTC 转换回当前时区以进行检索。如果有海外机房，一定要注意时区问题，最好在连接时给定当地时区。
+
+对于插入时间或更新时间字段，可以通过给默认值或自动更新：这样可以在业务处理时忽略对更新时间的关注。
+
+```sql
+CREATE TABLE t1(
+  -- 给定默认插入时间
+	create_time DATETIME DEFAULT NOW(),
+  -- 更新时间自动更新
+  update_time DATETIME DEFAULT NOW() ON UPDATE NOW(),
+  -- 如果有精度，则必须给定精度函数
+  modify_time TIMESTAMP(6) DEFAULT NOW(6) ON UPDATE NOW(6)
+);
+```
+
+`NOW()`和`CURRENT_TIMESTAMP()`同义。
+
+
+
+## 字符串
+
+- CHAR(M)：固定长度字符串，不足时以空格填充，M表示长度，范围0~255，默认1。
+- VARCHAR(M)：变长字符串，M表示最大字符个数，受限于行大小(默认65535B)。
+  注意：varchar值需额外存储字节长度，如果值不超过255B则用1B存储，超过则用2B存储。
+  这也是为什么推荐varchar(255)的原因，不过呢在utf8mb4字符集下，这个255没啥意义。
+
+- TINYBLOB：存储最多255B，额外1B存储长度
+- BLOB：存储最多65535B，额外2B存储长度，BLOB值视为二进制字符串(字节字符串)。
+- MEDIUMBLOB：存储最多(2^24-1)B，额外3B存储长度
+- LONGBLOB：存储最多4GB，额外4B存储长度
+- ENUM('v1',...)：枚举，值在内部存储为整数，查询时再翻译回字符串，大大节省存储空间
+- SET('v1',...)：集合，值在内部存储为位图，一个SET列最多有64个不同成员。
+
+1、当插入的值超过CHAR或VARCHAR指定长度时，将根据服务器SQL模式有不同策略，默认是报错无法插入。
+
+2、ENUM在内部以数字索引号存储，从1开始，空串为0：
+
+```sql
+CREATE TABLE t1(
+	id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  sex ENUM('male','female'),
+  role ENUM('admin','rd','qa')
+);
+-- 查男性
+SELECT * FROM t1 WHERE sex='male'; -- 或 sex=1
+-- 查女性
+SELECT * FROM t1 WHERE sex='female'; -- 或 sex=2 
+```
+
+官方建议枚举不要存储数字，因为MySQL很可能将其和索引号混淆！
+
+**枚举排序将根据索引号排序**，如果业务必须用到枚举排序，请确保按照字典序定义枚举元素。
+
+3、SET在内部也是以整数存储，不过以8B整数的每个bit位表示一个元素，所以最多支持64个元素。
+
+```sql 
+-- 查找有rd的列
+SELECT * FROM t1 WHERE role & 0b010; 
+-- 等价于 WHERE FIND_IN_SET('rd',role)>0
+-- 等价与 WHERE role LIKE '%rd%';
+
+-- 查找有admin或rd的列
+SELECT * FROM t1 WHERE role & 0b011;
+-- 等价于 WHERE FIND_IN_SET('admin',role)>0 OR FIND_IN_SET('rd',role)>0
+
+# 注意：role='x,y'是全等, 即只能是这个值
+# 注意：不能直接将其与二进制数比较，即 WHERE role = 0b010无法查出数据
+# 但是可以将其转为数字进行操作：role | 0
+SELECT * FROM t1 WHERE (role|0)=0b11;
+# 等价于 role = 'admin,rd'
+```
+
+## JSON
+
+```sql
+CREATE TABLE t1(
+  id BIGINT AUTO_INCREMENT PRIMARY KEY;
+	json_col JSON;
+);
+```
+
+### 常用函数
+
+- JSON_TYPE()函数将json字符串解析得到其json类型
+
+- JSON_ARRAY()函数将参数拼装为json数组：`SELECT JSON_ARRAY(1,2,NOW());`
+- JSON_OBJECT()函数将参数拼装为JSON对象: `SELECT JSON_OBJECT('key1',1,'key2','abc');`
+
+### 合并
+
+MySQL8有2个合并函数：
+
+- JSON_MERGE_PRESERVE()，（mysql5.7的JSON_MERGE()函数是此别名，但已弃用）
+- JSON_MERGE_PATCH()
+
+两者在处理重复键有区别：前者保留重复键的值并合并，后者仅保留最后一个重复键的值
+
+1、合并数组：
+
+```sql
+mysql> SELECT
+    ->   JSON_MERGE_PRESERVE('[1, 2]', '["a", "b", "c"]', '[true, false]') AS Preserve,
+    ->   JSON_MERGE_PATCH('[1, 2]', '["a", "b", "c"]', '[true, false]') AS Patch\G
+*************************** 1. row ***************************
+Preserve: [1, 2, "a", "b", "c", true, false]
+   Patch: [true, false]
+```
+
+2、合并对象
+
+```sql
+mysql> SELECT
+    ->   JSON_MERGE_PRESERVE('{"a": 1, "b": 2}', '{"c": 3, "a": 4}', '{"c": 5, "d": 3}') AS Preserve,
+    ->   JSON_MERGE_PATCH('{"a": 3, "b": 2}', '{"c": 3, "a": 4}', '{"c": 5, "d": 3}') AS Patch\G
+*************************** 1. row ***************************
+Preserve: {"a": [1, 4], "b": 2, "c": [3, 5], "d": 3}
+   Patch: {"a": 4, "b": 2, "c": 5, "d": 3}
+```
+
+3、数组和对象的合并
+
+```sql
+mysql> SELECT
+	  ->   JSON_MERGE_PRESERVE('[10, 20]', '{"a": "x", "b": "y"}') AS Preserve,
+	  ->   JSON_MERGE_PATCH('[10, 20]', '{"a": "x", "b": "y"}') AS Patch\G
+*************************** 1. row ***************************
+Preserve: [10, 20, {"a": "x", "b": "y"}]
+   Patch: {"a": "x", "b": "y"}
+```
+
+### 路劲语法
+
+路劲语法：前导`$`，后面跟着选择器：
+
+- `.key`：查找键名对象
+- `[N]`：数组元素下标
+- `[M to N]`：数组子集，闭区间。
+- `last`：数组表示最右边元素下标，用法如：`$[last-3 to last-1]`
+- `*`通配符
+  - `.[*]`：JSON对象所有成员
+  - `[*]`：JSON数组所有元素
+  - `prefix**suffix`：前缀满足且后缀满足
+- `**`：任意路劲
+
+```sql
+mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.*');
++---------------------------------------------------------+
+| JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.*') |
++---------------------------------------------------------+
+| [1, 2, [3, 4, 5]]                                       |
++---------------------------------------------------------+
+mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
++------------------------------------------------------------+
+| JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]') |
++------------------------------------------------------------+
+| [3, 4, 5]                                                  |
++------------------------------------------------------------+
+```
+
+### CRUD
+
+- JSON-INSERT()
+- JSON-REPLACE()
+- JSON-SET()
+- JSON-EXTRACT()
+- JSON-REMOVE
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
+
+
 
 # MySQL应用程序
 
@@ -494,9 +695,13 @@ SELECT * INTO OUTFILE `file_name` FROM tbl_name;
 
 ## EXPLAIN
 
-EXPLAIN可用于了解查询执行计划，它根据表、列、索引等信息，可以在不读取所有行情况下执行对巨大表的查询，优化器选择执行最高效查询的一组操作成为**查询执行计划**，也被称为**EXPLAIN计划**。
+**EXPLAIN可用于了解查询执行计划**，它根据表、列、索引等信息，可以在不读取所有行情况下执行对巨大表的查询，优化器选择执行最高效查询的一组操作成为**查询执行计划**，也被称为**EXPLAIN计划**。可以根据其执行计划，判断优化情况，进而改进。
 
-可以根据其执行计划，判断优化情况，进而改进。
+> 可以借助BENCHMARK()函数简单观察优化效果。
+>
+> [BENCKMARK(count,expr)](https://dev.mysql.com/doc/refman/8.0/en/information-functions.html#function_benchmark)重复执行表达式，可以用客户端执行该函数并观察查询执行时间。
+>
+> `SELECT BENCKMARK(100, (SELECT id FROM t1 WHERE id=1))`
 
 注意：如果出现索引在您认为应该使用时未被使用的问题，请运行[`ANALYZE TABLE`](https://dev.mysql.com/doc/refman/8.0/en/analyze-table.html)以更新表统计信息，例如键的基数cardinality，这可能会影响优化器所做的选择。
 
@@ -815,9 +1020,15 @@ Innodb在内存中维护有缓冲池，缓存InnoDB表数据、索引和辅助�
 - [第 15.8.3.6 节，“保存和恢复缓冲池状态”](https://dev.mysql.com/doc/refman/8.0/en/innodb-preload-buffer-pool.html)
 - [第 15.8.3.1 节，“配置 InnoDB 缓冲池大小”](https://dev.mysql.com/doc/refman/8.0/en/innodb-buffer-pool-resize.html)
 
+# InnoDB
 
+Innodb是高可靠性和高性能的通用存储引擎。默认都应该使用Innodb。
 
-
+- 遵循ACID
+- 行级锁定和Oracle风格的一致性读取提高并发性
+- 按主键聚族索引在磁盘上组织数据，优化基于主键查询
+- 不支持集群数据库
+- **不支持哈希索引**（InnoDB 在内部利用哈希索引来实现其自适应哈希索引功能）
 
 
 
