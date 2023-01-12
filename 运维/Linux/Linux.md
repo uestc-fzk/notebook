@@ -733,7 +733,7 @@ cat: f3: No such file or directory
     ```shell
     kill pid：杀掉进程
     kill -9 pid 强制杀掉进程
-
+    
     例如：先使用 ps -ef 查询进程id ， 然后再使用 kill pid ， 这是例子不要真的执行
     ````
 
@@ -837,7 +837,7 @@ C: 解压到指定目录，使用方式 -C 目录 ， C 是大写的。
     ```
     语法： ping  ip或者域名
     例如：ping  www.baidu.com
-
+    
     查看之后，ctrl+C，退出查看，回到Linux命令行
     ```
 #### 网络访问
@@ -1701,7 +1701,7 @@ echo "Hello World !"
 
 **`#!`** 告诉系统其后路径所指定的程序即是解释此脚本文件的 Shell 程序。
 
-#### 运行 Shell 脚本有两种方法：
+#### 运行 Shell 脚本有两种方法
 
 ##### 1.作为可执行程序
 
@@ -2521,7 +2521,41 @@ echo "当前开放的所有端口："
 firewall-cmd --zone=public --list-ports
 ```
 
+### 幂等添加系统变量
 
+```shell
+#!/bin/bash
+function addEnvArg(){
+    # 遍历所有参数
+    for arg in $@
+    do 
+        if [[ "$PATH" = *":$arg" ]];then
+            echo "$arg exists"
+        elif [[ "$PATH" = "$arg:"* ]];then
+            echo "$arg exists"
+        elif [[ "$PATH" = *":$arg:"* ]];then
+            echo "$arg exists"
+        else
+            PATH=$PATH:$arg
+        fi
+    done
+}
+```
+
+使用方法：将该函数添加到/etc/profile文件中，添加系统变量时调用该函数：
+
+```shell
+[root@k8s-master ~]# tail -n 20 /etc/profile
+export JAVA_HOME=/usr/java/jdk-17.0.2
+# maven 环境变量
+export MAVEN_HOME=/usr/java/apache-maven-3.8.7
+# gradle 环境变量
+export GRADLE_HOME=/usr/java/gradle-7.6
+
+addEnvArg $JAVA_HOME/bin $MAVEN_HOME/bin $GRADLE_HOME/bin
+```
+
+这样多次调用`source /etc/profile`时也不会冗余添加变量了。
 
 # Linux下安装MySQL8
 
