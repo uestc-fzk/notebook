@@ -38,6 +38,128 @@
 
 配置完后保存退出。接下来即可进入IDEA新建Maven项目了
 
+### maven打包可执行jar
+
+Maven可以通过`mvn package`命令打包jar。
+
+java的jar包可以通过`java -jar xx.jar`执行，如果要手动指定启动类：`java -cp xxx.jar x.x.Main`，注意不要带class或java后缀。
+
+但是这样的jar在引用3方依赖时会出现找不到类的异常，此时可以通过引入如下maven插件解决：
+
+1、首先在pom.xml中引入插件：SpringBoot的小胖jar的插件
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+                <!-- 指定启动类 -->
+                <mainClass>com.fzk.Main</mainClass>
+            </configuration>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>repackage</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+        <!-- The configuration of maven-assembly-plugin -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <version>3.1.0</version>
+            <!-- The configuration of the plugin -->
+            <configuration>
+                <descriptors>
+                    <!-- 配置 assembly 的路径,正常放在项目根目录 -->
+                    <descriptor>assembly/assembly.xml</descriptor>
+                </descriptors>
+            </configuration>
+            <executions>
+                <execution>
+                    <id>make-assembly</id>
+                    <phase>package</phase>
+                    <!-- 打包次数 -->
+                    <goals>
+                        <goal>single</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+```
+
+2、在pom.xml同目录下新建`assembly/assembly.xml`文件：
+
+```xml
+<assembly>
+    <id>bin</id>
+    <formats>
+        <format>zip</format>
+    </formats>
+
+    <dependencySets>
+        <dependencySet>
+            <!--不使用项目的artifact，第三方jar不要解压，打包进zip文件的lib目录-->
+            <useProjectArtifact>false</useProjectArtifact>
+            <outputDirectory>lib</outputDirectory>
+            <unpack>false</unpack>
+        </dependencySet>
+    </dependencySets>
+
+    <fileSets>
+        <!-- 把项目脚本文件，打包进zip文件的根目录 -->
+        <fileSet>
+            <directory>${project.basedir}/assembly/bin</directory>
+            <outputDirectory>bin</outputDirectory>
+            <includes>
+                <include>*.sh</include>
+            </includes>
+        </fileSet>
+
+        <!-- 把项目脚本文件，打包进zip文件的根目录 -->
+        <fileSet>
+            <directory>${project.basedir}/assembly/logs</directory>
+            <outputDirectory>logs</outputDirectory>
+            <!--<includes>-->
+            <!--<include>*.log</include>-->
+            <!--</includes>-->
+        </fileSet>
+
+        <!-- 把配置文件，打包进zip文件的config目录 -->
+        <fileSet>
+            <directory>${project.basedir}/src/main/resources</directory>
+            <outputDirectory>config</outputDirectory>
+            <!-- 包含以下文件的资源 -->
+            <includes>
+                <include>**/*</include>
+                <include>*.xml</include>
+                <include>*.properties</include>
+                <include>*.yml</include>
+                <include>*.key</include>
+            </includes>
+        </fileSet>
+
+        <!-- 把jar，打进zip文件的根目录 -->
+        <fileSet>
+            <directory>${project.build.directory}</directory>
+            <outputDirectory>lib</outputDirectory>
+            <includes>
+                <include>*.jar.original</include>
+            </includes>
+        </fileSet>
+    </fileSets>
+</assembly>
+```
+
+3、此时通过`mvn package`即可得到小胖jar（SpringBoot称呼的fat-jar），它可通过`java -jar xxx.jar`命令直接执行。
+
+4、吐槽：Java这依赖管理有点呆，评价是不如go module。
+
 ## IDEA安装激活和配置
 
 安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020 未验证过，不知是否有效
