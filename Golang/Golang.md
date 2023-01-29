@@ -1954,7 +1954,211 @@ func ResponseXls(c *gin.Context, content io.ReadSeeker, fileTag string) {
 }
 ```
 
+## 文件监控
 
+典型应用：配置文件热加载
+
+开源库：https://github.com/fsnotify/fsnotify
+
+## 脚本工具
+
+开源库：https://github.com/urfave/cli
+
+文档：https://cli.urfave.org/
+
+结合shell脚本定时执行捏。
+
+为啥以脚本而不是定时任务的方式执行呢？对于执行间隔长，执行时间短的任务，没必要用应用去跑定时任务，应用会一直和Redis、数据库建立连接，用脚本则仅在使用时建连接。
+
+脚本需要应用启动足够快，go编译为二进制文件后启动很快，相比于Java在启动上有天然优势。
+
+### 标志
+
+```go
+func main() {
+  app := &cli.App{
+    Name:  "boom",
+    Usage: "make an explosive entrance",
+    // 选项
+    Flags: []cli.Flag{
+      &cli.StringFlag{
+        Name:     "fzk",         // 标志名, --fzk
+        Aliases:  []string{"f"}, // 别名, -f
+        Value:    "nb",          // 默认值
+        Usage:    "echo fzk name",
+        Category: "group1", // 分组
+      },
+      &cli.DurationFlag{Name: "duration"},
+      &cli.TimestampFlag{Name: "time", Layout: "2006-01-02 15:04:05"},
+    },
+    // 默认函数
+    Action: func(ctx *cli.Context) error {
+      println(ctx.String("fzk")) // 获取 --fzk的值
+      println(ctx.Duration("duration"))
+      println(ctx.Timestamp("time"))
+      return nil
+    },
+  }
+
+  // 运行
+  if err := app.Run(os.Args); err != nil {
+    log.Fatal(err)
+  }
+}
+```
+
+使用方式：
+
+```shell
+cli % go run main.go --fzk 666 
+666
+0
+0x0
+
+cli % go run main.go --time "2023-01-29 11:33:45" --duration 1s
+nb
+1000000000
+0x1400000c138
+```
+
+标志常见的有：
+
+- BoolFlag：出现即代表true，默认false，无须指定值
+- StringFlag
+- IntFlag
+- FloatFlag
+- DurationFlag：时间标志
+- TimestampFlag：时间搓标志
+
+### 组合短标志
+
+在Linux中解压文件会用到：`tar -zxvf xx.tar.gz`，这种就是组合短标志。
+
+必须有任意数量的bool标志以及最多一个非bool标志。
+
+```go
+func main() {
+  app := &cli.App{
+    Name:                   "demo",
+    Usage:                  "cli demo",
+    UseShortOptionHandling: true, // 开启组合标志
+    // 命令
+    Commands: []*cli.Command{
+      {
+        Name:    "hello",       // 命令名
+        Aliases: []string{"h"}, // 别名
+        Flags: []cli.Flag{
+          &cli.BoolFlag{Name: "cc", Aliases: []string{"c"}},
+          &cli.BoolFlag{Name: "dd", Aliases: []string{"d"}},
+          &cli.StringFlag{Name: "msg", Aliases: []string{"m"}},
+        }, // 命令也可以指定选项
+        Usage: "say hello world",
+        Action: func(ctx *cli.Context) error { // 主命令函数
+          fmt.Println("hello world")
+          if ctx.Bool("cc") && ctx.Bool("dd") {
+            fmt.Println("组合短标志")
+            println(ctx.String("msg"))
+          }
+          return nil
+        },
+      },
+    },
+  }
+
+  // 运行
+  if err := app.Run(os.Args); err != nil {
+    log.Fatal(err)
+  }
+}
+```
+
+使用示例：
+
+```
+cli % go run main.go hello -cd       
+hello world
+组合短标志
+
+cli % go run main.go hello -cdm "666"
+hello world
+组合短标志
+666
+```
+
+### 命令和子命令
+
+```go
+package main
+
+import (
+  "fmt"
+  "github.com/urfave/cli/v2"
+  "log"
+  "os"
+)
+
+func main() {
+  app := &cli.App{
+    Name:  "boom",
+    Usage: "make an explosive entrance",
+    // 命令
+    Commands: []*cli.Command{
+      {
+        Name:    "hello",       // 命令名
+        Aliases: []string{"h"}, // 别名
+        //Flags: nil, // 命令也可以指定标志
+        Usage:   "say hello world",
+        Action: func(ctx *cli.Context) error { // 主命令函数
+          fmt.Println("hello world")
+          return nil
+        },
+        // 子命令
+        Subcommands: []*cli.Command{
+          {
+            Name: "fzk",
+            Action: func(ctx *cli.Context) error {// 子命令函数
+              fmt.Println("hello fzk")
+              return nil
+            },
+          },
+        },
+      },
+    },
+  }
+
+  // 运行
+  if err := app.Run(os.Args); err != nil {
+    log.Fatal(err)
+  }
+}
+```
+
+使用案例：
+
+```
+cli % go run main.go hello
+hello world
+cli % go run main.go hello fzk
+hello fzk
+```
+
+查看帮助文档：
+
+```
+cli % go run main.go hello -h    
+NAME:
+   demo hello - say hello world
+
+USAGE:
+   demo hello command [command options] [arguments...]
+
+COMMANDS:
+   fzk      
+   help, h  Shows a list of commands or help for one command
+
+OPTIONS:
+   --help, -h  show help (default: false)
+```
 
 # Go与Java
 
