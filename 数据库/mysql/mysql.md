@@ -1095,17 +1095,46 @@ ALTER TABLE tbl_name TABLESPACE [=] tablespace_name;
 DROP TABLESPACE ts1;
 ```
 
+### undo表空间
 
+undo表空间包含undo log。
 
+MySQL会创建2个默认undo表空间，为回滚段提供位置，至少需要2个来支持undo表空间的自动截断。分别为：`undo_001`和`undo_002`，默认16MB。
 
+清除和截断：
 
+1. purge线程负责清空和截断undo表空间，默认purge线程每128次唤醒会查找并截断一次undo 表空间，由变量[innodb_purge_rseg_truncate_frequency](https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_purge_rseg_truncate_frequency) 控制。
 
+2. 超过变量[`innodb_max_undo_log_size`](https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_max_undo_log_size) 默认1GB的表空间被标记为截断，其中所有回滚段标记为非活跃状态，不再分配给新事务，仅仅允许当前事务使用。
+3. purge线程释放其中不再使用的undo log来清空回滚段；表空间中所有undo段都被释放后，将表空间截断为其初始大小。
+4. 回滚段激活，可重新分配。
 
+> 注意：截断某个undo表空间时，其中的回滚段停止使用，其它undo表空间的回滚段负载增加，可能会有性能下降，避免性能影响最简单方式是增加undo表空间数量。
 
+```sql
+-- 创建undo tablespace
+-- 最多支持127个undo tablespace
+CREATE UNDO TABLESPACE tablespace_name ADD DATAFILE 'file_name.ibu';
 
+-- 删除
+-- 需要先停用再删除
+ALTER UNDO TABLESPACE tablespace_name SET INACTIVE;
+DROP UNDO TABLESPACE tablespace_name;
 
+-- 以下状态变量允许跟踪
+-- 撤消表空间的总数、隐式（InnoDB创建的）撤消表空间、显式（用户创建的）撤消表空间和活动撤消表空间的数量：
+mysql> SHOW STATUS LIKE 'Innodb_undo_tablespaces%';
++----------------------------------+-------+
+| Variable_name                    | Value |
++----------------------------------+-------+
+| Innodb_undo_tablespaces_total    | 2     |
+| Innodb_undo_tablespaces_implicit | 2     |
+| Innodb_undo_tablespaces_explicit | 0     |
+| Innodb_undo_tablespaces_active   | 2     |
++----------------------------------+-------+
+```
 
-
+### 临时表空间
 
 
 

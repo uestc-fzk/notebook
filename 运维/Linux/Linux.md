@@ -2758,3 +2758,53 @@ pid-file=/var/run/mysqld/mysqld.pid
 ```
 
 可以去参考手册找找或者百度找找如何改配置文件。目前暂时使用默认的即可。
+
+# SSH远程登录
+
+https://www.jianshu.com/p/62274f4531a5
+
+ssh远程免密登录：
+
+1、在本机`用户/.ssh`目录下生成秘钥对` ssh-keygen -t rsa`
+
+注意：第一个输入会让你输入秘钥存储文件名，建议自定义。如fzk-computer
+
+2、将生成的公钥文件fzk-computer.pub上传到服务器的`用户/.ssh目录`，将公钥内容拼接到对应用户目录下的 *authorized_keys* 文件内
+
+```
+# 文件可能不存在，可以手动创建
+cat id_rsa.pub >> ~/.ssh/authorized_keys
+```
+
+3、设置文件权限：Linux强制要求.ssh目录权限为700，authorized_keys文件权限为600
+
+4、此时已经可以免密登录：-i指定私钥文件，这样就能免密登录了
+
+```shell
+PS C:\Users\zhike.feng\.ssh> ssh root@124.223.192.8 -i  C:\Users\zhike.feng\.ssh\fzk-computer 
+
+[root@k8s-master ~]#
+```
+
+5、上面这种每次指定私钥文件还是有点麻烦，可以在ssh配置文件中指定：
+
+在本机`用户/.ssh/config`文件中指定私钥地址：
+
+```shell
+# Read more about SSH config files: https://linux.die.net/man/5/ssh_config
+Host fzk-tx.top # 主机别名，使用该别名可直接登录
+    HostName 124.223.192.8 # 服务器地址
+    User root # 用户
+    IdentityFile C:\Users\zhike.feng\.ssh\fzk-computer # 私钥文件
+```
+
+此时登录方式为：
+
+```shell
+PS C:\Users\zhike.feng\.ssh> ssh fzk-tx.top
+
+[root@k8s-master ~]#
+```
+
+
+
