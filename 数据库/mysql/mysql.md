@@ -1136,6 +1136,140 @@ mysql> SHOW STATUS LIKE 'Innodb_undo_tablespaces%';
 
 ### 临时表空间
 
+分为session临时表空间和全局临时表空间。
+
+1、会话临时表空间：一个会话最多分配2个表空间：
+
+- 用于用户创建的临时表
+- 用于优化器创建的内部临时表
+
+2、全局临时表空间：存储回滚段，用于记录用户创建的临时表更改undo log。
+
+
+
+## redo log
+
+redo log是基于磁盘的数据结构，在崩溃后恢复期间使用redo log来纠正不完整的事务写入数据。
+
+redo log在磁盘上由redo log文件进行物理记录。
+
+随着数据修改发生，redo log文件追加数据并增加`LSN(log sequence number，日志序列号)`，LSN是8B无符号整数。
+
+MySQL8.0.30以后redo log文件默认存储于`数据目录/#innodb_redo`目录中，innodb维护32个redo log文件，每个文件大小为`innodb_redo_log_capacity/32`：
+
+```shell
+[root@k8s-master mysql]# ls \#innodb_redo/
+#ib_redo10_tmp  #ib_redo18_tmp  #ib_redo26_tmp  #ib_redo34_tmp
+#ib_redo11_tmp  #ib_redo19_tmp  #ib_redo27_tmp  #ib_redo35_tmp
+#ib_redo12_tmp  #ib_redo20_tmp  #ib_redo28_tmp  #ib_redo36_tmp
+#ib_redo13_tmp  #ib_redo21_tmp  #ib_redo29_tmp  #ib_redo37_tmp
+#ib_redo14_tmp  #ib_redo22_tmp  #ib_redo30_tmp  #ib_redo38_tmp
+#ib_redo15_tmp  #ib_redo23_tmp  #ib_redo31_tmp  #ib_redo7
+#ib_redo16_tmp  #ib_redo24_tmp  #ib_redo32_tmp  #ib_redo8_tmp
+#ib_redo17_tmp  #ib_redo25_tmp  #ib_redo33_tmp  #ib_redo9_tmp
+```
+
+无后缀的是正在使用的重做文件，有后缀的是备用重做文件，如上就`#ib_redo7`文件正在使用。
+
+每个正在使用的重做文件都和特定范围的LSN关联：如下查询重做日志文件的START_LSN和END_LSN
+
+```shell
+mysql> SELECT FILE_NAME, START_LSN, END_LSN FROM performance_schema.innodb_redo_log_files;
++--------------------------+-----------+----------+
+| FILE_NAME                | START_LSN | END_LSN  |
++--------------------------+-----------+----------+
+| ./#innodb_redo/#ib_redo7 |  22931456 | 26206208 |
++--------------------------+-----------+----------+
+```
+
+MySQL8.0.30以前重做日志文件默认存储于数据目录下，且仅有2个文件分别为：`ib_logfile0`和 `ib_logfile1`，并循环写入这些文件。
+
+## undo log
+
+undo log记录如何撤销事务对数据的更改。undo log存储于undo段，而undo段位于undo表空间或全局临时表空间。
+
+存储于全局临时表空间的undo log记录用户创建的临时表更改，这些undo log不会有redo log，因为它们与崩溃恢复无关。
+
+
+
+## 锁与事务
+
+### 锁
+
+1、锁范围分类：
+
+- 行锁
+  - 共享锁S
+  - 排它锁X
+- 表锁
+
+`InnoDB`支持*多粒度锁*，允许行锁和表锁并存。
+
+2、意向锁：表锁
+
+- 意向共享锁IS：表示事务打算在表中各个行设置共享锁
+- 意向排它锁IX：表示事务打算在表中各个行设置排它锁
+
+3、record lock：索引记录锁，锁住某个索引记录
+
+4、gap lock：间隙锁，在索引记录之间的间隙上的锁，或者是在第一条索引记录之前或最后一条索引记录之后的间隙上的锁。
+
+例如，`SELECT c1 FROM t WHERE c1 BETWEEN 10 and 20 FOR UPDATE;`阻止其他事务将值插入`15`到列 `t.c1`中，无论该列中是否已经存在任何此类值，因为范围内所有现有值之间的间隙都已锁定。
+
+间隙锁`InnoDB`是“纯粹抑制性的”，这意味着它们的唯一目的是防止其他事务插入间隙。
+
+间隙锁可以共存。一个事务获取的间隙锁不会阻止另一个事务在同一间隙上获取间隙锁。
+
+5、Next-Key lock：是索引记录上的记录锁和索引记录之前的间隙上的间隙锁的组合。
+
+假设一个索引包含值 10、11、13 和 20。该索引可能的 next-key 锁涵盖以下区间，其中圆括号表示排除区间端点，方括号表示包含端点：
+
+```
+(negative infinity, 10]
+(10, 11]
+(11, 13]
+(13, 20]
+(20, positive infinity)
+```
+
+对于最后一个时间间隔，next-key 锁锁定索引中最大值上方的间隙以及 值高于索引中实际值的“ supremum ”伪记录。supremum 不是真正的索引记录，因此，实际上，这个下一个键锁只锁定最大索引值之后的间隙。
+
+默认情况下，`InnoDB`在 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)事务隔离级别运行。在这种情况下，`InnoDB`使用下一个键锁进行搜索和索引扫描，以防止出现幻读。
+
+6、AUTO-INC lock：特殊表级锁，由插入到具有 `AUTO_INCREMENT`列的表中的事务获取。
+
+### 事务隔离级别
+
+`InnoDB`提供 SQL:1992 标准描述的所有四种事务隔离级别： [`READ UNCOMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-uncommitted)、 [`READ COMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-committed)、 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)和 [`SERIALIZABLE`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_serializable)。默认隔离级别 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)。
+
+- REPEATABLE READ
+  快照读：读取undo log快照
+  锁定读：如SELECT ... FOR UPDATE 或SELECT ... FOR SHARE，以及update和delete语句，锁定取决于语句是使用具有唯一搜索条件的唯一索引，还是范围类型的搜索条件：
+  - 唯一索引条件：仅锁定索引记录，不锁定间隙
+  - 其它或扫描索引范围：使用间隙锁或next-key lock
+
+- SERIALIZABLE
+  和REPEATABLE READ类似，不过将每个SELECT语句转换为SELECT...FOR SHARE。
+  可序列化级别一般用于XA事务。
+
+### 一致性非锁定读和锁定读
+
+1、锁定读取：
+
+- SELECT...FOR SHARE：在读取的任何行上设置共享锁，SELECT...LOCK IN SAHRE MODE同义
+- SELECT...FOR UPDATE：对于搜索遇到的索引记录，锁定行和任何关联的索引条目，就像您为这些行发出 `UPDATE`语句一样。
+
+2、NOWAIT：
+
+锁定读取需要等待行锁，如果不想等待可以使用NOWAIT：出现锁冲突会失败并报错
+
+```sql
+mysql> SELECT * FROM t WHERE i = 2 FOR UPDATE NOWAIT;
+ERROR 3572 (HY000): Do not wait for lock.
+```
+
+
+
 
 
 
