@@ -669,6 +669,34 @@ SELECT * INTO OUTFILE `file_name` FROM tbl_name;
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/replication-solutions-backups.html
 
+## 恢复
+
+### 增量恢复
+
+https://dev.mysql.com/doc/refman/8.0/en/point-in-time-recovery.html
+
+### 崩溃恢复
+
+MySQL意外退出后，直接重启即可自动恢复：https://dev.mysql.com/doc/refman/8.0/en/innodb-recovery.html#innodb-recovery-tablespace-discovery
+
+1、表空间发现
+
+2、redo log应用
+
+3、回滚未完成的事务
+
+4、change buffer合并
+
+5、purge
+
+
+
+
+
+
+
+
+
 # 优化
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/statement-optimization.html
@@ -1058,6 +1086,104 @@ Innodb是高可靠性和高性能的通用存储引擎。默认都应该使用In
 - 若该新页面是由于用户读取需要而产生，会立刻发生第1次访问，这会使其成为年轻页面移动到新子列表头部。
 - 若该页面由预读产生，很可能在该页面被驱逐之前都不会发生访问。
 
+#### 预读
+
+预读请求是IO请求，用于异步读取缓冲池中多个预期需要的页面。Innodb有2种预读算法：线性预读和随机预读。
+
+1、**线性预读**是根据缓冲池中顺序访问的页面来预测可能需要哪些页面。
+
+参数`innodb_read_ahead_threshold`是顺序页面访问次数从而触发预读的阈值。如果从一个区段中顺序读取的页面数大于或等于该阈值，则启动整个后续区段的预读操作。
+
+2、**随机预读**：如果在缓冲池中发现来自同一区段的 13 个连续页面，则 `InnoDB`异步发出请求以预取该区段的剩余页面。
+
+要启动随机预读，配置参数`innodb_random_read_ahead`为on。
+
+#### 刷新
+
+Innodb后台任务包括从缓冲池刷新脏页。
+
+1、**水位**是控制缓冲池中脏页百分比。
+
+- `innodb_max_dirty_pages_pct_lwn`：低水位，默认缓冲池10%
+- `innodb_max_dirty_pages_pct`：高水位，默认缓冲池90%
+
+当脏页达到低水位时，将启动缓冲池刷新，主要是防止其达到高水位。
+
+- `innodb_flush_neighbors`：定义从缓冲池中刷新页面是否也刷新相同范围内其它脏页。
+  - 默认0，不刷新相邻脏页
+  - 1，刷新同一个范围连续脏页
+  - 2，刷新相同范围内脏页
+  - 存储于磁盘时，刷新相邻页面可减少io寻道时间。但是对于SSD数据，寻道时间不重要，可禁用此设置以分散写入操作。
+
+#### 保存和恢复缓冲池状态
+
+为了减少服务重启后的预热时间，服务器关闭时会将缓存池中一定比例的页面保存在`innodb_buffer_pool_filename`指定文件。启动时从该文件恢复缓冲池，避免冷启动。
+
+`innodb_buffer_pool_dump_pct`配置缓冲池页面转储百分比，默认25.
+
+在线保存和恢复缓冲池状态：
+
+```sql
+-- 运行时保存缓冲池状态
+SET GLOBAL innodb_buffer_pool_dump_now=ON;
+-- 运行时恢复缓冲池状态
+SET GLOBAL innodb_buffer_pool_load_now=ON;
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ### change buffer
 
 对表进行INSERT/UPDATE/DELETE等DML操作时，二级索引通过需要大量I/O才能保持最新。当相关页面不在缓冲池时，change buffer缓存对二级索引条目的更改，避免立刻I/O，当页面加载到缓冲池时，将更改合并，更新后的页面稍后刷新到磁盘。
@@ -1190,6 +1316,16 @@ undo log记录如何撤销事务对数据的更改。undo log存储于undo段，
 
 存储于全局临时表空间的undo log记录用户创建的临时表更改，这些undo log不会有redo log，因为它们与崩溃恢复无关。
 
+使用SQL删除语句时，不会立刻进行物理删除，而是将其写入undo log，只有丢弃undo log才算物理删除，此删除操作仅在多版本并发控制 (MVCC) 或回滚不再需要该行之后发生，称为清除purge。
+
+purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
+
+清除系统还负责截断撤消表空间。您可以配置该 [`innodb_purge_rseg_truncate_frequency`](https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_purge_rseg_truncate_frequency) 变量来控制清除系统查找要截断的撤消表空间的频率。有关详细信息，请参阅 [截断撤消表空间](https://dev.mysql.com/doc/refman/8.0/en/innodb-undo-tablespaces.html#truncate-undo-tablespace)。
+
+
+
+
+
 
 
 ## 锁与事务
@@ -1252,6 +1388,11 @@ undo log记录如何撤销事务对数据的更改。undo log存储于undo段，
   和REPEATABLE READ类似，不过将每个SELECT语句转换为SELECT...FOR SHARE。
   可序列化级别一般用于XA事务。
 
+可重复读级别如何防止幻读：
+
+- 一致性读：快照方式可实现避免幻读
+- 锁定读：Next-Key lock，避免其它事务插入数据
+
 ### 一致性非锁定读和锁定读
 
 1、锁定读取：
@@ -1270,9 +1411,142 @@ ERROR 3572 (HY000): Do not wait for lock.
 
 
 
+锁定读、update、delete语句通常对扫过的每个索引记录设置record lock，无论WHERE条件如何过滤。这些锁通常是Next-key lock。如果是二级索引，还会将其对应的聚集索引锁住。
 
+如果是全表扫描，将会锁住表中所有行，因此索引很重要！
 
+但是如果是唯一索引行，则可以仅锁住该索引记录。
 
+### 死锁
+
+可以启用`innodb_print_all_deadlocks`将所有死锁信息打印到mysql错误日志
+
+MySQL默认启用死锁检测，自动检测事务死锁并回滚1个或多个事务以打破死锁。Innodb尝试选择小事务回滚(事务大小由影响的行数决定)。
+
+如果事务因死锁而失败，请始终准备好重新发出事务。死锁并不危险。再试一次。
+
+保持事务小且持续时间短，以使其不易发生冲突。
+
+建立良好的索引，查询扫描更少的索引记录以减少锁定。
+
+## 优化器统计信息
+
+优化器会统计各个索引cardinality信息来判断各个索引的选择性，进而制定执行计划。
+
+`ANALYZE TABLE table_name`手动采样统计索引cardinality信息。
+
+`innodb_stats_persistent=on`默认开启持久化统计信息：会将优化器统计信息保存到磁盘，以便服务器重启后快速加载，其保存在`mysql.innodb_table_stats`和 `mysql.innodb_index_stats`表中。
+
+`innodb_stats_auto_recalc=on`变量默认开启，控制表中超过10%行发生更改时将自动计算统计信息。
+
+统计信息使用采样法，根据`innodb_stats_persistent_sample_pages`参数默认采样20个页面，预估索引的cardinality，该值越大越准确，但会导致ANALYZE分析运行缓慢。
+
+可以通过`SELECT * FROM mysql.innodb_index_stats`观察各个索引统计情况：
+
+| 列名               | 描述                                     |
+| :----------------- | :--------------------------------------- |
+| `database_name`    | 数据库名称                               |
+| `table_name`       | 表名、分区名或子分区名                   |
+| `index_name`       | 索引名称                                 |
+| `last_update`      | 指示上次更新行的时间戳                   |
+| `stat_name`        | 统计的名称，其值在 `stat_value`列中报告  |
+| `stat_value`       | `stat_name` 在列中命名的统计值           |
+| `sample_size`      | `stat_value`为列中提供的估计值抽样的页数 |
+| `stat_description` | `stat_name`列中命名的统计信息的说明      |
+
+stat_name:
+
+- size：stat_value为索引中总页数
+- n_leaf_pages：stat_value为索引中叶子页数量
+- n_diff_pfxNN：若为n_diff_pfx01，则stat_value为多列索引第一列不同值数量，若为n_diff_pfx02则为前2列不同值数量。
+
+```sql
+-- 如以下表
+CREATE TABLE t1 (
+  a INT, b INT, c INT, d INT, e INT, f INT,
+  PRIMARY KEY (a, b), KEY i1 (c, d), UNIQUE KEY i2uniq (e, f)
+) ENGINE=INNODB;
+
+-- 插入一些数据后：
+mysql> SELECT index_name, stat_name, stat_value, stat_description
+       FROM mysql.innodb_index_stats
+       WHERE table_name like 't1' AND stat_name LIKE 'n_diff%';
++------------+--------------+------------+------------------+
+| index_name | stat_name    | stat_value | stat_description |
++------------+--------------+------------+------------------+
+| PRIMARY    | n_diff_pfx01 |          1 | a                |
+| PRIMARY    | n_diff_pfx02 |          5 | a,b              |
+| i1         | n_diff_pfx01 |          1 | c                |
+| i1         | n_diff_pfx02 |          2 | c,d              |
+| i1         | n_diff_pfx03 |          2 | c,d,a            |
+| i1         | n_diff_pfx04 |          5 | c,d,a,b          |
+| i2uniq     | n_diff_pfx01 |          2 | e                |
+| i2uniq     | n_diff_pfx02 |          5 | e,f              |
++------------+--------------+------------+------------------+
+```
+
+> 注意：非唯一二级索引，Innodb会将主键列添加到其索引末尾作为索引一部分！
+
+可借助该表统计索引大小：
+
+```sql
+mysql> SELECT SUM(stat_value) pages, index_name,
+       SUM(stat_value)*@@innodb_page_size size
+       FROM mysql.innodb_index_stats WHERE table_name='t1'
+       AND stat_name = 'size' GROUP BY index_name;
++-------+------------+-------+
+| pages | index_name | size  |
++-------+------------+-------+
+|     1 | PRIMARY    | 16384 |
+|     1 | i1         | 16384 |
+|     1 | i2uniq     | 16384 |
++-------+------------+-------+
+```
+
+对于分区表，可以借助WHERE LIKE模糊查询统计其大小。
+
+## 行格式
+
+表的行格式决定行的物理存储方式，会影响SQL性能。
+
+表文件被分成页，页组织为B+树数据结构，一般列都是存储于B+树页面，可变长列太长时无法放入页面时，存储于称为**溢出页面**（单独分配）的单链表中，此类列称为页外列。每个这样的列都有自己的一个或多个溢出页列表。
+
+Innodb引擎支持4种行格式：
+
+| 行格式       | 紧凑的存储特性 | 增强的可变长度列存储 | 大型索引键前缀支持 | 压缩支持 | 支持的表空间类型         |
+| :----------- | :------------- | :------------------- | :----------------- | :------- | :----------------------- |
+| `REDUNDANT`  | 不             | 不                   | 不                 | 不       | 系统，每个表的文件，一般 |
+| `COMPACT`    | 是的           | 不                   | 不                 | 不       | 系统，每个表的文件，一般 |
+| `DYNAMIC`    | 是的           | 是的                 | 是的               | 不       | 系统，每个表的文件，一般 |
+| `COMPRESSED` | 是的           | 是的                 | 是的               | 是的     | 文件每表，一般           |
+
+默认是DYNAMIC。
+
+### Compact
+
+COMPACT行格式对于可变长列如VARCHAR/VARBINARY/BLOB/TEXT等，在其长度超过768B时，将其前768B存储于B+树节点页，其余部分存储于溢出页。
+
+超过768B的固定长度字段，如CHAR(255)在utf8mb4字符集情况下，会编码为可变长字段。
+
+### Dynamic
+
+DYNAMIC行格式与COMPACT基本相同，但增加了对可变长列的增强存储功能，并支持大索引键前缀。
+
+对于VARCHAR/VARBINARY/BLOB/TEXT等可变长列，聚族索引行记录仅包含指向溢出页的20B指针，其数据存储于溢出页面。
+
+超过768B的固定长度字段，如CHAR(255)在utf8mb4字符集情况下，会编码为可变长字段。
+
+列是否存储在页外取决于页大小和行的总大小。当一行太长时，选择最长的列进行页外存储，直到聚集索引记录适合[B 树](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_b_tree)页。不超过40B的TEXT/BLOB列按行存储。这样避免了长列的大量数据使得节点页存储行数过少的问题。
+
+在Innodb中，最大行长度不能超过页面一半，默认16KB页面，则最大行长度8KB。
+
+## 限制
+
+- 表最多有1017列
+
+- 表最多有64个二级索引
+- 多列索引最多16列
+- 行必须小于页的一半
 
 
 
