@@ -1548,6 +1548,170 @@ DYNAMIC行格式与COMPACT基本相同，但增加了对可变长列的增强存
 - 多列索引最多16列
 - 行必须小于页的一半
 
+# 复制
+
+一主多从，默认异步复制，支持半同步复制和延迟复制。MySQL NDB Cluster是同步复制。
+
+半同步复制：直到至少一个副本确认它已经接收并记录了事务的事件，才能事务提交。
+
+延迟复制：副本故意落后主节点至少指定的时间。
+
+## 基于binlog复制
+
+主节点将更新事件写入binlog，副本读取主节点binlog，并执行其中事件。
+
+每个副本会保存各自的binlog坐标：从master中读取和处理的文件名和偏移量。
+
+> 注意：**每个节点必须配置不同的唯一`server_id`**（默认1），主节点必须开启binlog（默认开启）。
+
+以下步骤为正在运行的MySQL实例添加副本：
+
+1、新建客户端连接到master，刷新master的所有表：`FLUSH TABLES WITH READ LOCK;`
+注意：不要关闭客户端，此时它会一直持有读锁，从而避免新事务commit成功，期间数据库无法修改。
+
+2、再新建会话：确定当前binlog文件名和坐标：
+
+```sql
+mysql> SHOW MASTER STATUS;
++---------------+----------+--------------+------------------+-------------------+
+| File          | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++---------------+----------+--------------+------------------+-------------------+
+| binlog.000003 |   372918 |              |                  |                   |
++---------------+----------+--------------+------------------+-------------------+
+```
+
+记下这些值，它们将被配置在副本中。
+
+3、如果master包含有数据，则必须先将master数据复制到每个副本中，可以使用mysqldump命令。
+
+```sql
+$> mysqldump --all-databases --master-data > dbdump.db
+```
+
+4、在之前持有读锁的客户端连接上释放读锁：`UNLOCK TABLES;`或直接关闭客户端。
+
+5、启动各个副本，将数据拷贝到副本中：
+
+```sql
+$> mysql < dbdump.db
+```
+
+6、设置副本与master通信：
+
+```sql
+# 旧版本
+mysql> CHANGE MASTER TO
+    ->     MASTER_HOST='source_host_name',
+    ->     MASTER_USER='replication_user_name',
+    ->     MASTER_PASSWORD='replication_password',
+    ->     MASTER_LOG_FILE='recorded_log_file_name',
+    ->     MASTER_LOG_POS=recorded_log_position;
+
+# 8.0.23以后版本
+mysql> CHANGE REPLICATION SOURCE TO
+    ->     SOURCE_HOST='source_host_name',
+    ->     SOURCE_USER='replication_user_name',
+    ->     SOURCE_PASSWORD='replication_password',
+    ->     SOURCE_LOG_FILE='recorded_log_file_name',
+    ->     SOURCE_LOG_POS=recorded_log_position;
+        
+# 旧版本    
+START SLAVE;
+# 8.0.23以后版本   
+START REPLICA;
+```
+
+> 注意：MySQL8默认以`caching_sha_password`插件进行身份验证，必须在CHANGE REPLICATION SOURCE TO | CHANGE MASTER TO语句中指定SOURCE_PUBLIC_KEY_PATH | MASTER_PUBLIC_6EY_PATH或GET_SOURCE_PUBLIC_KEY | GET_MASTER_PPUBLIC_KEY选项，以启用基于RSA密钥对的密码交换。
+
+还可以给出以下选项：
+
+```sql
+report_host='xxx' -- 副本报告给master的host
+report_port=3306 -- 副本报告给master的端口
+report_user='xxx' -- 副本报告给master的用户
+report_password='xxx' -- 副本报告给master的密码
+```
+
+7、可用`SHOW REPLICA STATUS`查询当前主从复制状态信息。MySQL8.0.22以前为`SHOW SLAVE STATUS`。
+
+8、副本停止复制：`STOP REPLICA`，MySQL8.0.22以前为`STOP SLAVE`。
+
+当复制停止时，复制 I/O（接收方）线程停止从源二进制日志中读取事件并将它们写入中继日志，SQL 线程停止从中继日志中读取事件并执行它们。可以通过指定线程类型单独暂停 I/O（接收方）或 SQL（应用程序）线程：
+
+```sql
+mysql> STOP SLAVE IO_THREAD;
+mysql> STOP SLAVE SQL_THREAD;
+Or from MySQL 8.0.22:
+mysql> STOP REPLICA IO_THREAD;
+mysql> STOP REPLICA SQL_THREAD;
+```
+
+仅停止IO接受线程时，SQL线程会处理执行中继日志中事件直至结束，可用于消耗积压事件，消耗完再重启IO接受线程。
+
+进停止SQL线程时，IO接受线程继续从master读事件，但不执行，可用于执行副本备份，备份完再重启SQL线程。
+
+
+
+## 基于GTID复制
+
+GTID是全局事务id，它可以识别跟踪每个事务。
+
+因为基于GTID的复制是完全基于事务的，所以很容易判断master和副本是否一致；只要在master上提交的所有事务也在副本上提交，就可以保证两者之间的一致性。
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
+
+## 多源复制
+
+副本从多个源节点(master)接收事务，副本为它应该从中接收事务的每个源创建一个复制通道。
+
+文档：https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html
+
+
+
+
+
+## 复制实现原理
+
+副本从master中拉取binlog数据，跟踪其数据库的更新操作。
+
+### 复制格式
+
+复制从binlog从读取事件，binlog格式有3种，由`binlog_format`选项决定：
+
+- STATEMENT：基于语句的binlog，记录将更新SQL记录到binlog。优点是写入日志文件数据少，但不是所有SQL都能直接记录，对于不确定函数如UUID()/USER()等不安全。
+- ROW：默认，基于行的binlog，记录各个表行更改方式。能记录所有修改，但是需要记录的数据较多。如UPDATE语句可能更改了很多行记录，在基于语句记录的binlog中仅记录该SQL语句，而在基于行的binlog就需要记录非常多的修改数据。
+- MIXED：混合纪录格式，对于确定性SQL则以语句格式记录，不确定性SQL则以行格式记录。
+
+### 复制线程
+
+MySQL 复制功能是使用三个主线程实现的，一个在master服务器上，两个在副本服务器上：
+
+- binlog转储线程：当副本连接时，master创建线程将binlog内容发送到副本，此线程为binlog dump线程，它会获取binlog的锁。
+- 复制I/O接收线程：副本执行`START REPLICA`命令时会创建IO接收线程，它会连接到master，读取master的binlog dump线程发送的更新事件，并将其赋值到中继日志文件。
+- 复制SQL应用线程：副本创建一个SQL应用线程读取中继日志并执行其中事件。
+
+### 中继日志和元数据
+
+副本`中继日志relay log`由IO接收线程写入，并由IO应用线程读取并执行。
+
+中继日志由一组编号的文件组成，其中包含描述数据库更改的事件，以及一个包含所有已使用中继日志文件名称的索引文件。中继日志文件的默认位置是数据目录。
+
+中继日志文件与二进制日志文件具有相同的格式，可以使用[**mysqlbinlog**](https://dev.mysql.com/doc/refman/8.0/en/mysqlbinlog.html)读取。中继日志文件大小由`max_relay_log_size`指定。
+
+中继日志文件名：`${host_name}-relay-bin.nnnnnn`，如`fzk-relay-bin.000001`，中继日志索引文件：`${host_name}-relay-bin.index`
+
+> 注意：如果修改主机名，会导致复制出现错误Failed to open the relay log和Could not find target log during relay log initialization。
+>
+> 可以使用`relay_log`和`relay_log_index`明确指定中继日志文件名。
+
+复制SQL应用线程在执行完中继文件所有事件且不再需要时会自动删除每个中继日志文件。
+
+
+
+副本的连接元数据写入`mysql.slave_master_info`表。*连接元数据存储库*包含复制接收器线程连接到复制源服务器并从源的二进制日志检索事务所需的信息。
+
+应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
+
 
 
 # 单机运行多MySQL实例
