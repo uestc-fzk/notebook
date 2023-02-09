@@ -5334,3 +5334,512 @@ Java中SPI机制使用的是`ServiceLoader`，而SpringBoot借用SPI思想实现
 > 两者区别：
 >
 > 文件路径不同，spring配置放在 `META-INF/spring.factories`中，JavaSPI的配置文件放在`MeTA-INF/services/接口全类名`文件中。
+
+# log
+
+jdk内置的java.util.logging包有点呆。
+
+所以自己写了一个简单的基于文件大小进行切割的日志工具。
+
+目前有5个类：
+
+## ConsoleColors染色
+
+1、ConsoleColors.java：这个类目前只能给控制台染色，而System.err居然只能在IDEA中显示红色，在命令行中显示还是黑色?因此还是得用到这个染色包
+
+```java
+/**
+ * 控制台彩色文本
+ * 注意改色后必须调回正常颜色哦!
+ * System.out.println(ConsoleColors.RED + "RED COLORED" + ConsoleColors.RESET + " NORMAL");
+ * System.out.println(ConsoleColors.BLUE+"hhh"+ConsoleColors.RESET); // 改为蓝色，后续文本调回正常颜色
+ *
+ * @author fzk
+ * @datetime 2023-02-09 23:50:12
+ */
+public class ConsoleColors {
+
+    // Reset
+
+    public static final String RESET = "\033[0m";  // Text Reset
+
+    // Regular Colors
+
+    public static final String BLACK = "\033[0;30m";   // BLACK
+
+    public static final String RED = "\033[0;31m";     // RED
+
+    public static final String GREEN = "\033[0;32m";   // GREEN
+
+    public static final String YELLOW = "\033[0;33m";  // YELLOW
+
+    public static final String BLUE = "\033[0;34m";    // BLUE
+
+    public static final String PURPLE = "\033[0;35m";  // PURPLE
+
+    public static final String CYAN = "\033[0;36m";    // CYAN
+
+    public static final String WHITE = "\033[0;37m";   // WHITE
+
+    // Bold
+
+    public static final String BLACK_BOLD = "\033[1;30m";  // BLACK
+
+    public static final String RED_BOLD = "\033[1;31m";    // RED
+
+    public static final String GREEN_BOLD = "\033[1;32m";  // GREEN
+
+    public static final String YELLOW_BOLD = "\033[1;33m"; // YELLOW
+
+    public static final String BLUE_BOLD = "\033[1;34m";   // BLUE
+
+    public static final String PURPLE_BOLD = "\033[1;35m"; // PURPLE
+
+    public static final String CYAN_BOLD = "\033[1;36m";   // CYAN
+
+    public static final String WHITE_BOLD = "\033[1;37m";  // WHITE
+
+    // Underline
+
+    public static final String BLACK_UNDERLINED = "\033[4;30m";  // BLACK
+
+    public static final String RED_UNDERLINED = "\033[4;31m";    // RED
+
+    public static final String GREEN_UNDERLINED = "\033[4;32m";  // GREEN
+
+    public static final String YELLOW_UNDERLINED = "\033[4;33m"; // YELLOW
+
+    public static final String BLUE_UNDERLINED = "\033[4;34m";   // BLUE
+
+    public static final String PURPLE_UNDERLINED = "\033[4;35m"; // PURPLE
+
+    public static final String CYAN_UNDERLINED = "\033[4;36m";   // CYAN
+
+    public static final String WHITE_UNDERLINED = "\033[4;37m";  // WHITE
+
+    // Background
+
+    public static final String BLACK_BACKGROUND = "\033[40m";  // BLACK
+
+    public static final String RED_BACKGROUND = "\033[41m";    // RED
+
+    public static final String GREEN_BACKGROUND = "\033[42m";  // GREEN
+
+    public static final String YELLOW_BACKGROUND = "\033[43m"; // YELLOW
+
+    public static final String BLUE_BACKGROUND = "\033[44m";   // BLUE
+
+    public static final String PURPLE_BACKGROUND = "\033[45m"; // PURPLE
+
+    public static final String CYAN_BACKGROUND = "\033[46m";   // CYAN
+
+    public static final String WHITE_BACKGROUND = "\033[47m";  // WHITE
+
+    // High Intensity
+
+    public static final String BLACK_BRIGHT = "\033[0;90m";  // BLACK
+
+    public static final String RED_BRIGHT = "\033[0;91m";    // RED
+
+    public static final String GREEN_BRIGHT = "\033[0;92m";  // GREEN
+
+    public static final String YELLOW_BRIGHT = "\033[0;93m"; // YELLOW
+
+    public static final String BLUE_BRIGHT = "\033[0;94m";   // BLUE
+
+    public static final String PURPLE_BRIGHT = "\033[0;95m"; // PURPLE
+
+    public static final String CYAN_BRIGHT = "\033[0;96m";   // CYAN
+
+    public static final String WHITE_BRIGHT = "\033[0;97m";  // WHITE
+
+    // Bold High Intensity
+
+    public static final String BLACK_BOLD_BRIGHT = "\033[1;90m"; // BLACK
+
+    public static final String RED_BOLD_BRIGHT = "\033[1;91m";   // RED
+
+    public static final String GREEN_BOLD_BRIGHT = "\033[1;92m"; // GREEN
+
+    public static final String YELLOW_BOLD_BRIGHT = "\033[1;93m";// YELLOW
+
+    public static final String BLUE_BOLD_BRIGHT = "\033[1;94m";  // BLUE
+
+    public static final String PURPLE_BOLD_BRIGHT = "\033[1;95m";// PURPLE
+
+    public static final String CYAN_BOLD_BRIGHT = "\033[1;96m";  // CYAN
+
+    public static final String WHITE_BOLD_BRIGHT = "\033[1;97m"; // WHITE
+
+    // High Intensity backgrounds
+
+    public static final String BLACK_BACKGROUND_BRIGHT = "\033[0;100m";// BLACK
+
+    public static final String RED_BACKGROUND_BRIGHT = "\033[0;101m";// RED
+
+    public static final String GREEN_BACKGROUND_BRIGHT = "\033[0;102m";// GREEN
+
+    public static final String YELLOW_BACKGROUND_BRIGHT = "\033[0;103m";// YELLOW
+
+    public static final String BLUE_BACKGROUND_BRIGHT = "\033[0;104m";// BLUE
+
+    public static final String PURPLE_BACKGROUND_BRIGHT = "\033[0;105m"; // PURPLE
+
+    public static final String CYAN_BACKGROUND_BRIGHT = "\033[0;106m";  // CYAN
+
+    public static final String WHITE_BACKGROUND_BRIGHT = "\033[0;107m";   // WHITE}
+}
+```
+
+## LogLevel
+
+2、LogLevel.java：定义了5个级别，并以int值迅速比较级别大小
+
+```java
+/**
+ * @author fzk
+ * @datetime 2023-02-09 11:46:54
+ */
+public final class LogLevel {
+    private final String name;
+    private final int value;
+
+    public int getValue() {
+        return this.value;
+    }
+
+    public String getName() {
+        return this.name;
+    }
+
+    public boolean higher(LogLevel level) {
+        return this.value > level.value;
+    }
+
+    public boolean lower(LogLevel level) {
+        return this.value < level.value;
+    }
+
+    public boolean equal(LogLevel level) {
+        return this.value == level.value;
+    }
+
+    private LogLevel(String name, int value) {
+        this.name = name;
+        this.value = value;
+    }
+
+    public static LogLevel getLevel(String name) {
+        String level = name.toUpperCase();
+        switch (level) {
+            case "FATAL":
+                return FATAL;
+            case "ERROR":
+                return ERROR;
+            case "WARNING":
+                return WARNING;
+            case "INFO":
+                return INFO;
+            case "DEBUG":
+                return DEBUG;
+            case "FINE":
+                return FINE;
+            default:
+                throw new RuntimeException("can not find the log level of: " + name);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return this.name;
+    }
+
+    public static final LogLevel FATAL = new LogLevel("FATAL", 5);
+    public static final LogLevel ERROR = new LogLevel("ERROR", 4);
+    public static final LogLevel WARNING = new LogLevel("WARNING", 3);
+    public static final LogLevel INFO = new LogLevel("INFO", 2);
+    public static final LogLevel DEBUG = new LogLevel("DEBUG", 1);
+    public static final LogLevel FINE = new LogLevel("FINE", 0);
+}
+```
+
+## LogRecord
+
+3、LogRecord.java：单条日志封装
+
+```java
+/**
+ * @author fzk
+ * @datetime 2023-02-09 11:28:31
+ */
+public class LogRecord {
+    public final LogLevel level;
+    public final String msg;
+    public final LocalDateTime time;
+    public final StackTraceElement caller;
+
+    public LogRecord(LogLevel level, String msg, LocalDateTime time, int callDepth) {
+        this.level = level;
+        this.msg = msg;
+        this.time = time;
+        StackTraceElement[] stackTraces = Thread.currentThread().getStackTrace();
+        // 应该是3
+        this.caller = stackTraces[callDepth];
+    }
+}
+```
+
+这个StackTraceElement是方法栈追踪，上面代码中Thread.currentThread().getStackTrace()为第0级，该构造方法为第1级，以此类推，可以找到需要打印的调用方法。
+
+## LogConf
+
+4、LogConf：配置文件
+
+```java
+/**
+ * 日志配置类
+ *
+ * @author fzk
+ * @datetime 2023-02-09 21:35:30
+ */
+public class LogConf {
+    private String logPath;
+    private String logLevel;
+    private int logQueueSize;// 日志队列大小，建议1024
+    private long logFileSize;// 日志文件大小，建议16MB，即16*1024*1024
+
+
+    public String getLogPath() {
+        return logPath;
+    }
+
+    public void setLogPath(String logPath) {
+        this.logPath = logPath;
+    }
+
+    public String getLogLevel() {
+        return logLevel;
+    }
+
+    public void setLogLevel(String logLevel) {
+        this.logLevel = logLevel;
+    }
+
+    public int getLogQueueSize() {
+        return logQueueSize;
+    }
+
+    public void setLogQueueSize(int logQueueSize) {
+        this.logQueueSize = logQueueSize;
+    }
+
+    public long getLogFileSize() {
+        return logFileSize;
+    }
+
+    public void setLogFileSize(long logFileSize) {
+        this.logFileSize = logFileSize;
+    }
+
+    public static LogConf getDefaultLogConf() {
+        LogConf conf = new LogConf();
+        conf.setLogLevel("info");
+        conf.setLogPath("logs/info.log");
+        conf.setLogQueueSize(1024);
+        conf.setLogFileSize(16 * 1024 * 1024);// 16MB
+        return conf;
+    }
+}
+```
+
+## Logger
+
+5、Logger：日志打印类，实现组提交、日志切割
+
+```java
+/**
+ * 实现组提交的日志打印
+ *
+ * @author fzk
+ * @datetime 2023-02-09 12:02:06
+ */
+@SuppressWarnings("unused")
+public class Logger {
+    public static void fatal(String msg) {
+        addMsg(LogLevel.FATAL, msg);
+    }
+
+    public static void error(String msg) {
+        addMsg(LogLevel.ERROR, msg);
+    }
+
+    public static void warning(String msg) {
+        addMsg(LogLevel.WARNING, msg);
+    }
+
+    public static void info(String msg) {
+        addMsg(LogLevel.INFO, msg);
+    }
+
+    public static void debug(String msg) {
+        addMsg(LogLevel.DEBUG, msg);
+    }
+
+    public static void fine(String msg) {
+        addMsg(LogLevel.FINE, msg);
+    }
+
+    private static void addMsg(LogLevel level, String msg) {
+        // 低于全局日志级别的日志忽略
+        if (level.lower(globalLevel)) return;
+        LogRecord logRecord = new LogRecord(level, msg, LocalDateTime.now(), 4);
+        try {
+            lock.lockInterruptibly();
+            try {
+                // 写满了，等待, 必须用while，会有很多情况下会唤醒
+                while (queueWrite.size() >= defaultLogConf.getLogQueueSize()) {
+                    emptyCond.await();
+                }
+                queueWrite.add(logRecord);
+                flushTread.wakeUp();// 唤醒刷新线程
+            } finally {
+                lock.unlock();
+            }
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static final LogConf defaultLogConf = MyEnv.getLogConf();
+    private static final LogLevel globalLevel;// 当前设置的日志级别，低于此级别的不会打印
+    private static volatile ArrayList<LogRecord> queueWrite;// 各个日志写入此队列
+    private static volatile ArrayList<LogRecord> queueRead;// flush线程从此队列处理日志
+    private static final ReentrantLock lock = new ReentrantLock();
+    private static final Condition emptyCond = lock.newCondition();
+    private static final FlushThread flushTread = new FlushThread();
+    private static FileChannel file;
+
+    static {
+        try {
+            // 1.目录处理
+            Path logPath = Path.of(defaultLogConf.getLogPath());
+            if (Files.notExists(logPath.getParent()))
+                Files.createDirectories(logPath.getParent());
+            // 2.打开日志文件通道
+            // 如果旧文件存在则备份
+            if (Files.exists(logPath)) {
+                splitLogFile();
+            } else {
+                file = FileChannel.open(logPath, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE));
+            }
+
+            // 3.队列初始化
+            queueWrite = new ArrayList<>(defaultLogConf.getLogQueueSize());
+            queueRead = new ArrayList<>(defaultLogConf.getLogQueueSize());
+            // 4.日志level设置
+            globalLevel = LogLevel.getLevel(defaultLogConf.getLogLevel());
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        // 5.日志刷新线程启动
+        flushTread.setDaemon(true);// 必须设为后台线程
+        flushTread.start();
+    }
+
+    /**
+     * 刷新线程：已实现组提交
+     */
+    private static class FlushThread extends Thread {
+        public volatile boolean isAwake = false;// 刷新线程活跃状态：避免冗余唤醒
+        private static final DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+        // 轮转队列: 组提交
+        private void turnQueue() {
+            if (queueWrite.size() > 0) {
+                // 轮转队列
+                ArrayList<LogRecord> tmp = queueWrite;
+                queueWrite = queueRead;
+                queueRead = tmp;
+                emptyCond.signalAll();// 唤醒所有等待线程
+            }
+        }
+
+        public void wakeUp() {
+            if (!isAwake) {// 避免冗余唤醒
+                LockSupport.unpark(flushTread);
+                //System.out.println("唤醒");
+            }
+        }
+
+        @Override
+        public void run() {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    isAwake = true;
+                    // 轮转队列
+                    lock.lockInterruptibly();
+                    try {
+                        turnQueue();
+                    } finally {
+                        lock.unlock();
+                    }
+
+                    if (queueRead.size() > 0) {
+                        handleRead();
+                    } else {
+                        isAwake = false;
+                        LockSupport.parkNanos(10_000_000_000L);// 等待10s
+                    }
+                }
+            } catch (InterruptedException | IOException e) {
+                System.err.println("flush log thread occurs error: " + e);
+            } finally {
+                try {
+                    file.close();
+                } catch (IOException ex) {
+                    //                    throw new RuntimeException(ex);
+                }
+            }
+        }
+
+        public void handleRead() throws IOException {
+            // 1.处理日志队列
+            for (LogRecord record : queueRead) {
+                // level time caller msg
+                String content = String.format("%s %s %s %s\n", record.level, format.format(record.time), record.caller, record.msg);
+                file.write(ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8)));
+                // 控制台输出染色
+                if (record.level.higher(LogLevel.INFO))
+                    System.out.printf("%s%s%s", ConsoleColors.RED, content, ConsoleColors.RESET);
+                else System.out.print(content);
+            }
+            queueRead.clear();// 清空队列
+            // 2.落盘
+            file.force(true);
+            // 3.切割日志
+            if (file.size() >= defaultLogConf.getLogFileSize()) {
+                splitLogFile();
+            }
+        }
+    }
+
+    // 日志切割，按文件大小切割
+    // 调用这个方法，日志文件一定是存在的
+    private static void splitLogFile() throws IOException {
+        // 1.关闭文件
+        if (file != null && file.isOpen())
+            file.close();
+        // 2.文件替换：以文件最后修改时间命名，因为不知道为啥以创建时间有bug?
+        Path origin = Path.of(defaultLogConf.getLogPath());
+        LocalDateTime modifiedTime = LocalDateTime.ofInstant(Files.getLastModifiedTime(origin).toInstant(), ZoneId.systemDefault());
+        Path target = Path.of(String.format("%s_%04d%02d%02d_%02d%02d%02d.%09d", defaultLogConf.getLogPath(),
+                                            modifiedTime.getYear(), modifiedTime.getMonth().getValue(), modifiedTime.getDayOfMonth(),
+                                            modifiedTime.getHour(), modifiedTime.getMinute(), modifiedTime.getSecond(), modifiedTime.getNano()));
+        Files.move(origin, target);
+        // 3.创建新文件
+        file = FileChannel.open(origin, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+    }
+}
+```
+
+可以看到当前日志栈追踪写的是4，可以想一下为什么是4。
