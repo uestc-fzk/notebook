@@ -1630,6 +1630,11 @@ report_host='xxx' -- 副本报告给master的host
 report_port=3306 -- 副本报告给master的端口
 report_user='xxx' -- 副本报告给master的用户
 report_password='xxx' -- 副本报告给master的密码
+
+# 仅复制指定数据库的指定表
+# 此时副本仍然接受所有binlog，但仅处理相关的库表
+--replicate-wild-do-table=db_name.tbl_name
+--replicate-wild-do-table=db_name.% # 此为复制指定数据库的所有表
 ```
 
 7、可用`SHOW REPLICA STATUS`查询当前主从复制状态信息。MySQL8.0.22以前为`SHOW SLAVE STATUS`。
@@ -1650,7 +1655,36 @@ mysql> STOP REPLICA SQL_THREAD;
 
 进停止SQL线程时，IO接受线程继续从master读事件，但不执行，可用于执行副本备份，备份完再重启SQL线程。
 
+## 提高复制性能
 
+若并发量很高，需要的副本数量很多，若都连到一个master上，master的网络负载会很重。此时可以采用树形结构：
+
+```mermaid
+graph TD
+m0(master0)
+m0-->m1(master1)
+m0-->m2(master2)
+m1-->replica1[replica1]
+m1-->replica2[replica2]
+m2-->replica3[replica3]
+m2-->replica4[replica4]
+```
+
+master1和master2订阅master0的binlog，replica1、replica2订阅master1的binlog，replica3、replica4订阅master2的binlog。
+
+此时master1和master2必须开启`log-slave-updates`选项（默认开启），将接收到的binlog的指令修改也记录到自己的binlog中。
+
+## 延迟复制
+
+副本可以故意比master晚指定时间才执行事务。
+
+在 MySQL 8.0 中，延迟复制的方法取决于两个时间戳， `immediate_commit_timestamp`和 `original_commit_timestamp`
+
+```sql
+# 设置延迟n秒
+CHANGE REPLICATION SOURCE TO xxx DELAY=n # MySQL8.0.23以后
+CHANGE MASTER TO xxx MASTER_DELAY=n # 老版本
+```
 
 ## 基于GTID复制
 
@@ -1659,16 +1693,6 @@ GTID是全局事务id，它可以识别跟踪每个事务。
 因为基于GTID的复制是完全基于事务的，所以很容易判断master和副本是否一致；只要在master上提交的所有事务也在副本上提交，就可以保证两者之间的一致性。
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
-
-## 多源复制
-
-副本从多个源节点(master)接收事务，副本为它应该从中接收事务的每个源创建一个复制通道。
-
-文档：https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html
-
-
-
-
 
 ## 复制实现原理
 
@@ -1706,13 +1730,36 @@ MySQL 复制功能是使用三个主线程实现的，一个在master服务器�
 
 复制SQL应用线程在执行完中继文件所有事件且不再需要时会自动删除每个中继日志文件。
 
-
-
 副本的连接元数据写入`mysql.slave_master_info`表。*连接元数据存储库*包含复制接收器线程连接到复制源服务器并从源的二进制日志检索事务所需的信息。
 
 应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
 
+## 故障迁移
 
+可以直接使用以下命令更改新master：
+
+```sql
+CHANGE MASTER TO # 老版本
+CHANGE REPLICATION TO # 8.0.23以后
+```
+
+这个命令不仅可以开启复制，还能用于故障迁移捏。
+
+副本不会检查master的数据库是否与自身的数据库兼容，它只会读取master的binlog的指定坐标。
+
+假设有master、replica1、replica2，若master发生故障，此时将replica2改为从replica1获取binlog，即可实现手动故障迁移。
+
+注意：必须将replica1和replica2的`log-slave-update`选项设置为`OFF`，默认为`ON`。如果replica1的该选项开启，它会记录来自master的binlog的所有更新事件到自己的binlog，若此时将replica2改为从replica1获取binlog，那么replica2会从replica1那里收到它早就从master收到过的更新事件。
+
+若该选项关闭，则replica1的binlog为空，replica2就不会重复收到更新事件，replica1收到update/delete/insert语句后会将这些更新内容写入binlog。
+
+更改新master的具体步骤：
+
+1. 确保所有replica已处理干净中继日志：`STOP REPLICA IO_THREAD`停止复制IO接收线程，然后`SHOW PROCESSLIST`观察输出直到看到Has read all relay log。
+2. 将replica1停用复制：`STOP REPLICA`和`RESET MASTER`
+3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
+
+若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
 
 # 单机运行多MySQL实例
 
