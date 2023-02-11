@@ -4,8 +4,6 @@
 >
 > 这是我见过最离谱的文档......
 >
-> 尚硅谷的b站视频教程
->
 > NGINX指南：https://docs.nginx.com/nginx/admin-guide/
 
 # nginx学习

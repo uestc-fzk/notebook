@@ -8,6 +8,24 @@ MySQL 是最流行的开源、**关系型 SQL 数据库管理系统**，由 Orac
 
 使用C和C++开发、内核线程实现的多线程。
 
+## jdbc.properties
+
+记录连接MySQL的驱动配置：
+
+```properties
+# mysql 5 驱动不同 com.mysql.jdbc.Driver 
+# mysql 8 驱动不同com.mysql.cj.jdbc.Driver、需要增加时区的配置 
+# serverTimezone=GMT%2B8 
+
+spring.datasource.username=root 
+spring.datasource.password=123456 
+spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=true&characterEncoding=utf-8&serverTimezone=GMT%2B8 
+# 主要是要加上时区，其它的参数可以加也可以不加
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+```
+
+
+
 ## 新功能
 
 **MySQL8新增的部分功能如下：**(我简单的选了一些看得懂的)
@@ -54,6 +72,82 @@ SELECT DATABASE();
 SHOW TABLES;
 # 某个表的详细信息
 DESCRIBE [table_name];
+```
+
+## 索引管理
+
+#### 1.添加或删除索引
+
+```sql
+-- 普通索引
+ALTER table tableName ADD INDEX indexName(列名...)
+-- 唯一索引
+ALTER table mytable ADD UNIQUE [indexName] (列名...)
+-- 全文索引 并指定解析器为ngram
+ALTER TABLE 表名 ADD FULLTEXT INDEX 索引名 (列名) WITH PARSER ngram;
+
+-- 显示索引信息
+SHOW INDEX FROM table_name\G
+
+-- 删除索引
+DROP INDEX 索引名 ON 表名;
+```
+
+#### 2.全文索引
+
+在MySQL 5.6版本以前,只有MyISAM存储引擎支持全文引擎.在5.6版本中,InnoDB加入了对全文索引的支持,但是不支持中文全文索引.在5.7.6版本,MySQL内置了ngram全文解析器,用来支持亚洲语种的分词.
+
+MySQL的全文索引查询有多种模式，经常使用两种.
+需要注意的是，MySQL的`倒排索引`对于小数据量可以这么做，但是对于大数据量，还是用ElasticSearch比较好。
+
+MySQL全文索引以**词频**作为唯一标准。
+
+缺点：《高性能MySQL》P304
+
+> 1、全文索引的INSERT、UPDATE、DELETE操作代价很高；
+> 2、“双B-Tree"结构会有更多的碎片，需要更多的OPTIMIZE TABLE操作；
+> 3、影响MySQL查询优化器的工作；
+
+##### 自然语言搜索
+
+就是普通的包含关键词的搜索.
+
+```sql
+-- 一个查询中同时使用两次MATCH并不会有额外的消耗
+SELECT id,article_title,MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE) AS relevance
+FROM mk_article 
+WHERE MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE);
+-- 省略模式说明也是可以的，即默认情况是自然语言搜索
+SELECT * FROM articles WHERE MATCH (title,body) AGAINST ('精神');
+```
+
+这类搜索会**自动按照相似度进行排序**
+
+> 注意：如果全文索引是多列索引，MATCH函数中指定的列必须和全文索引指定的列完全相同，因为全文索引并不会记录某个关键词来自于哪个列。
+>
+> 绕过方法：《高性能MySQL》P301
+
+##### 布尔全文索引
+
+在布尔全文索引中，可以在查询里定义某个关键词的相关性，过滤噪声词。
+**搜索结果是未经排序的**。
+
+布尔全文索引通用修饰符:
+
+| 修饰符 | 作用                 |
+| ------ | -------------------- |
+| 无     | rank值更高           |
+| ~      | 使得rank值下降       |
+| +      | 必须包含             |
+| -      | 不能包含             |
+| 阿里*  | 以阿里开头的rank更高 |
+
+案例：
+
+```sql
+SELECT id,article_title,MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN  MODE) AS relevance
+FROM mk_article
+WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MODE);
 ```
 
 # 数据类型
@@ -553,6 +647,39 @@ slowlog记录执行时间超过`long_query_time`的SQL，`mysqldumpslow`命令�
 `min_examined_row_limit`：默认0，查询扫过的行，少于此参数的查询语句不会写入slowlog
 
 `log-throttle-queries-not-using-indexes`：如果 [`log_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_queries_not_using_indexes) 启用，该 [`log_throttle_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_throttle_queries_not_using_indexes) 变量会限制每分钟可以写入慢速查询日志的此类查询的数量。默认0表示无限制。
+
+### 配置慢查监控
+
+在Linux服务器上的配置文件my.cnf下如下配置：
+
+```properties
+# 慢查询日志
+slow_query_log=on # 这个参数设置为ON，可以捕获执行时间超过一定数值的SQL语句
+slow_query_log_file=/opt/mysql/mysql_slow_query.log  # 记录日志的文件名，必须有写权限
+long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录到日志中，建议设置为1或者更短
+```
+
+重启MySQL服务即可。
+
+也可以选择将未使用索引的查询语句也记录都slow log中：
+
+```properties
+# set slow query on 
+# 日志输出格式，FILE或TABLE
+log_output=file
+# 开启慢查询日志
+slow_query_log=on
+# 慢查询日志文件位置
+slow_query_log_file = /tmp/mysql-slow.log
+# 慢查询阈值，大于此值的SQL语句会被记录，单位s
+long_query_time = 1
+# 未使用索引也放入慢查询日志中
+log_queries_not_using_indexes=on
+# 每分钟允许记录到slow log的且未使用索引的SQL语句次数，默认0
+log_throttle_queries_not_using_indexes=10
+```
+
+
 
 # 备份与恢复
 
@@ -1332,6 +1459,8 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
 
 ### 锁
 
+一篇讲得比较好的博文：https://blog.csdn.net/cy973071263/article/details/105188519
+
 1、锁范围分类：
 
 - 行锁
@@ -1548,7 +1677,7 @@ DYNAMIC行格式与COMPACT基本相同，但增加了对可变长列的增强存
 - 多列索引最多16列
 - 行必须小于页的一半
 
-# 复制
+# 主从复制
 
 一主多从，默认异步复制，支持半同步复制和延迟复制。MySQL NDB Cluster是同步复制。
 

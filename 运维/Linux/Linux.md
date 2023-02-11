@@ -1,63 +1,4 @@
-# VMware16
-
-## install_question
-
-> 中文官方网站：https://www.vmware.com/cn.html
-
-下载安装方式：
-在官网中找到产品下载：
-
-![VMware16下载1](Linux.assets/VMware16下载1.png)
-
-下载之后安装即可：
-如果出现此问题：
-
-![VMware16下载2](Linux.assets/VMware16下载2.png)
-
-**解决方法：**
-
-具体应是缺少 VC ++ 运行库必备的文件，也可以重新安装 VC ++ 运行库。
-
-微软中国官网：https://www.microsoft.com/zh-cn/
-
-在官网中搜索Visual C++进行下载：
-
-![VMware16下载3](Linux.assets/VMware16下载3.png)
-
-注意：如果服务器所在的windows操作系统是32位的，就下载 vc_redist.x86.exe；如果是64位的，vc_redist.x64.exe 与 vc_redist.x86.exe 最好都下载安装。
-
-安装成功之后：
-
-![VMware16下载4](Linux.assets/VMware16下载4.png)
-
-再进行VMware16的安装，此时安装成功时候，将会提示输入激活码：
-
-> ZF3R0-FHED2-M80TY-8QYGC-NPKYF
->YF390-0HF8P-M81RQ-2DXQE-M2UT6
-> ZF71R-DMX85-08DQY-8YMNC-PPHV8
->
-> 这三个随便一个都可以：如果不行可以去百度，也可以去官网看看
-
-## VMware16使用文档
-
-中文官方使用文档：https://docs.vmware.com/cn/VMware-Workstation-Pro/index.html
-如下图：
-
-![VMware16下载5](Linux.assets/VMware16下载5.png)
-
-## ubuntu
-
-切换到root用户：
-
-```shell
-sudo passwd root			# 给root用户设置密码(第一次需要设置密码)
-su - root					# 切换到root用户
-su - fzk					# 切换到fzk用户
-```
-
-## 连接Linux
-
-### Xshell与Xftp免费版
+# Xshell与Xftp免费版
 
 官网地址：https://www.xshell.com
 
@@ -75,7 +16,7 @@ su - fzk					# 切换到fzk用户
 
 在邮箱中收到下载地址后，进去下载即可。
 
-### 关闭xshell自动更新
+## 关闭xshell自动更新
 
 免费版的一个很恶心的问题，就是只要打开xshell或者xftp，它就会去检查更新，还很离谱的是，这个检查会新开一个窗口，还特么一直是卡死，必须手动去杀死它才行。
 
@@ -83,25 +24,7 @@ su - fzk					# 切换到fzk用户
 
 ![xshell关闭自动更新](Linux.assets/xshell关闭自动更新.png)
 
-### 连接centos
-
-centos转为root用户命令行：之后输入密码即可。
-```shell
-su root
-```
-
-首先去ifconfig查看ip地址，如果ip地址不是这个样子的
-![centos1](Linux.assets/centos1.png)
-
-如果不是这样子的，说明centos空闲一段时间之后，自动断网了。此时是不能进行xshell连接的。
-
-导致这个问题主要是因为linux 的自动休眠功能未关闭。
-
-当系统自检长时间没什么操作后， 连网卡都会被休眠掉， 所以导致无再SSH， PING也无法PING通， 好像每次都要重启CentOs后， 才能用终端进行SSH。
-
->解决方法重启centos。
-
-### 连接ubuntu
+## 连接ubuntu
 
 > 需要下载两个服务：ssh和vsftpd。
 >
