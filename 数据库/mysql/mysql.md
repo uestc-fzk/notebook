@@ -72,6 +72,8 @@ SELECT DATABASE();
 SHOW TABLES;
 # 某个表的详细信息
 DESCRIBE [table_name];
+# 查看表的DDL语句
+SHOW CREATE TABLE table_name;
 ```
 
 ## 索引管理
@@ -1889,6 +1891,218 @@ CHANGE REPLICATION TO # 8.0.23以后
 3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
 
 若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
+
+# 分区
+
+仅Innodb、NDB引擎支持分区。
+
+MySQL仅支持水平分区：表中不同行分布在不同的物理分区。MySQL不支持垂直分区同时也不计划引入。
+
+**分区注意点：**
+
+注意：分区会对表中的所有数据和索引都进行分区。
+
+注意：表的分区表达式中使用的列必须是表可能具有的每个唯一键的一部分，如以下表则无法创建分区：
+
+```sql
+CREATE TABLE tnp (
+    id INT NOT NULL AUTO_INCREMENT,
+    ref BIGINT NOT NULL,
+    name VARCHAR(255),
+    PRIMARY KEY pk (id),
+    UNIQUE KEY uk (name)
+);
+```
+
+因为pk键和uk键没有共同的列，无法用于分区表达式。这种情况下可能的解决方法是将唯一索引改为普通索引。
+
+**分区优点：**
+
+- 分区使得一个表中的数据可以分布在不同磁盘
+- 可以删除无用分区
+- 查询时可以先限定分区，可以优化查询性能
+
+## 分区类型
+
+- RNAGE分区：范围分区
+- LIST分区：列表分区
+- Hash分区：散列分区
+- KEY分区：
+
+### Range分区
+
+按范围分区的表的分区方式是，每个分区都包含分区表达式值位于给定范围内的行。范围应连续但不重叠，并使用 `VALUES LESS THAN`运算符定义。
+
+比如基于时间分区的案例：
+
+```sql
+CREATE TABLE members (
+    username VARCHAR(16) NOT NULL,
+    email VARCHAR(35),
+    joined DATE NOT NULL
+)
+PARTITION BY RANGE( YEAR(joined) ) (
+    PARTITION p0 VALUES LESS THAN (2010),
+    PARTITION p1 VALUES LESS THAN (2020),
+    PARTITION p2 VALUES LESS THAN (2030),
+    PARTITION p3 VALUES LESS THAN (2040),
+    PARTITION p4 VALUES LESS THAN MAXVALUE
+);
+```
+
+**Range多列元组分区：**
+
+```sql
+CREATE TABLE rc1 (
+    a INT,
+    b INT
+)
+PARTITION BY RANGE COLUMNS(a, b) (
+    PARTITION p0 VALUES LESS THAN (5, 12),
+    PARTITION p3 VALUES LESS THAN (MAXVALUE, MAXVALUE)
+);
+```
+
+多个列组成的元组，从左比到右，可以通过SQL语句测试元组大小：
+
+```sql
+mysql> SELECT (0,25,50) < (10,20,100), (10,20,100) < (10,30,50);
++-------------------------+--------------------------+
+| (0,25,50) < (10,20,100) | (10,20,100) < (10,30,50) |
++-------------------------+--------------------------+
+|                       1 |                        1 |
++-------------------------+--------------------------+
+1 row in set (0.04 sec)
+```
+
+range分区支持的字段类型：
+
+- 时间日期类型：仅支持`DATE`和`DATETIME`类型。
+- 数值类型：不支持DECIMAL和FLOAT，其余支持。
+- 字符串类型：CHAR、VARCHAR、BINARY、VARBINARY支持，TEXT和BLOB不支持。
+
+### List分区
+
+List分区与Range分区都是按范围分区，但是List分区的值是离散的，定义时指定分区范围内的成员：`PARTITION BY (expr) ... VALUES IN (value_list)`
+
+```sql
+CREATE TABLE employees (
+    id INT NOT NULL,
+    job_code INT,
+    store_id INT
+)
+PARTITION BY LIST(store_id) (
+    PARTITION pNorth VALUES IN (3,5,6,9,17),
+    PARTITION pEast VALUES IN (1,2,10,11,19,20),
+    PARTITION pWest VALUES IN (4,12,13,14,18),
+    PARTITION pCentral VALUES IN (7,8,15,16)
+);
+```
+
+优点：删除某些值的分区很方便。
+
+List分区和Range分区一样支持**多列元组分区**。
+
+List分区支持的字段类型同RANGE分区。
+
+### Hash分区
+
+分区依据`HASH`主要用于确保数据在预定数量的分区之间均匀分布。
+
+优点是数据分布非常均匀，缺点是无法像Range/List分区那样自由删除分区。
+
+```sql
+CREATE TABLE employees (
+    id INT NOT NULL,
+    job_code INT,
+    store_id INT
+)
+PARTITION BY HASH(store_id)
+PARTITIONS 4; # 必须指定分区数量
+```
+
+基于时间日期的Hash分区：
+
+```sql
+CREATE TABLE t1 (col1 INT, col2 CHAR(5), col3 DATE)
+    PARTITION BY HASH( YEAR(col3) )
+    PARTITIONS 4;# 必须指定分区数量
+```
+
+每个值存储的分区为：N=MOD(expr, num)
+
+#### 线性Hash分区
+
+LINEAR Hash分区线性散列使用线性二次幂算法，而常规散列使用散列函数值的模数。
+
+线性二次幂算法利用对2的幂取模可以通过**位运算**快速得到取模值的技术，从而**快速计算行记录应该存储的分区号**。
+
+```sql
+CREATE TABLE t1 (col1 INT, col2 CHAR(5), col3 DATE)
+    PARTITION BY LINEAR HASH( YEAR(col3) )
+    PARTITIONS 6;
+```
+
+1、设置线性分区数N为6个，首先计算6的下一个2的幂为8：`V = POWER(2, CEILING(LOG(2, num)))`
+
+2、位运算取模：`expr & (V -1)`，得到i
+
+3、若`i<N`，则分区号为`i`，否则分区号为`i/2`
+
+#### Key分区
+
+一种特殊的Hash分区，不同之处在于Hash分区可以用户自定义表达式，而Key分区使用内置表达式计算hash值。
+
+```sql
+CREATE TABLE tm1 (
+    s1 CHAR(32) PRIMARY KEY
+)
+PARTITION BY KEY(s1)
+PARTITIONS 10;
+```
+
+Key分区就是一种特殊的Hash分区，所以也支持线性二次幂算法。
+
+### 子分区
+
+子分区（也称复合分区）是分区表中每个分区的进一步划分。
+
+```sql
+CREATE TABLE ts (id INT, purchased DATE)
+    PARTITION BY RANGE( YEAR(purchased) )
+    SUBPARTITION BY HASH( TO_DAYS(purchased) )
+    SUBPARTITIONS 2 (
+        PARTITION p0 VALUES LESS THAN (1990),
+        PARTITION p1 VALUES LESS THAN (2000),
+        PARTITION p2 VALUES LESS THAN MAXVALUE
+    );
+```
+
+可以对Range/List分区进一步划分Hash子分区。每个分区必须具有相同数量的子分区。
+
+### 处理NULL
+
+MySQL 中的分区不会禁止 `NULL`分区表达式的值，无论它是列值还是用户提供的表达式的值。
+
+MySQL将其`NULL`视为小于任何非`NULL`值，就像 `ORDER BY`它所做的那样。
+
+**RANGE分区**，NULL将被存入最低分区。
+
+**List分区**，分区范围必须指定NULL，否则报错：
+
+```sql
+mysql> CREATE TABLE ts3 (
+    ->     c1 INT,
+    ->     c2 VARCHAR(20)
+    -> )
+    -> PARTITION BY LIST(c1) (
+    ->     PARTITION p0 VALUES IN (0, 3, 6),
+    ->     PARTITION p1 VALUES IN (1, 4, 7, NULL),
+    ->     PARTITION p2 VALUES IN (2, 5, 8)
+    -> );
+```
+
+**Hash分区**，NULL被视作0。
 
 # 单机运行多MySQL实例
 
