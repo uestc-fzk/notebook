@@ -4217,21 +4217,7 @@ public interface Path extends Comparable<Path>, Iterable<Path>, Watchable {
      * @since 11
      */
     public static Path of(URI uri) {
-        String scheme =  uri.getScheme();
-        if (scheme == null)
-            throw new IllegalArgumentException("Missing scheme");
-
-        // check for default provider to avoid loading of installed providers
-        if (scheme.equalsIgnoreCase("file"))
-            return FileSystems.getDefault().provider().getPath(uri);
-
-        // try to find provider
-        for (FileSystemProvider provider: FileSystemProvider.installedProviders()) {
-            if (provider.getScheme().equalsIgnoreCase(scheme)) {
-                return provider.getPath(uri);
-            }
-        }
-        throw new FileSystemNotFoundException("Provider \"" + scheme + "\" not installed");
+        // 省略实现
     }
 }
 ```
@@ -4262,57 +4248,39 @@ public final class Files {
 ```java
 /** 创建所有不存在的父目录来创建目录，当目录早已存在时不会像createDirectory方法那样报错 */
 public static Path createDirectories(Path dir, FileAttribute<?>... attrs) throws IOException {
-    // 1.尝试直接创建目录，这里会调用createDirectory()方法
-    try {
-        createAndCheckIsDirectory(dir, attrs);
-        return dir;
-    } catch (FileAlreadyExistsException x) {
-        // file exists and is not a directory
-        throw x;
-    } catch (IOException x) {
-        // parent may not exist or other reason
-    }
-    SecurityException se = null;
-    try {
-        dir = dir.toAbsolutePath();
-    } catch (SecurityException x) {
-        // don't have permission to get absolute path
-        se = x;
-    }
-    // 2.寻找存在的父目录
-    Path parent = dir.getParent();
-    while (parent != null) {
-        try {
-            provider(parent).checkAccess(parent);
-            break;
-        } catch (NoSuchFileException x) {
-            // does not exist
-        }
-        parent = parent.getParent();
-    }
-    if (parent == null) {
-        // unable to find existing parent
-        if (se == null) {
-            throw new FileSystemException(dir.toString(), null,
-                                          "Unable to determine if root directory exists");
-        } else {
-            throw se;
-        }
-    }
+  // 1.尝试直接创建目录，这里会调用createDirectory()方法
+  try {
+      createAndCheckIsDirectory(dir, attrs);
+      return dir;
+  } catch (IOException x) {}
+	dir = dir.toAbsolutePath();
 
-    // 3.层层创建目录
-    Path child = parent;
-    for (Path name: parent.relativize(dir)) {
-        child = child.resolve(name);
-        createAndCheckIsDirectory(child, attrs);
-    }
-    return dir;
+  // 2.寻找存在的父目录
+  Path parent = dir.getParent();
+  while (parent != null) {
+      try {
+          provider(parent).checkAccess(parent);
+          break;
+      } catch (NoSuchFileException x) {}
+      parent = parent.getParent();
+  }
+  if (parent == null) {
+      // 没有存在的父目录，报错
+  }
+
+  // 3.层层创建目录
+  Path child = parent;
+  for (Path name: parent.relativize(dir)) {
+      child = child.resolve(name);
+      createAndCheckIsDirectory(child, attrs);
+  }
+  return dir;
 }
 ```
 
 可以看到`createDirectories()`方法是对目录各个不存在的父目录进行层层调用`createDirectory()`进行创建的。
 
-#### copy、move、delete
+#### copy/move/delete
 
 ```java
 /**
@@ -4323,15 +4291,6 @@ public static Path createDirectories(Path dir, FileAttribute<?>... attrs) throws
  * 复制文件不是原子操作。如果抛出一个IOException ，则目标文件可能不完整，或者某些文件属性尚未从源文件复制。当指定了REPLACE_EXISTING选项并且目标文件存在时，将替换目标文件。 对于其他文件系统活动，检查文件的存在和创建新文件可能不是原子的。
  */
 public static Path copy(Path source, Path target, CopyOption... options) throws IOException {
-    FileSystemProvider provider = provider(source);
-    if (provider(target) == provider) {
-        // same provider
-        provider.copy(source, target, options);
-    } else {
-        // different providers
-        CopyMoveHelper.copyToForeignTarget(source, target, options);
-    }
-    return target;
 }
 
 /**
@@ -4342,15 +4301,6 @@ public static Path copy(Path source, Path target, CopyOption... options) throws 
  * 当作为非原子操作执行移动，并且抛出IOException时，则不会定义文件的状态。 原始文件和目标文件都可能存在，目标文件可能不完整，或者某些文件属性可能未被复制到原始文件中。
  */
 public static Path move(Path source, Path target, CopyOption... options) throws IOException {
-    FileSystemProvider provider = provider(source);
-    if (provider(target) == provider) {
-        // same provider
-        provider.move(source, target, options);
-    } else {
-        // different providers
-        CopyMoveHelper.moveToForeignTarget(source, target, options);
-    }
-    return target;
 }
 
 public enum StandardCopyOption implements CopyOption {
@@ -4381,7 +4331,6 @@ public static void delete(Path path) throws IOException {
 /**
  * 遍历文件树
  * 将以一个给定的起始文件为根。文件树遍历深度优先于给定FileVisitor调用所遇到的每个文件。
- 
  * @param options 如果options参数包含FOLLOW_LINKS选项，则遵循符号链接，且此时会检查是否出现循环目录，循环检测是通过记录目录的file-key，或者如果file-key不可用，则通过调用isSameFile方法来测试目录是否与祖先相同的文件来完成。 当检测到一个循环时，它被视为I/O错误，向visitFileFailed方法传入一个FileSystemLoopException的异常。
  * @param maxDepth 是要访问的目录的最大级别数。0即只有起始文件被访问，当访问层数超过maxDepth，会调用visitFileFailed方法
  */
@@ -4389,57 +4338,6 @@ public static Path walkFileTree(Path start,
                                 Set<FileVisitOption> options,
                                 int maxDepth,
                                 FileVisitor<? super Path> visitor) throws IOException {
-    /**
-         * Create a FileTreeWalker to walk the file tree, invoking the visitor
-         * for each event.
-         */
-    try (FileTreeWalker walker = new FileTreeWalker(options, maxDepth)) {
-        FileTreeWalker.Event ev = walker.walk(start);
-        do {
-            FileVisitResult result = switch (ev.type()) {
-                case ENTRY -> {
-                    IOException ioe = ev.ioeException();
-                    if (ioe == null) {
-                        assert ev.attributes() != null;
-                        yield visitor.visitFile(ev.file(), ev.attributes());
-                    } else {
-                        yield visitor.visitFileFailed(ev.file(), ioe);
-                    }
-                }
-                case START_DIRECTORY -> {
-                    var res = visitor.preVisitDirectory(ev.file(), ev.attributes());
-
-                    // if SKIP_SIBLINGS and SKIP_SUBTREE is returned then
-                    // there shouldn't be any more events for the current
-                    // directory.
-                    if (res == FileVisitResult.SKIP_SUBTREE ||
-                        res == FileVisitResult.SKIP_SIBLINGS)
-                        walker.pop();
-                    yield res;
-                }
-                case END_DIRECTORY -> {
-                    var res = visitor.postVisitDirectory(ev.file(), ev.ioeException());
-
-                    // SKIP_SIBLINGS is a no-op for postVisitDirectory
-                    if (res == FileVisitResult.SKIP_SIBLINGS)
-                        res = FileVisitResult.CONTINUE;
-                    yield res;
-                }
-                default -> throw new AssertionError("Should not get here");
-            };
-
-            if (Objects.requireNonNull(result) != FileVisitResult.CONTINUE) {
-                if (result == FileVisitResult.TERMINATE) {
-                    break;
-                } else if (result == FileVisitResult.SKIP_SIBLINGS) {
-                    walker.skipRemainingSiblings();
-                }
-            }
-            ev = walker.next();
-        } while (ev != null);
-    }
-
-    return start;
 }
 ```
 
@@ -4533,6 +4431,21 @@ public class FilesTest {
     }
 }
 ```
+
+#### 文件查找
+
+可以在 FileSystem 对象上调用 getPathMatcher() 获得一个 PathMatcher，然后传入模式。模式有两个选项：glob 和 regex，glob 比较简单，功能也很强大。
+
+```java
+Path test = Paths.get("test");
+// 查找当前目录及其子目录下所有以.tmp或.txt结尾的Path
+// **/表示当前目录及其所有子目录
+// * 表示任何字符，大括号表示一系列的可能性
+PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:**/*.{tmp,txt}");
+Files.walk(test).filter(matcher::matches).forEach(System.out::println);
+```
+
+
 
 ## Charset
 
