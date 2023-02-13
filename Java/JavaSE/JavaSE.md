@@ -5623,7 +5623,7 @@ public class Logger {
         }
     }
 
-    private static final LogConf defaultLogConf = MyEnv.getLogConf();
+    private static final LogConf defaultLogConf = LogConf.getDefaultLogConf();
     private static final LogLevel globalLevel;// 当前设置的日志级别，低于此级别的不会打印
     private static volatile ArrayList<LogRecord> queueWrite;// 各个日志写入此队列
     private static volatile ArrayList<LogRecord> queueRead;// flush线程从此队列处理日志
@@ -5634,17 +5634,9 @@ public class Logger {
 
     static {
         try {
-            // 1.目录处理
+            // 1.创建或切割日志
             Path logPath = Path.of(defaultLogConf.getLogPath());
-            if (Files.notExists(logPath.getParent()))
-                Files.createDirectories(logPath.getParent());
-            // 2.打开日志文件通道
-            // 如果旧文件存在则备份
-            if (Files.exists(logPath)) {
-                splitLogFile();
-            } else {
-                file = FileChannel.open(logPath, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE));
-            }
+            createLogFile(logPath);
 
             // 3.队列初始化
             queueWrite = new ArrayList<>(defaultLogConf.getLogQueueSize());
@@ -5710,7 +5702,7 @@ public class Logger {
                 try {
                     file.close();
                 } catch (IOException ex) {
-                    //                    throw new RuntimeException(ex);
+//                    throw new RuntimeException(ex);
                 }
             }
         }
@@ -5719,9 +5711,10 @@ public class Logger {
             // 1.处理日志队列
             for (LogRecord record : queueRead) {
                 // level time caller msg
-                String content = String.format("%s %s %s %s\n", record.level, format.format(record.time), record.caller, record.msg);
+                // warning长度为7
+                String content = String.format("%-7s %s %s %s\n", record.level, format.format(record.time), record.caller, record.msg);
                 file.write(ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8)));
-                // 控制台输出染色
+                // 控制台染色
                 if (record.level.higher(LogLevel.INFO))
                     System.out.printf("%s%s%s", ConsoleColors.RED, content, ConsoleColors.RESET);
                 else System.out.print(content);
@@ -5737,22 +5730,1181 @@ public class Logger {
     }
 
     // 日志切割，按文件大小切割
-    // 调用这个方法，日志文件一定是存在的
+    // 注意：调用这个方法，日志文件一定是存在的
     private static void splitLogFile() throws IOException {
         // 1.关闭文件
-        if (file != null && file.isOpen())
+        if (file != null && file.isOpen()) {
             file.close();
-        // 2.文件替换：以文件最后修改时间命名，因为不知道为啥以创建时间有bug?
+        }
+        // 2.文件替换：以写入文件第一行的时间命名，因为不知道为啥以创建时间有bug?
         Path origin = Path.of(defaultLogConf.getLogPath());
-        LocalDateTime modifiedTime = LocalDateTime.ofInstant(Files.getLastModifiedTime(origin).toInstant(), ZoneId.systemDefault());
-        Path target = Path.of(String.format("%s_%04d%02d%02d_%02d%02d%02d.%09d", defaultLogConf.getLogPath(),
-                                            modifiedTime.getYear(), modifiedTime.getMonth().getValue(), modifiedTime.getDayOfMonth(),
-                                            modifiedTime.getHour(), modifiedTime.getMinute(), modifiedTime.getSecond(), modifiedTime.getNano()));
-        Files.move(origin, target);
+        Path target = null;
+        // 注意要关闭资源
+        try (BufferedReader bufferedReader = new BufferedReader(new FileReader(origin.toFile()));) {
+            String s = bufferedReader.readLine();
+            String[] splits = s.split("\\.");
+            if (splits.length != 2) throw new RuntimeException("写入文件第一行的时间错误：" + s);
+            long second = Long.parseLong(splits[0]);
+            int nano = Integer.parseInt(splits[1]);
+            LocalDateTime createTime = LocalDateTime.ofInstant(Instant.ofEpochSecond(second, nano), ZoneId.systemDefault());
+            target = Path.of(String.format("%s_%04d%02d%02d_%02d%02d%02d.%09d", defaultLogConf.getLogPath(),
+                    createTime.getYear(), createTime.getMonth().getValue(), createTime.getDayOfMonth(),
+                    createTime.getHour(), createTime.getMinute(), createTime.getSecond(), createTime.getNano()));
+        }
+        // 注意：这里必须先关闭资源，再进行移动，否则会报错：另一个程序正在使用此文件，进程无法访问。
+        Files.move(origin, target, StandardCopyOption.ATOMIC_MOVE);
         // 3.创建新文件
-        file = FileChannel.open(origin, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+        createLogFile(origin);
+    }
+
+    // 创建日志文件，并将创建时间写入第一行
+    private static void createLogFile(Path path) throws IOException {
+        // 1.先确保目录已经创建
+        if (Files.notExists(path.getParent())) {
+            Files.createDirectories(path.getParent());
+        }
+        // 2.日志文件若存在，则切割
+        if (Files.exists(path)) {
+            splitLogFile();
+        } else {
+            // 3.创建日志文件，并将创建时间写入第一行
+            Instant now = Instant.now();// 注意：测试发现目前不管是Instant还是LocalDateTime都只能精确到微秒
+            file = FileChannel.open(path, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+            // 创建时间: second.nano\n
+            String createTime = String.format("%d.%d\n", now.getEpochSecond(), now.getNano());
+            file.write(ByteBuffer.wrap(createTime.getBytes(StandardCharsets.UTF_8)));
+            file.force(true);
+        }
     }
 }
 ```
 
 可以看到当前日志栈追踪写的是4，可以想一下为什么是4。
+
+# utils
+
+此目录记录一些自己写的小工具类。
+
+## 摘要算法
+
+### MD5
+
+```java
+/**
+ * 使用jdk自带的md5算法
+ * <a href="https://www.cnblogs.com/hihtml5/p/6064999.html">MD5案例</a>
+ *
+ * @author fzk
+ * @datetime 2023-02-11 01:34:33
+ */
+public class MD5 {
+    public static String getMD5(byte[] bytes) {
+        // 生成一个MD5加密计算摘要
+        MessageDigest md = getMD5Digester();
+        // 计算md5函数
+        md.update(bytes);
+        // digest()最后确定返回md5 hash值，返回值为8位字符串。因为md5 hash值是16位的hex值，实际上就是8位的字符
+        // BigInteger函数则将8位的字符串转换成16位hex值，用字符串来表示；得到字符串形式的hash值
+        //一个byte是八位二进制，也就是2位十六进制字符（2的8次方等于16的2次方）
+        return new BigInteger(1, md.digest()).toString(16);
+    }
+
+
+    /**
+     * 解析文件的MD5值
+     * 经过测试，在 i7 12700F, 32GB内存, windows11配置上，解析5.78GB文件运行大约12s
+     * @param path 文件路劲
+     * @return md5
+     * @throws IOException 可能的文件错误，如文件不存在或权限不足
+     */
+    public static String getFileMD5(Path path) throws IOException {
+        // 生成一个MD5加密计算摘要
+        MessageDigest md = getMD5Digester();
+        try (FileChannel file = FileChannel.open(path, StandardOpenOption.READ)) {
+            ByteBuffer buf = ByteBuffer.allocateDirect(1024);
+            while (file.read(buf) != -1) {
+                buf.flip();// 翻转读取
+                md.update(buf);
+                buf.clear();// 清空待写入
+            }
+            // digest()最后确定返回md5 hash值，返回值为8位字符串。因为md5 hash值是16位的hex值，实际上就是8位的字符
+            // BigInteger函数则将8位的字符串转换成16位hex值，用字符串来表示；得到字符串形式的hash值
+            //一个byte是八位二进制，也就是2位十六进制字符（2的8次方等于16的2次方）
+            return new BigInteger(1, md.digest()).toString(16);
+        }
+    }
+
+    public static MessageDigest getMD5Digester() {
+        // 生成一个MD5加密计算摘要
+        try {
+            return MessageDigest.getInstance("MD5");
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
+## 日期时间
+
+以下日期时间工具以java.time包实现，性能比java.util.Date类更好。
+
+```java
+/**
+ * 原本用Date类，渐渐改进为用 LocalDate 类以及 LocalDateTime 类 <br/>
+ * LocalDate类辅以日期调整期类TemporalAdjusters类可以实现返回某年某月第n个星期的星期几
+ * <p>
+ * DateTimeFormatter 类被设计为代替 DateFormat 类
+ * </p>
+ *
+ * @author fzk
+ * @date 2021-07-15 21:34
+ */
+@SuppressWarnings("unused")
+public class MyDateTimeUtil {
+    /**
+     * SimpleDateFormat不是线程安全的，多个线程同时调用format方法会使得内部数据结构被并发访问破坏
+     * 使用同步开销大，使用局部变量有点浪费
+     * 所以使用 <strong>线程局部变量<strong/>
+     * <p>
+     * 由于LocalDateTime的默认toString()方法是以'T'连接日期和时间，因此必须自定义DateTimeFormatter
+     * DateTimeFormatter是线程安全的，是不必要放入到线程局部变量的呢
+     * </p>
+     */
+    private static final ThreadLocal<DateTimeFormatter> dateTimeFormatter;
+
+    static {
+        dateTimeFormatter = ThreadLocal.withInitial(() ->
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+    }
+
+    /**
+     * 这个性能是SimpleDateFormat的几倍
+     *
+     * @return 日期，如：2021-11-24
+     */
+    public static String nowDate() {
+        return LocalDate.now().toString();
+    }
+
+    /**
+     * 获取当前日期时间, 如：2021-11-24 22:09:11
+     *
+     * @return 日期时间
+     * @apiNote 性能是SimpleDateFormat的2倍
+     */
+    public static String nowDateTime() {
+        return dateTimeFormatter.get().format(LocalDateTime.now());
+    }
+
+    /**
+     * 自定义日期或时间格式
+     *
+     * @param pattern 自定义格式，如：yyyy-MM-dd HH:mm:ss 为24小时制;  yyyy-MM-dd KK:mm:ss 为12小时制
+     * @return 返回当前的日期或时间
+     * @apiNote 这个的性能又是SimpleDateFormatter的2倍
+     */
+    public static String nowDateOrTime(String pattern) {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
+        return formatter.format(LocalDateTime.now());
+    }
+
+    /**
+     * 获取本月第一天，以日期调整器TemporalAdjuster调整LocalDate实现
+     *
+     * @return 本月第一天
+     */
+    public static String getFirstDayOfMonth() {
+        return LocalDate.now().with(TemporalAdjusters.firstDayOfMonth()).toString();
+    }
+
+    /**
+     * 获取本月最后一天，以日期调整器TemporalAdjuster调整LocalDate实现
+     *
+     * @return 本月最后一天
+     */
+    public static String getLastDayOfMonth() {
+        return LocalDate.now().with(TemporalAdjusters.lastDayOfMonth()).toString();
+    }
+
+    /**
+     * 判断是否是每月第一天
+     *
+     * @param date 字符串即可
+     * @return 只有字符串规范化且是每月第一天才会返回true
+     */
+    public static boolean isFirstDayOfMonth(String date) {
+        try {
+            LocalDate parse = LocalDate.parse(date);
+            return parse.getDayOfMonth() == 1;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+
+    /**
+     * 判断是否是最后一天
+     *
+     * @param date 字符串即可
+     * @return 只有是规范化的字符串且是每月最后一天才返回true
+     */
+    public static boolean isLastDayOfMonth(String date) {
+        try {
+            LocalDate parse = LocalDate.parse(date);
+            return parse.plusDays(1).getDayOfMonth() == 1;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 判断字符串是否符合日期规范 如 2021-07-22
+     *
+     * @param date 字符串
+     * @return 传入字符串规范化返回true
+     */
+    public static boolean isDateFormat(String date) {
+        try {
+            LocalDate.parse(date);
+            return true;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 判断字符串是否符合日期时间规范 如 2021-11-24 22:25:11
+     *
+     * @param dateTime 字符串
+     * @return 传入字符串规范化返回true
+     */
+    public static boolean isDateTimeFormat(String dateTime) {
+        try {
+            dateTimeFormatter.get().parse(dateTime);
+            return true;
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 用于判断开始日期和结束日期格式是否都正确且结束日期大于开始日期
+     *
+     * @param startDate 正确为2021-07-01这种
+     * @param endDate   正确为2021-07-31这种
+     * @return 正确返回true，其他情况返回false
+     */
+    public static boolean isStartAndEndRight(String startDate, String endDate) {
+        return MyDateTimeUtil.isFirstDayOfMonth(startDate) &&
+                MyDateTimeUtil.isLastDayOfMonth(endDate) &&
+                startDate.compareTo(endDate) < 0;
+    }
+}
+```
+
+## 文件
+
+本来文件也没啥可记录的，结果在处理目录的时候，如果目录不为空，则不能直接复制或删除，因此记录：
+
+```java
+/**
+ * 这里主要是记录的目录的相关工具方法，对于单个文件的操作FileInputStream可能已经够了
+ * 主要用到 Files 工具类和 Path 类
+ *
+ * @author fzk
+ * @date 2021-11-23 23:40
+ */
+@SuppressWarnings("unused")
+public class MyFileUtil {
+
+    /**
+     * 复制文件目录
+     *
+     * @param sourceDir 源目录
+     * @param targetDir 目标目录
+     * @param isCovered 是否覆盖
+     * @apiNote 不知道为什么，如果设为true，windows的文件不但手动难以删除，这里也会被一直卡主
+     */
+    public static void copyDir(Path sourceDir, Path targetDir, boolean isCovered) throws IOException {
+        assert sourceDir != null && targetDir != null : "sourceDir or targetDir is null";
+
+        // 1.判断是否是目录：不存在或存在而不是目录都返回false
+        if (!Files.isDirectory(sourceDir))
+            throw new IllegalArgumentException("sourceDir is not a directory or it not exists");
+
+        if (Files.exists(targetDir) && !Files.isDirectory(targetDir))
+            throw new IllegalArgumentException("targetDir exists but not a directory");
+        // 这里可以创建到targetSource的父级目录
+        if (Files.notExists(targetDir.getParent()))
+            Files.createDirectories(targetDir.getParent());
+
+        // 2.前面没有问题就正式开始copy了
+        try (Stream<Path> stream = Files.walk(sourceDir)) {
+            stream.forEach(p -> {
+                try {
+                    // 找到相对于target的绝对文件path，resolve方法在解析path时，如果是绝对路径则直接返回，否则转为相对于的绝对路径
+                    Path q = targetDir.resolve(sourceDir.relativize(p));
+                    if (Files.isDirectory(p)) {
+                        try {
+                            Files.createDirectory(q);// 这个方法会在目录已经存在的情况下会报错
+                        } catch (FileAlreadyExistsException e) {
+                            if (!isCovered) throw e;// 指定覆盖则忽略
+                        }
+                    } else {
+                        if (isCovered) // 指定覆盖行为
+                            Files.copy(p, q, StandardCopyOption.REPLACE_EXISTING);
+                        else Files.copy(p, q);
+                    }
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
+    }
+
+    /**
+     * 删除一个目录，必须在先删除其子文件和子目录，否则DirectoryNotEmptyException
+     *
+     * @param dirPath 目录
+     * @throws IOException 可能的IO异常
+     */
+    public static void deleteDir(Path dirPath) throws IOException {
+        // 1.先检查path是否合法
+        if (Files.notExists(dirPath))
+            throw new NoSuchFileException("dirPath not exists");
+        if (!Files.isDirectory(dirPath))
+            throw new NotDirectoryException("dirPath not a directory");
+
+        // 这个方法遍历文件树，在目录不存在的时候不会抛出异常
+        Files.walkFileTree(dirPath, new SimpleFileVisitor<>() {
+            /**
+             * 在一个目录被处理前调用
+             * @param dir 目录引用
+             * @param attrs 目录基本属性
+             * @return 访问结果
+             * @throws IOException 如果发生I/O错误
+             */
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                Objects.requireNonNull(dir);
+                Objects.requireNonNull(attrs);
+
+//                System.out.println("pre------: "+dir.toString());
+                return FileVisitResult.CONTINUE;
+            }
+
+            /**
+             * 遇到目录里的 文件 时的调用
+             * @param file 对文件的引用
+             * @param attrs 文件的基本属性
+             * @return 访问结果
+             * @throws IOException 如果发生 I/O 错误
+             */
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Objects.requireNonNull(file);
+                Objects.requireNonNull(attrs);
+
+                // 删除文件
+//                System.out.println("file------: "+file.toString());
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            /**
+             * 试图访问文件或目录发生错误时，如 没有权限
+             * @param file 对文件的引用
+             * @param exc 阻止访问文件的 I/O 异常
+             * @return 访问结果
+             * @throws IOException 如果发生 I/O 错误
+             */
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+                Objects.requireNonNull(file);
+//                throw exc;
+                return FileVisitResult.SKIP_SIBLINGS;// 遇到异常，采取跳过策略
+            }
+
+            /**
+             * 在目录中的条目及其所有后代都被访问后调用 <br/>
+             * 目录的迭代过早完成时（通过返回SKIP_SIBLINGS的visitFile方法，或迭代目录时的 I/O 错误），也会调用此方法
+             * @param dir 目录引用
+             * @param exc 如果目录的迭代完成且没有错误，则为null ； 否则导致目录迭代过早完成的I/O异常
+             * @return 访问结果
+             * @throws IOException 如果发生IO异常
+             */
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                Objects.requireNonNull(dir);
+                if (exc != null)
+                    throw exc;
+
+                // 把目录给删了
+//                System.out.println("post------: "+dir.toString());
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    /**
+     * gzip压缩，对于文本压缩效率高，对于视频图片则效果不明显
+     * 比如可以将16MB日志文件压缩到72KB
+     *
+     * @param path 待压缩文件
+     * @throws IOException 如文件不存在
+     */
+    public static void gzip(String path) throws IOException {
+        try (FileInputStream in = new FileInputStream(path);
+             GZIPOutputStream out = new GZIPOutputStream(new FileOutputStream(path + ".gz"))) {
+
+            byte[] buf = new byte[4 * 1024];// 4k读取
+            int len;
+            while ((len = in.read(buf)) != -1) {
+                out.write(buf, 0, len);
+            }
+            out.flush();
+        }
+    }
+}
+```
+
+## 一致性hash
+
+一致性hash一般用于多节点负载均衡，相比于random策略，hash策略可以将请求固定分发给某个节点。但普通hash在出现节点故障或扩缩容时，大量请求会分配到与原本不同的节点。而一致性hash则解决了这个痛点，在出现扩缩容时依旧可以保证除了故障节点外的其它请求依旧会分配到原本节点，故障节点的请求则按照策略分配给下一个节点。
+
+缺点是分配不均衡，可以用虚拟节点缓解该问题。
+
+```java
+/**
+ * 一致性hash实现
+ * 我个人觉得，用数组模拟环，二分查找效率绝对比TreeMap高
+ * [-100, 123 , 245 , 900 ]， 这种数组模拟情况下，根据hash值二分查找效率更高
+ *
+ * @author fzk
+ * @datetime 2022-09-11 10:10
+ */
+public class MyConsistentHash {
+    /**
+     * 插入虚拟节点的目的是使得节点在环上尽可能的分布均匀，避免部分节点压力过大
+     *
+     * @param podNodes        key-->hostname value--> ip:port
+     * @param visualNodeCount 虚拟节点数量，需>=1
+     */
+    public MyConsistentHash(Set<PodNode> podNodes, int visualNodeCount) {
+        assert visualNodeCount >= 1;
+        treeMap = new TreeMap<>();
+        for (PodNode pod : podNodes) {
+            // 插入真实节点
+            int hash = hash(pod.hostname);
+            treeMap.put(hash, pod);
+            // 插入虚拟节点
+            for (int i = 1; i < visualNodeCount; i++) {
+                hash = hash(pod.hostname + "_visual_" + i);
+                treeMap.put(hash, pod);
+            }
+        }
+        //System.out.println(treeMap.keySet());
+    }
+
+    public PodNode getPodNode(String key) {
+        // 环形匹配
+        int hash = hash(key);
+        SortedMap<Integer, PodNode> tailMap = treeMap.tailMap(hash);
+        if (tailMap.size() != 0) return treeMap.get(tailMap.firstKey());
+        return treeMap.firstEntry().getValue();
+    }
+
+    public static class PodNode {
+        public String hostname;
+        public String ip;
+        public int port;
+
+        public PodNode(String hostname) {
+            this.hostname = hostname;
+        }
+    }
+
+    // 一致性哈希环
+    private final TreeMap<Integer, PodNode> treeMap;
+
+    public static void main(String[] args) {
+        Set<PodNode> set = new HashSet<>();
+        for (int i = 0; i < 10; i++) {
+            set.add(new PodNode("node" + i));
+
+        }
+        MyConsistentHash hashSet = new MyConsistentHash(set, 3);
+        for (int i = 0; i < 10; i++) {
+            System.out.println(hashSet.getPodNode("user:" + i + "_2022").hostname);
+            System.out.println(hashSet.getPodNode("blog:" + i + "_2022").hostname);
+        }
+    }
+
+    // 默认情况未重写Hashcode方法时，其hashCode()返回地址，很可能是连续的
+    private static int hash(String key) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(key.getBytes());
+        return (int) crc32.getValue();
+    }
+}
+```
+
+## 漏斗限流
+
+```java
+/**
+ * 漏斗限流器
+ *
+ * @author fzk
+ * @datetime 2022-07-11 21:25
+ */
+public class FunnelRateLimiter {
+    private final ConcurrentHashMap<String, Funnel> funnels = new ConcurrentHashMap<>();
+    private final long DEFAULT_CAPACITY;
+    private final double DEFAULT_FLOW_RATE;// 流速，单位(个/ms)
+
+    public
+    FunnelRateLimiter(long DEFAULT_CAPACITY, double DEFAULT_FLOW_RATE) {
+        this.DEFAULT_CAPACITY = DEFAULT_CAPACITY;
+        this.DEFAULT_FLOW_RATE = DEFAULT_FLOW_RATE;
+    }
+
+    // 判断是否允许放行
+    public boolean isActionAllow(String key, long water) {
+        Funnel funnel = funnels.get(key);
+        if (funnel == null) {
+            funnel = new Funnel(DEFAULT_CAPACITY, DEFAULT_FLOW_RATE);
+            funnels.put(key, funnel);
+        }
+        return funnel.pushWater(water);
+    }
+
+    // 加入一个漏斗
+    public boolean makeFunnel(String key, long capacity, double flowRate) {
+        assert capacity > 0 && flowRate > 0;
+        boolean exits = funnels.containsKey(key);
+        if (!exits)
+            funnels.put(key, new Funnel(capacity, flowRate));
+        return !exits;
+    }
+
+    public Funnel removeFunnel(String key) {
+        return funnels.remove(key);
+    }
+
+    static class Funnel {
+        private final long capacity;// 漏斗容量
+        private final double flowRate;// 流速
+        private final AtomicLong leftSpace;// 剩余空间
+        private volatile long lastFlowTimeStamp;// 上次流水时间戳
+        private final Lock lock;
+
+        public Funnel(long capacity, double flowRate) {
+            this.capacity = capacity;
+            this.flowRate = flowRate;
+            this.leftSpace = new AtomicLong(capacity);
+            this.lastFlowTimeStamp = System.currentTimeMillis();
+            this.lock = new ReentrantLock();
+        }
+
+        // 漏水，返回剩余空间，需保证此方法最多1个线程执行
+        long leakWater() {
+            long now = System.currentTimeMillis();
+            long timeDiff = now - lastFlowTimeStamp;
+            long diffWater = (long) (timeDiff * flowRate);
+            if (diffWater < 0 || diffWater > capacity) {
+                // 溢出，说明太久没漏水了，直接清空漏斗
+                System.out.println("清空漏洞:" + diffWater);
+                leftSpace.set(capacity);
+                lastFlowTimeStamp = now;
+                return capacity;
+            }
+            if (diffWater != 0) {
+                System.out.println("放水: " + diffWater);
+                long left = leftSpace.addAndGet(diffWater);
+                if (left < 0) leftSpace.set(0);
+                return left < 0 ? 0 : left;
+            }
+            return leftSpace.get();
+        }
+
+        // 入水
+        boolean pushWater(long water)   {
+            if (water > capacity) return false;
+            long old = leftSpace.get();
+            if (old < water) {
+                if (!lock.tryLock()) return false;
+                try {
+                    old = leakWater();
+                } finally {
+                    lock.unlock();
+                }
+            }
+            if (old < water) return false;
+
+            leftSpace.getAndAdd(-water);
+            return true;
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        FunnelRateLimiter limiter = new FunnelRateLimiter(100, 1);
+        CountDownLatch countDownLatch = new CountDownLatch(10);
+        for (int i = 0; i < 10; i++) {
+            new Thread(() -> {
+                try {
+                    for (int j = 0; j < 100; ) {
+                        Thread.sleep(ThreadLocalRandom.current().nextLong(10, 100));
+                        if (!limiter.isActionAllow("testKey", 1)) {
+                            System.out.println(Thread.currentThread().getName() + " flow limit");
+                            continue;
+                        }
+                        j++;
+                    }
+                    countDownLatch.countDown();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }, "thread-" + i).start();
+        }
+
+        countDownLatch.await();
+    }
+}
+```
+
+## 深拷贝
+
+Object.clone()方法是浅拷贝。可以用java序列化方式实现深拷贝：
+
+```java
+/**
+ * @author fzk
+ * @date 2021-11-23 0:10
+ */
+public class MyCopyUtil {
+    /**
+     * 深拷贝(deep copy) ： 采用序列化方式的深度拷贝
+     *
+     * @param origin 拷贝对象
+     * @return 深拷贝对象
+     * @throws CloneNotSupportedException 异常
+     */
+    public static Object deepCopy(Object origin) throws CloneNotSupportedException {
+        assert origin != null : "不能拷贝null";
+        if (!(origin instanceof Serializable))
+            throw new CloneNotSupportedException("对象必须可序列化");
+
+        try {
+            ByteArrayOutputStream bout = new ByteArrayOutputStream();
+
+            try (ObjectOutputStream out = new ObjectOutputStream(bout)) {
+                out.writeObject(origin);
+            }
+
+            try (ByteArrayInputStream bin = new ByteArrayInputStream(bout.toByteArray())) {
+                ObjectInputStream in = new ObjectInputStream(bin);
+                return in.readObject();
+            }
+        } catch (IOException | ClassNotFoundException e) {
+            CloneNotSupportedException e1 = new CloneNotSupportedException();
+            e1.initCause(e);
+            throw e1;
+        }
+    }
+}
+```
+
+## stream操作
+
+java8新特性：stream
+
+感觉没啥用，性能还不如迭代。
+
+```java
+/**
+ * @author fzk
+ * @date 2021-11-22 17:18
+ */
+@SuppressWarnings("unused")
+public class MyStreamUtil {
+
+    public static List<Integer> getRandomList(int length) {
+        assert length > 0 : "length 必须大于0";
+        return Stream.generate(ThreadLocalRandom.current()::nextInt)
+                .limit(length)
+                //.sorted() // 应该不需要排序
+//                .collect(Collectors.toList()); // 这两个是差不多的，但是自定义数组初始容量更好点嘛
+                .collect(() -> new ArrayList<>(length), List::add, List::addAll);
+    }
+
+    public static List<Integer> getRandomList(int length, int origin, int bound) {
+        assert length > 0 : "length 必须大于0";
+        assert origin < bound : "origin must smaller than bound";
+
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        return IntStream.generate(() -> random.nextInt(origin, bound))
+                .limit(length)
+                //.sorted()
+                .collect(() -> new ArrayList<>(length), List::add, List::addAll);
+    }
+
+    public static int[] getRandomInts(int length) {
+        assert length > 0 : "length 必须大于0";
+
+        return ThreadLocalRandom.current()
+                .ints()
+                .limit(length)
+                .toArray();
+    }
+
+    /*返回序列的范围在[origin,bound) 即左闭右开*/
+    public static int[] getRandomInts(int length, int origin, int bound) {
+        assert length > 0 : "length 必须大于0";
+        assert origin < bound : "origin must smaller than bound";
+
+        return ThreadLocalRandom.current()
+                .ints(length, origin, bound)
+                .toArray();
+    }
+
+    public static IntSummaryStatistics summaryStatistics(List<Integer> list) {
+        assert list != null && list.size() != 0 : "list 不能为空";
+        return list.stream()
+                .collect(Collectors.summarizingInt(i -> i));
+    }
+
+    /**
+     * reduce 规约 最终操作
+     * 允许通过指定的函数来将stream中的多个元素规约为一个元素
+     * 闭区间[start,end]
+     */
+    public static int minVal(int[] nums, int start, int end) {
+        return Arrays.stream(nums, start, end + 1)
+                .reduce(nums[0], Math::min);// nums[0]作为起始种子
+    }
+}
+```
+
+## ThreadPool
+
+```java
+/**
+ * 由于Executors类帮助生产的线程池有一定弊端，这里用ThreadPoolExecutor直接构造线程池
+ * 其实也可以看看Executors类新建线程池的步骤，用于参考，在这里更好的创建线程池
+ * 可以利用 Executors 的一些静态方法可以把 Runnable 与 Callable 任务互相转换
+ *
+ * @author fzk
+ * @apiNote 一次性涌入大量任务，如果正在处理任务+待处理任务超过了 线程池最大线程量+等待队列容量,
+ * 默认会拒绝接受任务，抛出RejectedExecutionException，这是运行时异常，要见机行事
+ * @date 2021-11-21 16:09
+ * @see ThreadPoolExecutor
+ */
+@SuppressWarnings("unused")
+public class MyThreadPoolExecutorUtil {
+    /**
+     * 在等待队列达到上限之后，新建线程，线程达到上限而等待队列也上限了，
+     * 再加任务默认会报错RejectedExecutionException
+     */
+    private static final int CORE_POOL_SIZE = 2; // 池中最少线程,设置0的话，第1个任务到了会新建1个线程，然后会等到任务队列满了之后才新建，这样不好
+    private static final int MAX_POOL_SIZE = 5;  // 池中最多线程
+    /**
+     * 如果池中当前有超过 corePoolSize 的线程，则多余的线程如果空闲时间超过 keepAliveTime 将被终止
+     */
+    private static final int KEEP_ALIVE_TIME = 1000 * 10;
+    private static final TimeUnit unit = TimeUnit.MILLISECONDS;
+    /**
+     * 任何BlockingQueue都可用于传输和保存提交的任务。 此队列的使用与池大小交互：
+     * 1.如果正在运行的线程少于 corePoolSize，则 Executor 总是喜欢添加新线程而不是排队。
+     * 2.如果 corePoolSize 或更多线程正在运行，Executor 总是喜欢将请求排队而不是添加新线程。
+     * 3.如果请求无法排队，则会创建一个新线程，除非这会超过 maximumPoolSize，在这种情况下，任务将被拒绝。
+     * <p>
+     * 排队的一般策略有以下三种：
+     * 1.直接交接:
+     * 工作队列的一个很好的默认选择是SynchronousQueue, 它将任务移交给线程而不用其他方式保留它们.
+     * 在这里，如果没有线程可立即运行，则将任务排队的尝试将失败，因此将构建一个新线程。
+     * 在处理可能具有内部依赖性的请求集时，此策略可避免锁定。 直接切换通常需要无限的maximumPoolSizes 以避免拒绝新提交的任务。
+     * 这反过来又承认了当命令平均到达速度快于它们可以处理的速度时，线程无限增长的可能性。
+     * 2.无界队列:
+     * 使用无界队列,没有预定义容量的LinkedBlockingQueue
+     * 将导致新任务在所有 corePoolSize 线程都忙时在队列中等待。 因此，不会创建超过 corePoolSize 的线程。
+     * （因此maximumPoolSize的值没有任何影响。）当每个任务完全独立于其他任务时，这可能是合适的，因此任务不会影响彼此的执行； 例如，在网页服务器中。 虽然这种排队方式在平滑请求的瞬时爆发方面很有用，但它承认当命令的平均到达速度超过它们的处理速度时，工作队列可能会无限增长。
+     * 3.有界队列:
+     * 有界队列（ArrayBlockingQueue）在与有限的 maximumPoolSizes 一起使用时有助于防止资源耗尽，但可能更难以调整和控制。
+     * 队列大小和最大池大小可以相互权衡：使用大队列和小池可以最大限度地减少 CPU 使用率、操作系统资源和上下文切换开销，但会导致人为地降低吞吐量。 如果任务频繁阻塞（例如，如果它们受 I/O 限制），则系统可能能够为比您允许的更多线程安排时间。 使用小队列通常需要更大的池大小，这会使 CPU 更忙，但可能会遇到不可接受的调度开销，这也会降低吞吐量。
+     */
+    private static final int QUEUE_CAPACITY = 10;// 有界队列容量10
+
+    /**
+     * 线程池缓存
+     */
+    private static volatile ThreadPoolExecutor threadPool = null;
+
+    /*双重校验DCL*/
+    public static ThreadPoolExecutor getThreadPool() {
+        if (threadPool == null) {
+            synchronized (MyThreadPoolExecutorUtil.class) {
+                if (threadPool == null) {
+                    // 线程池一般创建方法，排队策略选择：有界队列ArrayBlockingQueue
+                    threadPool = new ThreadPoolExecutor(CORE_POOL_SIZE, MAX_POOL_SIZE, KEEP_ALIVE_TIME, unit,
+                            new ArrayBlockingQueue<>(QUEUE_CAPACITY), new NamingThreadFactory("这个线程池该叫啥呢"));
+                }
+            }
+        }
+        return threadPool;
+    }
+
+    public static <T> List<Future<T>> invokeAll(List<Callable<T>> callables) throws InterruptedException {
+
+        ThreadPoolExecutor threadPool = getThreadPool();
+        // 注意：在任务数过多时，这里还有可能抛出RejectedExecutionException
+        return threadPool.invokeAll(callables);// 阻塞到任务完成
+    }
+
+    /**
+     * 建议用这个方法进行任务处理
+     *
+     * @param callables 需要处理的任务列表
+     * @return 任务列表返回的结果集合
+     */
+    public static <T> List<Future<T>> execute(List<Callable<T>> callables) {
+        assert callables != null && callables.size() != 0 : "线程调度任务不能为null";
+
+        ThreadPoolExecutor cachedThreadPool = getThreadPool();
+        List<Future<T>> futures = new ArrayList<>(callables.size());
+        try {
+            // 所有任务提交执行，这个玩意任务量过多应该是一直排队
+            callables.forEach(callable -> futures.add(cachedThreadPool.submit(callable)));
+
+        } catch (Throwable t) {// 这里的写法来自于invokeAll方法
+            futures.forEach(task -> task.cancel(true));
+            throw t;
+        }
+        return futures;
+    }
+
+
+    /**
+     * 对于传入的一系列任务，只要其中一个任务得到结果，计算停止并返回
+     * 假设您想使用任务集的第一个非空结果，忽略任何遇到异常的结果，并在第一个任务准备好时取消所有其他任务
+     *
+     * @param callables 任务列表
+     * @param <T>       返回的类型
+     * @return 第一个完成的计算结果
+     */
+    public static <T> T executeForFirstResult(List<Callable<T>> callables) {
+        assert callables != null && callables.size() != 0 : "线程调度任务不能为null";
+        int len = callables.size();
+
+        // 1.新建执行器(线程池)？？？新建个毛线，用已经有的这个缓存线程池
+        // ExecutorService cachedThreadPool = Executors.newCachedThreadPool();
+        ExecutorService cachedThreadPool = getThreadPool();
+
+        // 2.新建ExecutorCompletionService，会管理Future对象的一个阻塞队列，其中包含所提交任务的结果(一旦结果可用，就会放入队列)
+        ExecutorCompletionService<T> completionService =
+                new ExecutorCompletionService<>(cachedThreadPool);
+        ArrayList<Future<T>> futures = new ArrayList<>(len);// 存放任务列表返回的结果集合
+        T result = null;
+        try {
+            // 3.将所有任务提交给执行器(即线程池)去执行
+            callables.forEach(task -> futures.add(completionService.submit(task)));
+            for (int i = len; i > 0; i--) {
+                try {
+                    // 4.获取第一个计算完成的非空结果(执行出现异常返回是null)
+                    T t = completionService.take().get();
+                    if (t != null) {
+                        result = t;
+                        break;
+                    }
+                } catch (ExecutionException | InterruptedException ignore) {
+                }
+            }
+        } finally {
+            // 5.某个任务计算完成，取消剩余任务执行
+            futures.forEach(task -> task.cancel(true));
+            //cachedThreadPool.shutdown();//关闭线程池
+        }
+        return result;
+    }
+
+    /**
+     * 异步计算：回调方法实现的异步计算：在任务完成之后要出现的动作注册一个回调
+     * 主线程调用这个方法之后就退出这个方法了，这个方法调用其他线程执行任务，完成之后会调用回调方法
+     * CompletableFuture执行完成后，得到一个结果或者捕获一个异常，需要使用whenComplete进行回调处理
+     * <p>
+     * 回调方法示例如下：
+     * <pre>
+     *       f.whenComplete((result, exception) -> {
+     *             if (exception == null) {
+     *                 // 处理结果
+     *                 System.out.println(result);
+     *             } else {
+     *                 // 处理异常
+     *                 exception.printStackTrace();
+     *             }
+     *         });
+     * </pre>
+     *
+     * @param supplier 需要执行的任务，supplyAsync方法第一个参数不是Callable<T>，而是Supplier<T>, 不过其作用都是作为线程所需要执行的任务
+     * @param action   任务完成之后的回调方法
+     * @apiNote 需要注意的是当主线程死亡，这个后台线程也会死亡，回调方法可能就不会执行了
+     */
+    public static <T> void executeAsync(Supplier<T> supplier, BiConsumer<? super T, ? super Throwable> action) {
+        // 1.执行异步任务
+        // 如果不提供执行器，任务会在默认执行器上执行(ForkJoinPool.commonPool()返回的执行器).通常你可能不希望这样做
+        CompletableFuture<T> f = CompletableFuture.supplyAsync(supplier, getThreadPool());
+
+        // 2.任务完成之后的回调
+        f.whenComplete(action);
+    }
+
+    /**
+     * 将Runnable任务转为Callable任务，FutureTask返回结果应该是null
+     * 其是完全可以自己转换，没必要是吧
+     *
+     * @param runnableList 需要转换的Runnable
+     * @return Callable
+     */
+    public static List<Callable<Object>> RunnableToCallable(List<Runnable> runnableList) {
+        // 对于null和空的处理策略，应该采取原样返回
+        if (runnableList == null) return null;
+        if (runnableList.size() == 0) return new ArrayList<>(0);
+
+        ArrayList<Callable<Object>> callables = new ArrayList<>(runnableList.size());
+        runnableList.forEach(task -> callables.add(Executors.callable(task)));
+        return callables;
+    }
+
+    private static class NamingThreadFactory implements ThreadFactory {
+
+        private final AtomicInteger threadNum = new AtomicInteger(1);
+        private final ThreadFactory delegate;
+        private final String namePrefix;
+
+        public NamingThreadFactory(String namePrefix) {
+            this.delegate = Executors.defaultThreadFactory();// 借我用一下, 嘿嘿
+            this.namePrefix = namePrefix;
+        }
+
+        /**
+         * 创建一个带名字的线程池生产工厂
+         */
+        public NamingThreadFactory(ThreadFactory delegate, String namePrefix) {
+            this.delegate = delegate;
+            this.namePrefix = namePrefix; // TODO consider uniquifying this
+        }
+
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = delegate.newThread(r);
+            t.setName(namePrefix + " [#" + threadNum.getAndIncrement() + "]");
+            return t;
+        }
+    }
+
+    /*
+    private static class ThreadPoolHolder {
+        //缓存线程池
+        private static volatile ThreadPoolExecutor cachedThreadPool = null;
+
+        //双重校验：DCL
+        public static ThreadPoolExecutor getCachedThreadPool() {
+            if (cachedThreadPool == null) {
+                synchronized (ThreadPoolHolder.class) {
+                    if (cachedThreadPool == null) {
+                        // 缓存池的精髓就在于corePoolSize=0和SynchronousQueue
+                        // 用这个SynchronousQueue有个问题，一有任务就新建线程，建不了线程就抛RejectedExecutionException
+                        // 我tm服了，那么这样就不能用SynchronousQueue
+                        cachedThreadPool = new ThreadPoolExecutor(0, MAX_POOL_SIZE, KEEP_ALIVE_TIME,
+                                unit, new SynchronousQueue<>());
+                    }
+                }
+            }
+            return cachedThreadPool;
+        }
+
+        private ThreadPoolHolder() {
+        }
+    }
+    */
+
+    public static void main(String[] args) throws InterruptedException {
+        ThreadPoolExecutor threadPool = getThreadPool();
+        try {
+            for (int i = 0; i < 10; i++) {
+                //创建WorkerThread对象（WorkerThread类实现了Runnable 接口）
+                Runnable task = new MyRunnable(String.valueOf(i));
+                //执行Runnable
+                threadPool.execute(task);
+            }
+        } finally {
+            // 终止线程池
+            threadPool.shutdown();
+            // 将主线程阻塞到所有任务终止
+            while (!threadPool.awaitTermination(1000 * 10, TimeUnit.MILLISECONDS)) {
+                System.out.println("我应该只执行了一次吧,执行第2次说明这么多时间都没有等待全部线程关闭，即线程还在做任务");
+            }
+            System.out.println("Finished all threads");
+        }
+    }
+
+    /**
+     * 这是一个简单的Runnable类，需要大约5秒钟来执行其任务。
+     *
+     * @author shuang.kou
+     */
+    private static class MyRunnable implements Runnable {
+
+        private final String command;
+
+        public MyRunnable(String s) {
+            this.command = s;
+        }
+
+        @Override
+        public void run() {
+            System.out.println(Thread.currentThread().getName() + " Start. Time = " + new Date());
+            processCommand();
+            System.out.println(Thread.currentThread().getName() + " End. Time = " + new Date());
+        }
+
+        private void processCommand() {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        @Override
+        public String toString() {
+            return this.command;
+        }
+    }
+}
+```
+
+
+
+
+
+## 随机字符串
+
+随机类Random生成随机字符串还是比较简单的。
+
+```java
+/**
+ * @author fzk
+ * @date 2021-11-15 22:11
+ */
+@SuppressWarnings("unused")
+public class MyRandomUtil {
+    /**
+     * Random类是线程安全的，但是如果多个线程需要等待一个共享的随机数生成器，会很低效
+     * 所以使用 <strong>线程局部变量<strong/>
+     * Java 7 提供了一个便利类 ThreadLocalRandom
+     * 如：
+     * int random=ThreadLocalRandom.current().nextInt(upperBound);
+     */
+    private static final char[] charCache;
+
+    static {
+        charCache = new char[]{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+                'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+                'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+                'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+                'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'};
+    }
+
+    /*数字、小写大写字母*/
+    public static String randomStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++)
+            builder.append(charCache[localRandom.nextInt(62)]);
+        return builder.toString();
+    }
+
+    /*经过测试，这个方法性能不如上面这个*/
+    private static String randomStrByStream(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom.current()
+                .ints(length, 0, 62)
+                .forEach(i -> builder.append(charCache[i]));
+        return builder.toString();
+    }
+
+    /*数字混合大写字母*/
+    public static String randomUpperStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++) {
+            int index = localRandom.nextInt(62);
+            if (9 < index && index < 36) index += 26;
+            builder.append(charCache[index]);
+        }
+        return builder.toString();
+    }
+
+    /*数字混合小写字母*/
+    public static String randomLowerStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++) {
+            builder.append(charCache[localRandom.nextInt(0, 36)]);
+        }
+        return builder.toString();
+    }
+
+    /*返回纯字符串*/
+    public static String randomPureStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++)
+            builder.append(charCache[localRandom.nextInt(10, 62)]);
+        return builder.toString();
+    }
+
+    /*返回纯大写字符串*/
+    public static String randomPureUpperStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++)
+            builder.append(charCache[localRandom.nextInt(36, 62)]);
+        return builder.toString();
+    }
+
+    /*返回纯小写字符串*/
+    public static String randomPureLowerStr(int length) {
+        assert length >= 0 : "length can not be 小于 0";// 相信在上线之后不会出现 length < 0
+        if (length == 0) return "";
+
+        StringBuilder builder = new StringBuilder(length);
+        ThreadLocalRandom localRandom = ThreadLocalRandom.current();//使用本线程的ThreadLocalRandom
+        for (int i = 0; i < length; i++)
+            builder.append(charCache[localRandom.nextInt(10, 36)]);
+        return builder.toString();
+    }
+}
+```
+

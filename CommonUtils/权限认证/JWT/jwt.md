@@ -23,7 +23,7 @@ JWT---Json Web Token	JSON 网络令牌
 
 ### 传统Cookie+Session与JWT对比
 
-① 在传统的用户登录认证中，因为http是无状态的，所以都是采用session方式。用户登录成功，服务端会保证一个session，当然会给客户端一个sessionId，客户端会把sessionId保存在cookie中，每次请求都会携带这个sessionId。
+① 在传统的用户登录认证中，**因为http是无状态的**，所以都是采用session方式记录登录状态。用户登录成功，服务端会保证一个session，当然会给客户端一个sessionId，客户端会把sessionId保存在cookie中，每次请求都会携带这个sessionId。
 
 cookie+session这种模式通常是保存在内存中，而且服务从单服务到多服务会面临的session共享问题，随着用户量的增多，开销就会越大。而JWT不是这样的，只需要服务端生成token，客户端保存这个token，每次请求携带这个token，服务端认证解析就可。
 
@@ -93,8 +93,6 @@ PAYLOAD
 
 > 请注意，对于已签名的令牌，此信息虽然受到防篡改保护，但**任何人都可以读取**。除非加密，**否则不要将 *机密信息* 放在 JWT 的负载或标头元素中。**
 
-
-
 #### 验证签名
 
 VERIFY SIGNATURE：用于防止篡改payload中的数据
@@ -114,9 +112,9 @@ HMACSHA256(
 
 #### 输出格式
 
-输出是三个由`.`分隔的 Base64-URL 字符串，可以在 HTML 和 HTTP 环境中轻松传递，同时与基于 XML 的标准（如 SAML）相比更加紧凑。
+输出是三个由`.`分隔的 Base64-URL 字符串，可以在 HTML 和 HTTP 环境中轻松传递。
 
-![jwt输出格式](https://uestc-fzk.gitee.io/notebook/权限认证/JWT/pictures/jwt输出格式.png)
+![jwt输出格式](pictures/jwt输出格式.png)
 
 ### base64
 
@@ -135,102 +133,33 @@ Base64编码是从二进制到字符的过程，可用于在[HTTP](https://baike
 ③ 使用在header中声明的加密算法和每个项目随机生成的**secret**来进行加密， 把第一步分字符串和第二部分的字符串进行加密， 生成新的字符串。词字符串是独一无二的。
 ④ 解密的时候，只要客户端带着JWT来发起请求，服务端就直接使用**secret**进行解密。
 
-**特点：**
-
-① 三部分组成，每一部分都进行字符串的转化
-② 解密的时候没有使用数据库，仅仅使用的是secret进行解密
-③ **JWT的secret千万不能泄密！**
+注意：**JWT的secret千万不能泄密！**
 
 ### jwt优缺点
 
 **优点**：
->1. 不用在服务器存放用户数据，减轻服务器压力
->应用程序分布式部署的情况下，Session需要做多机数据共享，通常可以存在数据库或者Redis里面。而JWT不需要。
->2. 轻量级，json风格，简单
->3. 无状态：JWT不在服务端存储任何状态。
+
+1、登录状态存储于客户端，减轻服务端存储压力。
+
+
 
 **缺点**
->1. 一次性：无状态是JWT的特点，但也导致了这个问题，JWT是一次性的。想修改里面的内容，就必须签发一个新的JWT。即缺陷是一旦下发，**服务后台无法拒绝携带该jwt的请求（如踢除用户）**
->	>- 续签问题
->      如果你使用jwt做会话管理，传统的Cookie续签方案一般都是框架自带的，Session有效期30分钟，30分钟内如果有访问，有效期被刷新至30分钟。
->	>  一样的道理，要改变JWT的有效时间，就要签发新的JWT。
->  最简单的一种方式是每次请求刷新JWT，即每个HTTP请求都返回一个新的JWT。这个方法不仅暴力不优雅，而且每次请求都要做JWT的加密解密，会带来性能问题。另一种方法是在Redis中单独为每个JWT设置过期时间，每次访问时刷新JWT的过期时间。
->	  - 无法销毁
->	    通过JWT的验证机制可以看出来，一旦签发一个JWT，在到期之前就会始终有效，无法中途废弃。
->	    例如你在payload中存储了一些信息，当信息需要更新时，则重新签发一个JWT，但是由于旧的jwt还没过期，拿着这个旧的JWT依旧可以登录，那登录后服务端从JWT中拿到的信息就是过时的。
->	    为了解决这个问题，我们就需要在服务端部署额外的逻辑，例如设置一个黑名单，一旦签发了新的JWT，那么旧的就加入黑名单（比如存到redis里面），避免被再次使用。
->	  - 可以看出想要破解JWT一次性的特性，就需要在服务端存储jwt的状态。但是引入 redis 之后，就把无状态的jwt硬生生变成了有状态了，**违背了JWT的初衷**。而且这个方案和Session都差不多了。
->	
->2. 安全性：payload(载荷)是base64编码的，没有加密，不安全。session存在服务端，更安全。
->
->3. 性能：JWT太长。
->     由于是无状态使用JWT，所有的数据都被放到JWT里，如果还要进行一些数据交换，那载荷会更大，经过编码之后导致JWT非常长，Cookie的限制大小一般是4k，cookie很可能放不下，所以**JWT一般放在LocalStorage里面**。
->     并且用户在系统中的每一次Http请求都会把JWT携带在Header里面，Http请求的Header可能比Body还要大。
->     而**SessionId只是很短的一个字符串**，因此使用JWT的Http请求比使用Session的开销大得多。
 
-**JWT和token的区别**
+1、一次性：无状态是JWT的特点，但也导致了这个问题，JWT是一次性的。想修改里面的内容，就必须签发一个新的JWT。即缺陷是一旦下发，**服务后台无法拒绝携带该jwt的请求（如踢除用户）**
 
-token依赖于Redis查询数据信息，token存放value数据比较安全。
-jwt不依赖与Redis，数据存放在客户端(浏览器)。
+2、安全性：payload(载荷)是base64编码的，没有加密，不安全。session存在服务端，更安全。
 
+3、性能：JWT太长。
+由于是无状态使用JWT，所有的数据都被放到JWT里，如果还要进行一些数据交换，那载荷会更大，经过编码之后导致JWT非常长，Cookie的限制大小一般是4k，cookie很可能放不下，所以**JWT一般放在LocalStorage里面**。
+并且用户在系统中的每一次Http请求都会把JWT携带在Header里面，Http请求的Header可能比Body还要大。
+而**SessionId只是很短的一个字符串**，因此使用JWT的Http请求比使用Session的开销大得多。
 
+4、无法销毁
+通过JWT的验证机制可以看出来，一旦签发一个JWT，在到期之前就会始终有效，无法中途废弃。
+例如你在payload中存储了一些信息，当信息需要更新时，则重新签发一个JWT，但是由于旧的jwt还没过期，拿着这个旧的JWT依旧可以登录，那登录后服务端从JWT中拿到的信息就是过时的。
+为了解决这个问题，我们就需要在服务端部署额外的逻辑，例如设置一个黑名单，一旦签发了新的JWT，那么旧的就加入黑名单（比如存到redis里面），避免被再次使用。
 
-## 模拟jwt加密与验证
-
-```java
-    /**
-     * 模拟jwt案例
-     * <p>
-     * 头部
-     * payload载荷
-     * 验证签名
-     */
-    @Test
-    public void jwtEncode() throws JSONException {
-        // header
-        JSONObject header = new JSONObject();
-        header.put("alg", "HS256");
-        // payload
-        JSONObject payLoad = new JSONObject();
-        payLoad.put("username", "fzk");
-        payLoad.put("userId", "1");
-
-        // base64对数据进行编码
-        String jwtHeader = Base64.encodeBase64String(header.toString().getBytes());
-        String jwtPayLoad = Base64.encodeBase64String(payLoad.toString().getBytes());
-
-        // 验证签名 后面加盐值 一般盐值存放在服务器端
-        // 防止暴力破解、撞库
-        String signKey = "myKey1";
-        String sign = DigestUtils.md5DigestAsHex((jwtPayLoad.toString() + signKey).getBytes());
-
-        // 合成jwt
-        String jwt = jwtHeader + "." + jwtPayLoad + "." + sign;
-        System.out.println(jwt);
-    }
-
-    /**
-     * 验证jwt签名
-     * 验证数据没有被修改
-     */
-    @Test
-    public void checkJWT() {
-        String jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxIiwidXNlcm5hbWUiOiJmemsifQ==.7c7fde9d2fca720aa75aeac8d9cdbd5a";
-        String[] splits = jwt.split("\\.");
-
-        // 取出头部和负载
-        String jwtHeader = splits[0];
-        String jwtPayLoad = splits[1];
-
-        // 验证签名
-        String signKey = "myKey1";
-        String sign = DigestUtils.md5DigestAsHex((jwtPayLoad.toString() + signKey).getBytes());
-        if (StringUtils.isEmpty(sign))
-            return;
-
-        System.out.println(sign.equals(splits[2]));
-    }
-```
+可以看出想要破解JWT一次性的特性，就需要在服务端存储jwt的状态。但是引入 redis 之后，就把无状态的jwt硬生生变成了有状态了，**违背了JWT的初衷**。而且这个方案和Session都差不多了。
 
 ## 快速开始
 
@@ -612,351 +541,8 @@ void testDecode() {
 }
 ```
 
+# 建议
 
+用个锤子JWT库哦，不如自己写。
 
-# Sa-token整合JWT
-
-这个可以结合Sa-token的码云项目里的jwt-demo进行整合。不过也许是JWT选择的不一样，我这个JWT整合与其存在一定区别，不过过程是一样的。
-
-将其放入spring的容器中即可。
-
-## 配置在类中
-
-```java
-@Component
-public class SaTokenJwtUtil {
-
-    /**
-     * 秘钥 (随便手打几个字母就好了)
-     */
-    public static String secret = "myKey";
-
-    /**
-     * token有效期 (单位: 秒)
-     */
-    public static long TIMEOUT = 60 * 60 * 24;// 1天
-
-
-    public static String LOGIN_ID_KEY = "loginId";
-
-
-    /**
-     * 根据userId生成token
-     *
-     * @param loginId 账号id
-     * @return jwt-token
-     */
-    public static String createToken(Object loginId) {
-        Date nowDate = new Date();
-        return JWT.create()
-                //2.1添加头部.
-                //.withHeader(map)
-
-                // 2.2添加payload
-                // 2.2.1.建议添加的声明
-                .withIssuer("auth0")    // iss：发行者
-                .withClaim(LOGIN_ID_KEY, loginId.toString())
-                .withIssuedAt(nowDate)//"iat" claim . 发行时间
-                .withExpiresAt(new Date(nowDate.getTime() + TIMEOUT * 1000)) // "exp" claim. 到期时间
-                .withNotBefore(nowDate)    // 设置令牌在什么时间之前是不能使用的
-
-                // 2.3签署令牌并返回JWT的Json String
-                .sign(Algorithm.HMAC256(secret));
-    }
-
-    /**
-     * 从一个jwt里面解析出Claims
-     *
-     * @param tokenValue token值
-     *                   //     * @param base64Security 秘钥
-     * @return Claims对象
-     */
-    public static DecodedJWT getClaims(String tokenValue) {
-//     System.out.println(tokenValue);
-        DecodedJWT decodedJWT = null;
-
-        // 先解码 看看能不能解码：不能将抛出JWTDecodeException异常
-        decodedJWT = JWT.decode(tokenValue);
-
-        // 再进行校验token：失败将抛出JWTVerificationException
-        JWTVerifier verifier = JWT.require(Algorithm.HMAC256(secret))
-                .withIssuer("auth0")
-                .build(); //Reusable verifier instance
-        verifier.verify(tokenValue);
-
-        return decodedJWT;
-    }
-
-    /**
-     * 从一个jwt里面解析loginId
-     *
-     * @param tokenValue token值
-     *                   //     * @param base64Security 秘钥
-     * @return loginId
-     */
-    public static String getLoginId(String tokenValue) {
-        try {
-            Claim loginId = getClaims(tokenValue).getClaim(LOGIN_ID_KEY);
-            if (loginId == null) {
-                return null;
-            }
-            return loginId.asString();
-        } catch (JWTDecodeException e) {// 不能解码：可能是秘钥改了
-//         throw NotLoginException.newInstance(StpUtil.TYPE, NotLoginException.TOKEN_TIMEOUT);
-//            System.out.println("无效令牌：可能是时间验证不通过，可能是别人修改了，可能是秘钥不对");
-            throw NotLoginException.newInstance(StpUtil.stpLogic.loginType, NotLoginException.INVALID_TOKEN);
-        } catch (JWTVerificationException e) {// 解码成功，但是有异常，说明校验失败，应该是失效了
-            return NotLoginException.TOKEN_TIMEOUT;
-//            throw NotLoginException.newInstance(StpUtil.stpLogic.loginType, NotLoginException.INVALID_TOKEN);
-        } catch (Exception e) {
-            throw new SaTokenException(e);
-        }
-    }
-
-
-    static {
-
-        // 修改默认实现
-        StpUtil.stpLogic = new StpLogic("login") {
-
-            // 重写 (随机生成一个tokenValue)
-            @Override
-            public String createTokenValue(Object loginId) {
-                return SaTokenJwtUtil.createToken(loginId);
-            }
-
-            // 重写 (在当前会话上登录id )
-            @Override
-            public void login(Object loginId, SaLoginModel loginModel) {
-                // ------ 1、获取相应对象
-                SaStorage storage = SaManager.getSaTokenContext().getStorage();
-                SaTokenConfig config = getConfig();
-                // ------ 2、生成一个token
-                String tokenValue = createTokenValue(loginId);
-                storage.set(splicingKeyJustCreatedSave(), tokenValue);    // 将token保存到本次request里
-
-                if (config.getIsReadCookie()) {    // cookie注入
-                    SaManager.getSaTokenContext().getResponse().addCookie(getTokenName(), tokenValue, "/", config.getCookieDomain(), (int) config.getTimeout());
-                }
-            }
-
-            // 重写 (获取指定token对应的登录id)
-            @Override
-            public String getLoginIdNotHandle(String tokenValue) {
-                try {
-                    return SaTokenJwtUtil.getLoginId(tokenValue);
-                } catch (Exception e) {
-                    return null;
-                }
-            }
-
-            // 重写 (当前会话注销登录)
-            @Override
-            public void logout() {
-                // 如果连token都没有，那么无需执行任何操作
-                String tokenValue = getTokenValue();
-                if (tokenValue == null) {
-                    return;
-                }
-                // 如果打开了cookie模式，把cookie清除掉
-                if (getConfig().getIsReadCookie() == true) {
-                    SaManager.getSaTokenContext().getResponse().deleteCookie(getTokenName());
-                }
-            }
-
-            // 重写 (获取指定key的session)
-            @Override
-            public SaSession getSessionBySessionId(String sessionId, boolean isCreate) {
-                throw new SaTokenException("jwt has not session");
-            }
-
-            // 重写 (获取当前登录者的token剩余有效时间 (单位: 秒))
-            @Override
-            public long getTokenTimeout() {
-                // 如果没有token
-                String tokenValue = getTokenValue();
-                if (tokenValue == null) {
-                    return SaTokenDao.NOT_VALUE_EXPIRE;
-                }
-                // 开始取值
-                DecodedJWT decodedJWT = null;
-                try {
-                    decodedJWT = SaTokenJwtUtil.getClaims(tokenValue);
-                } catch (Exception e) {
-                    return SaTokenDao.NOT_VALUE_EXPIRE;
-                }
-//                if (decodedJWT == null) {
-//                    return SaTokenDao.NOT_VALUE_EXPIRE;
-//                }
-                Date expiration = decodedJWT.getExpiresAt();
-                if (expiration == null) {
-                    return SaTokenDao.NOT_VALUE_EXPIRE;
-                }
-                return (expiration.getTime() - System.currentTimeMillis()) / 1000;
-            }
-
-            // 重写 (返回当前token的登录设备)
-            @Override
-            public String getLoginDevice() {
-                return SaTokenConsts.DEFAULT_LOGIN_DEVICE;
-            }
-
-            // 重写 (获取当前会话的token信息)
-            @Override
-            public SaTokenInfo getTokenInfo() {
-                SaTokenInfo info = new SaTokenInfo();
-                info.tokenName = getTokenName();
-                info.tokenValue = getTokenValue();
-                info.isLogin = isLogin();
-                info.loginId = getLoginIdDefaultNull();
-                info.loginType = getLoginType();
-                info.tokenTimeout = getTokenTimeout();
-//           info.sessionTimeout = getSessionTimeout();
-//           info.tokenSessionTimeout = getTokenSessionTimeout();
-//           info.tokenActivityTimeout = getTokenActivityTimeout();
-                info.loginDevice = getLoginDevice();
-                return info;
-            }
-        };
-    }
-}
-```
-
-由于这些变量和方法都是静态的，类加载的时候便已经完成初始化，因此不能通过加`@ConfigurationProperties(value = "satoken")`进而通过配置文件配置其私钥与过期时间。即写死在类中了。
-
-
-
-## 配置在yaml中
-
-虽然这些变量和方法都是静态的，而且修改` StpUtil.stpLogic`也需要在静态代码块中，但是可以自己去读取yaml文件，将yaml文件的值配置到静态变量里。
-
-注意：静态变量赋值一次便无法修改，所以在定义的时候，不能初始化。
-
-```java
-@Component//放入容器中
-public class SaTokenJwtUtil {
-    static {
-        try {
-            Yaml yaml = new Yaml();
-            URL url = SaTokenJwtUtil.class.getClassLoader().getResource("application.yaml");
-            if (url != null) {
-                //获取yaml文件中的配置数据，然后转换为obj，
-                //也可以将值转换为Map
-                Map map = (Map) yaml.load(new FileInputStream(url.getFile()));
-                System.out.println(map);
-                //通过map我们取值就可以了.
-                Map my = (Map) map.get("my");
-                Map jwt = (Map) my.get("jwt");
-                // 这里写死了要求my.jwt下所需的3个属性
-                Object secret = jwt.get("secret");
-                Object timeout = jwt.get("timeout");
-                Object loginIdKey = jwt.get("loginIdKey");
-                if (secret == null || timeout == null || loginIdKey == null)
-                    throw new Exception("请配置完整my.jwt下的3个属性");
-                System.out.println(secret);
-                System.out.println(timeout);
-                System.out.println(loginIdKey);
-                SaTokenJwtUtil.secret = secret.toString();
-                SaTokenJwtUtil.TIMEOUT = Long.parseLong(timeout.toString());
-                SaTokenJwtUtil.LOGIN_ID_KEY = loginIdKey.toString();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * 秘钥 (随便手打几个字母就好了)
-     */
-//    public static String secret = "myKey";
-    public static String secret;
-
-    /**
-     * token有效期 (单位: 秒)
-     */
-//    public static long TIMEOUT = 60 * 60 * 24 * 7;// 7天
-    public static long TIMEOUT;// 7天
-
-
-    //public static String LOGIN_ID_KEY = "loginId";
-    public static String LOGIN_ID_KEY;
-
-    // 其他代码的和上面一致
-}
-```
-
-注意：由于这里只向`application.yaml`文件去获取值，所以一定要配置在这个文件里。
-
-```yaml
-my:
-  jwt:
-    secret: xxxxxx
-    timeout: 604800 # 单位：s
-    loginIdKey: loginId
-```
-
-
-
-## satoken异常处理
-
-satoken认证失败之后，会抛出异常，需要处理一下。
-对于satoken的认证鉴权，请看文档，之所以要记录异常处理，是因为文档没有，在demo源码中找到。
-
-```java
-@RestControllerAdvice
-public class GlobalExceptionHandler {
-    /**
-     * 自定义的异常的处理
-     *
-     * @param me 自定义的异常
-     * @return 返回Result
-     */
-    @ExceptionHandler({MyException.class})
-    public Result handle(MyException me) {
-        return Result.init(me.getCode(), me.getMessage(), null);
-    }
-
-    /**
-     * 拦截来自Sa-token抛出的异常
-     *
-     * @param e        SaTokenException
-     * @param request  请求
-     * @param response 响应
-     * @return 返回Result
-     */
-    @ExceptionHandler({SaTokenException.class})
-    public Result handlerException(SaTokenException e, HttpServletRequest request, HttpServletResponse response)
-            throws Exception {
-
-        // 打印堆栈，以供调试，上线之前需要注释掉
-        System.out.println("全局异常，上线之前需要注释掉打印信息---------------");
-        e.printStackTrace();
-
-        // 不同异常返回不同状态码
-        Result result = null;
-        if (e instanceof NotLoginException) {    // 如果是未登录异常
-            NotLoginException ee = (NotLoginException) e;
-            result = Result.error(CodeEum.NOT_LOGIN);
-            result.setMsg(ee.getMessage());
-        } else if (e instanceof NotRoleException) {        // 如果是角色异常
-            NotRoleException ee = (NotRoleException) e;
-            result = Result.error(CodeEum.AUTH_FAIL);
-            result.setMsg("无此角色：" + ee.getRole());
-        } else if (e instanceof NotPermissionException) {    // 如果是权限异常
-            NotPermissionException ee = (NotPermissionException) e;
-            result = Result.error(CodeEum.AUTH_FAIL);
-            result.setMsg("无此权限：" + ee.getCode());//权限码
-        } else if (e instanceof DisableLoginException) {    // 如果是被封禁异常
-            DisableLoginException ee = (DisableLoginException) e;
-            result = Result.error(CodeEum.AUTH_FAIL);
-            result.setMsg("账号被封禁：" + ee.getDisableTime() + "秒后解封");
-        } else {    // 普通异常, 输出：500 + 异常信息
-            result = Result.error(CodeEum.ERROR);
-            result.setMsg(e.getMessage());
-        }
-
-        // 返回给前端
-        return result;
-    }
-}
-```
+就3部分，头部、载荷、签名，这不是有手就行？

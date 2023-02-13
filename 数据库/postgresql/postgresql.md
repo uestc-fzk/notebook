@@ -1,457 +1,30 @@
-# MySQL
-
-## 安装和卸载
-
-主要是卸载MySQL：
-
-可以直接控制面板卸载，如果控制面板找不到MySQL程序，那就命令行卸载：
-
-1. 管理员方式运行cmd
-
-2. 进入安装目录下的bin目录
-
-3. 停止MySQL：
-
-   ```shell
-   net stop mysql
-   ```
-
-4. 移除MySQL
-
-   ```shell
-   mysqld -remove mysql
-   ```
-
-5. 找到电脑上面的注册表文件夹，快捷方式是win+r，然后输入regedit，就可以直接的进入到注册表了
-
-6. 打开了注册表，然后可以复制这个“HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\Eventlog\Application\MySQL”就可以直接进入了
-
-7. 然后看见了MySQL，将MySQL文件删除，有的可能没有，那就跳过这一步
-
-8. 电脑C盘上面还有其余的文件，还会影响到，输入“C:\Documents and Settings\All Users\Application Data\MySQL”就可以直接的进入了，然后可以直接的删除文件
-
-9. 还有在输入将“C:\ProgramData\MySQL”这个文件夹下面的文件删除，
-
-10.  重启电脑，重新安装MySQL
-
-安装问题的话可以看CSDN收藏的博客，也可以看自己收藏的软件安装资料里的文档。
-
-## jdbc.properties
-spring boot 的属性配置
-```properties
-# mysql 5 驱动不同 com.mysql.jdbc.Driver 
-# mysql 8 驱动不同com.mysql.cj.jdbc.Driver、需要增加时区的配置 
-# serverTimezone=GMT%2B8 
-
-spring.datasource.username=root 
-spring.datasource.password=123456 
-spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=true&characterEncoding=utf-8&serverTimezone=GMT%2B8 
-# 主要是要加上时区，其它的参数可以加也可以不加
-spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
-```
-## 前言
-数据库相关概念
-
-	1、DB：数据库，保存一组有组织的数据的容器
-	2、DBMS：数据库管理系统，又称为数据库软件（产品），用于管理DB中的数据
-			数据库管理系统（ Database Management System ）。
-			数据库是通过 DBMS 创建和操作的容器
-	3、SQL:结构化查询语言，用于和DBMS通信的语言
-
-
-### 1.启动和停止MySQL服务
-
-- 通过计算机管理方式 右击计算机—管理—服务—启动或停止MySQL服务 
-- 通过管理员模式命令行方式 启动：`net start mysql`，停止：`net stop mysql`
-
-### 2.MySQL服务端的登录与退出
-
-```shell
-# 1.通过mysql自带的客户端MySQL 5.5 Command Line Client  然后直接输入用户密码
-# 只能是root用户登录 其他用户不能进去 不够灵活 不建议
-# 退出 exit或者ctrl+c
-
-# 2. 通过管理员模式命令行方式登录： mysql –h 主机名（自己就是localhost） -P 3306（端口号） –u用户名（root） –p
-# 也可以直接在-p后加密码
-# 退出 exit
-# 3.如果是连接本机的，可以简写：
-Mysql -u 用户名 –p密码
-```
-
-### 3.MySQL的常见命令 
-
-1.查看当前所有的数据库`show databases;`
-
-2.打开指定的库`use 库名`；会进入这个库
-
-3.查看当前库的所有表`show tables;`
-
-4.查看其它库的所有表`show tables from 库名;`
-
-5.查看表结构`desc 表名;`
-
-### 4.MySQL的语法规范
-**重要**
-
->1.不区分大小写,但建议关键字大写，表名、列名小写
-
->2.每条命令最好用分号结尾
-
->3.每条命令根据需要，可以进行缩进或换行(回车)
-关键字单独一行
-
->4.注释
-    单行注释：#注释文字
-    单行注释：-- 注释文字
-      多行注释：/* 注释文字  */
-
->6.字符串和日期型常量值必须用单引号引起来，数值型不需要。
-
->7.mysql主键从1开始
-
->8.limit 【offset,】size;
-offset要显示条目的起始索引（起始索引从0开始）
-size 要显示的条目个数
-
-## DDL数据定义语句
-数据定义语言(Data Definition Language)
-### 库和表的管理
-库的管理：
-
-	一、创建库
-	CREATE DATABASE 【IF NOT EXISTS】库名 【CHARACTER SET gbk】
-	二、删除库
-	DROP DATABASE 【if exists】 库名
-表的管理：
-
-#### 1.创建表 
-
-```sql
-create table [if not exists] 表名(
-	字段名 字段类型 [约束],
-	字段名 字段类型 [约束],
-	...
-)
-```
-
-#### 2.修改表 alter
-
-```sql
-#语法：ALTER TABLE 表名 ADD|MODIFY|DROP|CHANGE COLUMN 字段名 【字段类型】;
-
-#①修改字段名
-ALTER TABLE studentinfo CHANGE  COLUMN sex gender CHAR;
-
-#②修改表名
-ALTER TABLE stuinfo RENAME 【TO】  studentinfo;
-
-#③修改字段类型和列级约束
-alter table 表名 modify column 字段名 字段类型 新约束; #不加就是默认约束，所以要注意不能随便用
-
-#④添加字段	
-ALTER TABLE studentinfo ADD COLUMN email VARCHAR(20) first;
-#⑤删除字段
-ALTER TABLE studentinfo DROP COLUMN email;	
-```
-
-
-#### 3.删除表
-
-```sql
-DROP TABLE [IF EXISTS] 表名;
-```
-
-#### 4.表的复制
-
-```sql
--- (1).仅仅复制表的结构
-CREATE TABLE copy LIKE author;
--- (2).复制表的结构+数据
-CREATE TABLE copy2 SELECT * FROM author;
--- (3).只复制部分数据
-CREATE TABLE copy3 SELECT id,au_name FROM author WHERE nation='中国';
--- (4)仅仅复制某些字段
-CREATE TABLE copy4 
-SELECT id,au_name
-FROM author
-WHERE 0; #这样所有数据都不会复制过来了，但是把表的部分结构复制了过来
-```
-
-### 索引管理
-
-#### 1.添加或删除索引
-
-```sql
--- 普通索引
-ALTER table tableName ADD INDEX indexName(列名...)
--- 唯一索引
-ALTER table mytable ADD UNIQUE [indexName] (列名...)
--- 全文索引 并指定解析器为ngram
-ALTER TABLE 表名 ADD FULLTEXT INDEX 索引名 (列名) WITH PARSER ngram;
-
--- 显示索引信息
-SHOW INDEX FROM table_name\G
-
--- 删除索引
-DROP INDEX 索引名 ON 表名;
-```
-
-#### 2.全文索引
-
-在MySQL 5.6版本以前,只有MyISAM存储引擎支持全文引擎.在5.6版本中,InnoDB加入了对全文索引的支持,但是不支持中文全文索引.在5.7.6版本,MySQL内置了ngram全文解析器,用来支持亚洲语种的分词.
-
-MySQL的全文索引查询有多种模式，经常使用两种.
-需要注意的是，MySQL的`倒排索引`对于小数据量可以这么做，但是对于大数据量，还是用ElasticSearch比较好。
-
-MySQL全文索引以**词频**作为唯一标准。
-
-缺点：《高性能MySQL》P304
-
-> 1、全文索引的INSERT、UPDATE、DELETE操作代价很高；
-> 2、“双B-Tree"结构会有更多的碎片，需要更多的OPTIMIZE TABLE操作；
-> 3、影响MySQL查询优化器的工作；
-
-##### 自然语言搜索
-
-就是普通的包含关键词的搜索.
-
-```sql
--- 一个查询中同时使用两次MATCH并不会有额外的消耗
-SELECT id,article_title,MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE) AS relevance
-FROM mk_article 
-WHERE MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE);
--- 省略模式说明也是可以的，即默认情况是自然语言搜索
-SELECT * FROM articles WHERE MATCH (title,body) AGAINST ('精神');
-```
-
-这类搜索会**自动按照相似度进行排序**
-
-> 注意：如果全文索引是多列索引，MATCH函数中指定的列必须和全文索引指定的列完全相同，因为全文索引并不会记录某个关键词来自于哪个列。
->
-> 绕过方法：《高性能MySQL》P301
-
-##### 布尔全文索引
-
-在布尔全文索引中，可以在查询里定义某个关键词的相关性，过滤噪声词。
-**搜索结果是未经排序的**。
-
-布尔全文索引通用修饰符:
-
-| 修饰符 | 作用                 |
-| ------ | -------------------- |
-| 无     | rank值更高           |
-| ~      | 使得rank值下降       |
-| +      | 必须包含             |
-| -      | 不能包含             |
-| 阿里*  | 以阿里开头的rank更高 |
-
-案例：
-
-```sql
-SELECT id,article_title,MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN  MODE) AS relevance
-FROM mk_article
-WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MODE);
-```
-
-## TCL事务
-Transaction Control Language 事务控制语言
-
-**对于事务的更加详细的说明，最好还是去看书《深入理解分布式事务》。**
-
->一个或一组sql语句组成一个执行单元，这个执行单元要么全部执行，要么全部不执行。如果单元中某条SQL语句一旦执行失败或产生错误，整个单元将会回滚。
-
-#### 特点ACID
-
-原子性(Atomicity)：要么都执行，要么都回滚。
-
-一致性(Consistency)：保证数据的状态操作前和操作后保持一致。
-
-隔离性(Isolation)：多个事务同时操作相同数据库的同一个数据时，一个事务的执行不受另外一个事务的干扰，MySQL通过锁和MVCC机制保证隔离性。
-
-持久性(Durability)：一个事务一旦提交，则数据将持久化到本地，除非其他事务对其进行修改。
-
-#### 事务的分类
-
-1.隐式事务，没有明显的开启和结束事务的标志
-
-比如`insert、update、delete`语句本身就是一个事务
-
-2.显式事务，具有明显的开启和结束事务的标志
-
-```sql
--- 1、开启事务：取消自动提交事务的功能
-set autocommit=0;
--- 2、编写事务的一组逻辑操作单元（多条sql语句）
-insert
-update
-delete
--- 可以设置回滚点：
-savepoint 回滚点名;
--- 3、提交事务或回滚事务
--- 提交：commit;
--- 回滚：rollback;
--- 回滚到指定的地方：rollback to 回滚点名;
-```
-
-#### 使用到的关键字
-
-```sql
-set autocommit=0;
-start transaction;
-commit;
-rollback;
-
-savepoint  断点
-commit to 断点
-rollback to 断点
--- 设置隔离级别：
-set session|global  transaction isolation level 隔离级别名;
--- 查看隔离级别：
-SELECT @@transaction_isolation;
-```
-
-## 视图
-含义：理解成一张虚拟的表
-mysql5.1版本出现的新特性，是通过表动态生成的数据
-视图和表的区别：
-
-|      | 使用方式 | 占用物理空间                |
-| ---- | -------- | --------------------------- |
-| 视图 | 完全相同 | 不占用，仅仅保存的是sql逻辑 |
-| 表   | 完全相同 | 占用                        |
-
-视图的好处：
-
-1、sql语句提高重用性，效率高
-2、和表实现了分离，提高了安全性
-3、提供一定程度上的逻辑独立性
-4、集中展示用户所感兴趣的特定数据
-
-### 视图操作
-
-```sql
--- 创建语法：
-CREATE VIEW  <视图名> AS <查询语句>;
-
--- 1、查看视图的数据
-SELECT * FROM my_v4;
-SELECT * FROM my_v1 WHERE last_name='Partners';
--- 2、插入视图的数据
-INSERT INTO my_v4(last_name,department_id) VALUES('虚竹',90);
--- 3、修改视图的数据
-UPDATE my_v4 SET last_name ='梦姑' WHERE last_name='虚竹';
--- 4、删除视图的数据
-DELETE FROM my_v4;
-
--- 5、视图结构删除
-DROP DROP VIEW 视图名;
--- 6、视图结构查看
-DESC test_v7;
-SHOW CREATE VIEW test_v7;
-```
-
-
-### 某些视图不能更新
-```sql
-包含以下关键字的sql语句：分组函数、distinct、group  by、having、union或者union all
-常量视图
-Select中包含子查询
-join
-from一个不能更新的视图
-where子句的子查询引用了from子句中的表
-```
-
->注意：这里其实尽量不去更新视图，而且大部分视图都是不能更新的。
-
-### 视图逻辑的更新
-```sql
--- 方式一：
-CREATE OR REPLACE VIEW test_v7
-AS
-SELECT last_name FROM employees
-WHERE employee_id>100;
-
--- 方式二:
-ALTER VIEW test_v7
-AS
-SELECT employee_id FROM employees;
-
-SELECT * FROM test_v7;
-```
----
-
-# 高性能MySQL
-
-## 1.配置
-
-### 慢查询日志
-
-在Linux服务器上的配置文件my.cnf下如下配置：
-
-```properties
-# 慢查询日志
-slow_query_log=on # 这个参数设置为ON，可以捕获执行时间超过一定数值的SQL语句
-slow_query_log_file=/opt/mysql/mysql_slow_query.log  # 记录日志的文件名，必须有写权限
-long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录到日志中，建议设置为1或者更短
-```
-
-重启MySQL服务即可。
-
-也可以选择将未使用索引的查询语句也记录都slow log中：
-
-```properties
-# set slow query on 
-# 日志输出格式，FILE或TABLE
-log_output=file
-# 开启慢查询日志
-slow_query_log=on
-# 慢查询日志文件位置
-slow_query_log_file = /tmp/mysql-slow.log
-# 慢查询阈值，大于此值的SQL语句会被记录，单位s
-long_query_time = 1
-# 未使用索引也放入慢查询日志中
-log_queries_not_using_indexes=on
-# 每分钟允许记录到slow log的且未使用索引的SQL语句次数，默认0
-log_throttle_queries_not_using_indexes=10
-```
-
-## 2.索引
-
-在Innodb存储引擎下，主键是聚族索引，索引结构为B+树，在叶子结点挂载数据。
-
-一篇很好的讲解：https://www.cnblogs.com/nijunyang/p/11406688.html
-
-## 3.锁
-
-一篇讲得比较好的博文：https://blog.csdn.net/cy973071263/article/details/105188519
-
 # postgresql
 
 ## 简介
 
 ### 客户端程序
 
-![客户端程序](pictures/客户端程序.png)
+![客户端程序](postgresql.assets/客户端程序.png)
 
 - psql
 
-![psql](pictures/psql.png)
+![psql](postgresql.assets/psql.png)
 
 - pgAdmin
 
-![pgAdmin](pictures/pgAdmin.png)
+![pgAdmin](postgresql.assets/pgAdmin.png)
 
 ### 服务器程序
 
-![服务器程序](pictures/服务器程序.png)
+![服务器程序](postgresql.assets/服务器程序.png)
 
 
 
 ### 资料
 
-![psgresql资料1](pictures/psgresql资料1.png)
+![psgresql资料1](postgresql.assets/psgresql资料1.png)
 
-![psgresql资料2](pictures/psgresql资料2.png)
+![psgresql资料2](postgresql.assets/psgresql资料2.png)
 
 postgresql14官方中文文档：http://www.postgres.cn/docs/14/index.html
 
@@ -614,7 +187,7 @@ postgresql内置的过程控制语言为PL/pgSQL.
 
 
 #### 创建语法
-![存储过程](pictures/存储过程.png)
+![存储过程](postgresql.assets/存储过程.png)
 - default_expr: 指定参数默认值。
 - argtype : 函数返回值的数据类型
 - retype：returns返回值的数据类型。
@@ -674,7 +247,7 @@ CALL  存储过程名（参数）
 
 
 #### 删除存储过程
-![删除存储过程](pictures/删除存储过程.png)
+![删除存储过程](postgresql.assets/删除存储过程.png)
 
 #### PL/pgSQL基本语法(*)
 ##### 声明局部变量
@@ -846,7 +419,7 @@ $$ language plpgsql;
 -- 调用函数
 select Out_Record();
 ```
-![遍历命令结果](pictures/遍历命令结果.png)
+![遍历命令结果](postgresql.assets/遍历命令结果.png)
 
 
 #### 修改存储过程
@@ -899,7 +472,7 @@ DDL事件触发：由执行CRETE、ALTER、DROP、SELECT INTO操作时触发。
 #### 触发器分类
 1. 按**DML**操作语句分类：  
 INSERT触发器、DELETE触发器、UPDATE触发器 
-![触发器分类](pictures/触发器分类.png)
+![触发器分类](postgresql.assets/触发器分类.png)
 2. 按触发器**执行次数**分类： 
 （1）**语句级触发器**：由关键字**FOR  EACH  STATEMENT**声明，在触发器作用的表上执行一条SQL语句时，该触发器程序只执行一次，即使是修改了零行数据的SQL，也会导致相应的触发器执行。FOR EACH STATEMENT为**默认值**。
 （2）**行级触发器**：由关键字**FOR  EACH  ROW**标记的触发器，当触发器所在表中数据发生变化时，每变化一行就会执行一次触发器程序。
@@ -907,7 +480,7 @@ INSERT触发器、DELETE触发器、UPDATE触发器
 （1）**BEFORE**触发器：在触发事件之前执行触发器程序。
 （2）**AFTER**触发器：在触发事件之后执行触发器程序。
 （3）**INSTEAD OF**触发器：当触发事件发生后，执行触发器中指定的过程程序，而不是执行产生触发事件的SQL语句。
-![触发器与事件关系](pictures/触发器与事件关系.png)
+![触发器与事件关系](postgresql.assets/触发器与事件关系.png)
 
 #### 触发器程序中的特殊变量
 1. **NEW**
@@ -1094,7 +667,7 @@ PostgerSQL支持的事件触发器类型：
 
 - sql_drop：删除一个数据库对象前被触发。
 
-![事件触发器](pictures/事件触发器.png)
+![事件触发器](postgresql.assets/事件触发器.png)
 
 #### 创建事件触发器
 
@@ -1336,11 +909,11 @@ Dirty Read。一个事务读取了另一个事务修改后的数据，但修改�
 
 脏数据是对未提交数据的统称。
 
-![脏读](pictures/脏读.png)
+![脏读](postgresql.assets/脏读.png)
 
 ##### 2.不可重复读
 
-![不可重复读](pictures/不可重复读.png)
+![不可重复读](postgresql.assets/不可重复读.png)
 
 注意：如果不是更新操作，而是删除操作，即第二次读取时，发现某些记录消失了，也是不可重复读。
 
@@ -1354,7 +927,7 @@ Dirty Read。一个事务读取了另一个事务修改后的数据，但修改�
 
 事务T1对共享数据进行更新，再次查询该数据时，发现与自己的更新值不一样。即为丢失更新。
 
-![丢失更新](pictures/丢失更新.png)
+![丢失更新](postgresql.assets/丢失更新.png)
 
 #### 并发事务调度
 
@@ -1370,13 +943,13 @@ Dirty Read。一个事务读取了另一个事务修改后的数据，但修改�
 
 #### 风险
 
-![数据库面临的安全风险](pictures/数据库面临的安全风险.png)
+![数据库面临的安全风险](postgresql.assets/数据库面临的安全风险.png)
 
 
 
 #### 数据库系统安全模型
 
-![数据库系统安全模型](pictures/数据库系统安全模型.png)
+![数据库系统安全模型](postgresql.assets/数据库系统安全模型.png)
 
 数据库安全一般采用多层安全控制体系进行安全控制和管理。
 
@@ -1392,7 +965,7 @@ Dirty Read。一个事务读取了另一个事务修改后的数据，但修改�
 
 
 
-![访问权限表](pictures/访问权限表.png)
+![访问权限表](postgresql.assets/访问权限表.png)
 
 
 
@@ -1423,11 +996,11 @@ Dirty Read。一个事务读取了另一个事务修改后的数据，但修改�
 
 ##### SQL语句
 
-![角色管理SQL语句](pictures/角色管理SQL语句.png)
+![角色管理SQL语句](postgresql.assets/角色管理SQL语句.png)
 
 option属性如下：
 
-![角色option属性](pictures/角色option属性.jpg)
+![角色option属性](postgresql.assets/角色option属性.jpg)
 
 ##### GUI方式
 
@@ -1476,13 +1049,13 @@ GRANT "role_A" to "user_A";
 
 ##### 权限列表界面
 
-![权限列表查看](pictures/权限列表查看.png)
+![权限列表查看](postgresql.assets/权限列表查看.png)
 
 
 
 #### 用户管理
 
-![用户管理](pictures/用户管理.png)
+![用户管理](postgresql.assets/用户管理.png)
 
 > 以下将记录SQL操作。
 > GUI方式管理去看书。
@@ -1508,7 +1081,7 @@ COMMENT on ROLE "user_A" IS "用户A";
 
 其option属性如下：
 
-![用户option属性](pictures/用户option属性.jpg)
+![用户option属性](postgresql.assets/用户option属性.jpg)
 
 ##### 用户修改
 
@@ -1687,7 +1260,7 @@ public static void main(String[] args) {
 
 或者GUI方式：通过SQL语句打印指定角色的所有表权限 SELECT * FROM information_schema.table_privileges WHERE grantee='xxx';
 
-![查看角色权限](pictures/查看角色权限.jpg)
+![查看角色权限](postgresql.assets/查看角色权限.jpg)
 
 **3.在Pgadmin中创建了一个新用户我该如何用这个用户身份登录，然后来进行访问操作呢？**
 

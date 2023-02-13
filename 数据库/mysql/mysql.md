@@ -8,6 +8,24 @@ MySQL 是最流行的开源、**关系型 SQL 数据库管理系统**，由 Orac
 
 使用C和C++开发、内核线程实现的多线程。
 
+## jdbc.properties
+
+记录连接MySQL的驱动配置：
+
+```properties
+# mysql 5 驱动不同 com.mysql.jdbc.Driver 
+# mysql 8 驱动不同com.mysql.cj.jdbc.Driver、需要增加时区的配置 
+# serverTimezone=GMT%2B8 
+
+spring.datasource.username=root 
+spring.datasource.password=123456 
+spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=true&characterEncoding=utf-8&serverTimezone=GMT%2B8 
+# 主要是要加上时区，其它的参数可以加也可以不加
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+```
+
+
+
 ## 新功能
 
 **MySQL8新增的部分功能如下：**(我简单的选了一些看得懂的)
@@ -54,6 +72,84 @@ SELECT DATABASE();
 SHOW TABLES;
 # 某个表的详细信息
 DESCRIBE [table_name];
+# 查看表的DDL语句
+SHOW CREATE TABLE table_name;
+```
+
+## 索引管理
+
+#### 1.添加或删除索引
+
+```sql
+-- 普通索引
+ALTER table tableName ADD INDEX indexName(列名...)
+-- 唯一索引
+ALTER table mytable ADD UNIQUE [indexName] (列名...)
+-- 全文索引 并指定解析器为ngram
+ALTER TABLE 表名 ADD FULLTEXT INDEX 索引名 (列名) WITH PARSER ngram;
+
+-- 显示索引信息
+SHOW INDEX FROM table_name\G
+
+-- 删除索引
+DROP INDEX 索引名 ON 表名;
+```
+
+#### 2.全文索引
+
+在MySQL 5.6版本以前,只有MyISAM存储引擎支持全文引擎.在5.6版本中,InnoDB加入了对全文索引的支持,但是不支持中文全文索引.在5.7.6版本,MySQL内置了ngram全文解析器,用来支持亚洲语种的分词.
+
+MySQL的全文索引查询有多种模式，经常使用两种.
+需要注意的是，MySQL的`倒排索引`对于小数据量可以这么做，但是对于大数据量，还是用ElasticSearch比较好。
+
+MySQL全文索引以**词频**作为唯一标准。
+
+缺点：《高性能MySQL》P304
+
+> 1、全文索引的INSERT、UPDATE、DELETE操作代价很高；
+> 2、“双B-Tree"结构会有更多的碎片，需要更多的OPTIMIZE TABLE操作；
+> 3、影响MySQL查询优化器的工作；
+
+##### 自然语言搜索
+
+就是普通的包含关键词的搜索.
+
+```sql
+-- 一个查询中同时使用两次MATCH并不会有额外的消耗
+SELECT id,article_title,MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE) AS relevance
+FROM mk_article 
+WHERE MATCH (article_title) AGAINST ('应届生' IN NATURAL LANGUAGE MODE);
+-- 省略模式说明也是可以的，即默认情况是自然语言搜索
+SELECT * FROM articles WHERE MATCH (title,body) AGAINST ('精神');
+```
+
+这类搜索会**自动按照相似度进行排序**
+
+> 注意：如果全文索引是多列索引，MATCH函数中指定的列必须和全文索引指定的列完全相同，因为全文索引并不会记录某个关键词来自于哪个列。
+>
+> 绕过方法：《高性能MySQL》P301
+
+##### 布尔全文索引
+
+在布尔全文索引中，可以在查询里定义某个关键词的相关性，过滤噪声词。
+**搜索结果是未经排序的**。
+
+布尔全文索引通用修饰符:
+
+| 修饰符 | 作用                 |
+| ------ | -------------------- |
+| 无     | rank值更高           |
+| ~      | 使得rank值下降       |
+| +      | 必须包含             |
+| -      | 不能包含             |
+| 阿里*  | 以阿里开头的rank更高 |
+
+案例：
+
+```sql
+SELECT id,article_title,MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN  MODE) AS relevance
+FROM mk_article
+WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MODE);
 ```
 
 # 数据类型
@@ -553,6 +649,39 @@ slowlog记录执行时间超过`long_query_time`的SQL，`mysqldumpslow`命令�
 `min_examined_row_limit`：默认0，查询扫过的行，少于此参数的查询语句不会写入slowlog
 
 `log-throttle-queries-not-using-indexes`：如果 [`log_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_queries_not_using_indexes) 启用，该 [`log_throttle_queries_not_using_indexes`](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_log_throttle_queries_not_using_indexes) 变量会限制每分钟可以写入慢速查询日志的此类查询的数量。默认0表示无限制。
+
+### 配置慢查监控
+
+在Linux服务器上的配置文件my.cnf下如下配置：
+
+```properties
+# 慢查询日志
+slow_query_log=on # 这个参数设置为ON，可以捕获执行时间超过一定数值的SQL语句
+slow_query_log_file=/opt/mysql/mysql_slow_query.log  # 记录日志的文件名，必须有写权限
+long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录到日志中，建议设置为1或者更短
+```
+
+重启MySQL服务即可。
+
+也可以选择将未使用索引的查询语句也记录都slow log中：
+
+```properties
+# set slow query on 
+# 日志输出格式，FILE或TABLE
+log_output=file
+# 开启慢查询日志
+slow_query_log=on
+# 慢查询日志文件位置
+slow_query_log_file = /tmp/mysql-slow.log
+# 慢查询阈值，大于此值的SQL语句会被记录，单位s
+long_query_time = 1
+# 未使用索引也放入慢查询日志中
+log_queries_not_using_indexes=on
+# 每分钟允许记录到slow log的且未使用索引的SQL语句次数，默认0
+log_throttle_queries_not_using_indexes=10
+```
+
+
 
 # 备份与恢复
 
@@ -1332,6 +1461,8 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
 
 ### 锁
 
+一篇讲得比较好的博文：https://blog.csdn.net/cy973071263/article/details/105188519
+
 1、锁范围分类：
 
 - 行锁
@@ -1548,7 +1679,7 @@ DYNAMIC行格式与COMPACT基本相同，但增加了对可变长列的增强存
 - 多列索引最多16列
 - 行必须小于页的一半
 
-# 复制
+# 主从复制
 
 一主多从，默认异步复制，支持半同步复制和延迟复制。MySQL NDB Cluster是同步复制。
 
@@ -1630,6 +1761,11 @@ report_host='xxx' -- 副本报告给master的host
 report_port=3306 -- 副本报告给master的端口
 report_user='xxx' -- 副本报告给master的用户
 report_password='xxx' -- 副本报告给master的密码
+
+# 仅复制指定数据库的指定表
+# 此时副本仍然接受所有binlog，但仅处理相关的库表
+--replicate-wild-do-table=db_name.tbl_name
+--replicate-wild-do-table=db_name.% # 此为复制指定数据库的所有表
 ```
 
 7、可用`SHOW REPLICA STATUS`查询当前主从复制状态信息。MySQL8.0.22以前为`SHOW SLAVE STATUS`。
@@ -1650,7 +1786,36 @@ mysql> STOP REPLICA SQL_THREAD;
 
 进停止SQL线程时，IO接受线程继续从master读事件，但不执行，可用于执行副本备份，备份完再重启SQL线程。
 
+## 提高复制性能
 
+若并发量很高，需要的副本数量很多，若都连到一个master上，master的网络负载会很重。此时可以采用树形结构：
+
+```mermaid
+graph TD
+m0(master0)
+m0-->m1(master1)
+m0-->m2(master2)
+m1-->replica1[replica1]
+m1-->replica2[replica2]
+m2-->replica3[replica3]
+m2-->replica4[replica4]
+```
+
+master1和master2订阅master0的binlog，replica1、replica2订阅master1的binlog，replica3、replica4订阅master2的binlog。
+
+此时master1和master2必须开启`log-slave-updates`选项（默认开启），将接收到的binlog的指令修改也记录到自己的binlog中。
+
+## 延迟复制
+
+副本可以故意比master晚指定时间才执行事务。
+
+在 MySQL 8.0 中，延迟复制的方法取决于两个时间戳， `immediate_commit_timestamp`和 `original_commit_timestamp`
+
+```sql
+# 设置延迟n秒
+CHANGE REPLICATION SOURCE TO xxx DELAY=n # MySQL8.0.23以后
+CHANGE MASTER TO xxx MASTER_DELAY=n # 老版本
+```
 
 ## 基于GTID复制
 
@@ -1659,16 +1824,6 @@ GTID是全局事务id，它可以识别跟踪每个事务。
 因为基于GTID的复制是完全基于事务的，所以很容易判断master和副本是否一致；只要在master上提交的所有事务也在副本上提交，就可以保证两者之间的一致性。
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
-
-## 多源复制
-
-副本从多个源节点(master)接收事务，副本为它应该从中接收事务的每个源创建一个复制通道。
-
-文档：https://dev.mysql.com/doc/refman/8.0/en/replication-multi-source.html
-
-
-
-
 
 ## 复制实现原理
 
@@ -1706,13 +1861,248 @@ MySQL 复制功能是使用三个主线程实现的，一个在master服务器�
 
 复制SQL应用线程在执行完中继文件所有事件且不再需要时会自动删除每个中继日志文件。
 
-
-
 副本的连接元数据写入`mysql.slave_master_info`表。*连接元数据存储库*包含复制接收器线程连接到复制源服务器并从源的二进制日志检索事务所需的信息。
 
 应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
 
+## 故障迁移
 
+可以直接使用以下命令更改新master：
+
+```sql
+CHANGE MASTER TO # 老版本
+CHANGE REPLICATION TO # 8.0.23以后
+```
+
+这个命令不仅可以开启复制，还能用于故障迁移捏。
+
+副本不会检查master的数据库是否与自身的数据库兼容，它只会读取master的binlog的指定坐标。
+
+假设有master、replica1、replica2，若master发生故障，此时将replica2改为从replica1获取binlog，即可实现手动故障迁移。
+
+注意：必须将replica1和replica2的`log-slave-update`选项设置为`OFF`，默认为`ON`。如果replica1的该选项开启，它会记录来自master的binlog的所有更新事件到自己的binlog，若此时将replica2改为从replica1获取binlog，那么replica2会从replica1那里收到它早就从master收到过的更新事件。
+
+若该选项关闭，则replica1的binlog为空，replica2就不会重复收到更新事件，replica1收到update/delete/insert语句后会将这些更新内容写入binlog。
+
+更改新master的具体步骤：
+
+1. 确保所有replica已处理干净中继日志：`STOP REPLICA IO_THREAD`停止复制IO接收线程，然后`SHOW PROCESSLIST`观察输出直到看到Has read all relay log。
+2. 将replica1停用复制：`STOP REPLICA`和`RESET MASTER`
+3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
+
+若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
+
+# 分区
+
+仅Innodb、NDB引擎支持分区。
+
+MySQL仅支持水平分区：表中不同行分布在不同的物理分区。MySQL不支持垂直分区同时也不计划引入。
+
+**分区注意点：**
+
+注意：分区会对表中的所有数据和索引都进行分区。
+
+注意：表的分区表达式中使用的列必须是表可能具有的每个唯一键的一部分，如以下表则无法创建分区：
+
+```sql
+CREATE TABLE tnp (
+    id INT NOT NULL AUTO_INCREMENT,
+    ref BIGINT NOT NULL,
+    name VARCHAR(255),
+    PRIMARY KEY pk (id),
+    UNIQUE KEY uk (name)
+);
+```
+
+因为pk键和uk键没有共同的列，无法用于分区表达式。这种情况下可能的解决方法是将唯一索引改为普通索引。
+
+**分区优点：**
+
+- 分区使得一个表中的数据可以分布在不同磁盘
+- 可以删除无用分区
+- 查询时可以先限定分区，可以优化查询性能
+
+## 分区类型
+
+- RNAGE分区：范围分区
+- LIST分区：列表分区
+- Hash分区：散列分区
+- KEY分区：
+
+### Range分区
+
+按范围分区的表的分区方式是，每个分区都包含分区表达式值位于给定范围内的行。范围应连续但不重叠，并使用 `VALUES LESS THAN`运算符定义。
+
+比如基于时间分区的案例：
+
+```sql
+CREATE TABLE members (
+    username VARCHAR(16) NOT NULL,
+    email VARCHAR(35),
+    joined DATE NOT NULL
+)
+PARTITION BY RANGE( YEAR(joined) ) (
+    PARTITION p0 VALUES LESS THAN (2010),
+    PARTITION p1 VALUES LESS THAN (2020),
+    PARTITION p2 VALUES LESS THAN (2030),
+    PARTITION p3 VALUES LESS THAN (2040),
+    PARTITION p4 VALUES LESS THAN MAXVALUE
+);
+```
+
+**Range多列元组分区：**
+
+```sql
+CREATE TABLE rc1 (
+    a INT,
+    b INT
+)
+PARTITION BY RANGE COLUMNS(a, b) (
+    PARTITION p0 VALUES LESS THAN (5, 12),
+    PARTITION p3 VALUES LESS THAN (MAXVALUE, MAXVALUE)
+);
+```
+
+多个列组成的元组，从左比到右，可以通过SQL语句测试元组大小：
+
+```sql
+mysql> SELECT (0,25,50) < (10,20,100), (10,20,100) < (10,30,50);
++-------------------------+--------------------------+
+| (0,25,50) < (10,20,100) | (10,20,100) < (10,30,50) |
++-------------------------+--------------------------+
+|                       1 |                        1 |
++-------------------------+--------------------------+
+1 row in set (0.04 sec)
+```
+
+range分区支持的字段类型：
+
+- 时间日期类型：仅支持`DATE`和`DATETIME`类型。
+- 数值类型：不支持DECIMAL和FLOAT，其余支持。
+- 字符串类型：CHAR、VARCHAR、BINARY、VARBINARY支持，TEXT和BLOB不支持。
+
+### List分区
+
+List分区与Range分区都是按范围分区，但是List分区的值是离散的，定义时指定分区范围内的成员：`PARTITION BY (expr) ... VALUES IN (value_list)`
+
+```sql
+CREATE TABLE employees (
+    id INT NOT NULL,
+    job_code INT,
+    store_id INT
+)
+PARTITION BY LIST(store_id) (
+    PARTITION pNorth VALUES IN (3,5,6,9,17),
+    PARTITION pEast VALUES IN (1,2,10,11,19,20),
+    PARTITION pWest VALUES IN (4,12,13,14,18),
+    PARTITION pCentral VALUES IN (7,8,15,16)
+);
+```
+
+优点：删除某些值的分区很方便。
+
+List分区和Range分区一样支持**多列元组分区**。
+
+List分区支持的字段类型同RANGE分区。
+
+### Hash分区
+
+分区依据`HASH`主要用于确保数据在预定数量的分区之间均匀分布。
+
+优点是数据分布非常均匀，缺点是无法像Range/List分区那样自由删除分区。
+
+```sql
+CREATE TABLE employees (
+    id INT NOT NULL,
+    job_code INT,
+    store_id INT
+)
+PARTITION BY HASH(store_id)
+PARTITIONS 4; # 必须指定分区数量
+```
+
+基于时间日期的Hash分区：
+
+```sql
+CREATE TABLE t1 (col1 INT, col2 CHAR(5), col3 DATE)
+    PARTITION BY HASH( YEAR(col3) )
+    PARTITIONS 4;# 必须指定分区数量
+```
+
+每个值存储的分区为：N=MOD(expr, num)
+
+#### 线性Hash分区
+
+LINEAR Hash分区线性散列使用线性二次幂算法，而常规散列使用散列函数值的模数。
+
+线性二次幂算法利用对2的幂取模可以通过**位运算**快速得到取模值的技术，从而**快速计算行记录应该存储的分区号**。
+
+```sql
+CREATE TABLE t1 (col1 INT, col2 CHAR(5), col3 DATE)
+    PARTITION BY LINEAR HASH( YEAR(col3) )
+    PARTITIONS 6;
+```
+
+1、设置线性分区数N为6个，首先计算6的下一个2的幂为8：`V = POWER(2, CEILING(LOG(2, num)))`
+
+2、位运算取模：`expr & (V -1)`，得到i
+
+3、若`i<N`，则分区号为`i`，否则分区号为`i/2`
+
+#### Key分区
+
+一种特殊的Hash分区，不同之处在于Hash分区可以用户自定义表达式，而Key分区使用内置表达式计算hash值。
+
+```sql
+CREATE TABLE tm1 (
+    s1 CHAR(32) PRIMARY KEY
+)
+PARTITION BY KEY(s1)
+PARTITIONS 10;
+```
+
+Key分区就是一种特殊的Hash分区，所以也支持线性二次幂算法。
+
+### 子分区
+
+子分区（也称复合分区）是分区表中每个分区的进一步划分。
+
+```sql
+CREATE TABLE ts (id INT, purchased DATE)
+    PARTITION BY RANGE( YEAR(purchased) )
+    SUBPARTITION BY HASH( TO_DAYS(purchased) )
+    SUBPARTITIONS 2 (
+        PARTITION p0 VALUES LESS THAN (1990),
+        PARTITION p1 VALUES LESS THAN (2000),
+        PARTITION p2 VALUES LESS THAN MAXVALUE
+    );
+```
+
+可以对Range/List分区进一步划分Hash子分区。每个分区必须具有相同数量的子分区。
+
+### 处理NULL
+
+MySQL 中的分区不会禁止 `NULL`分区表达式的值，无论它是列值还是用户提供的表达式的值。
+
+MySQL将其`NULL`视为小于任何非`NULL`值，就像 `ORDER BY`它所做的那样。
+
+**RANGE分区**，NULL将被存入最低分区。
+
+**List分区**，分区范围必须指定NULL，否则报错：
+
+```sql
+mysql> CREATE TABLE ts3 (
+    ->     c1 INT,
+    ->     c2 VARCHAR(20)
+    -> )
+    -> PARTITION BY LIST(c1) (
+    ->     PARTITION p0 VALUES IN (0, 3, 6),
+    ->     PARTITION p1 VALUES IN (1, 4, 7, NULL),
+    ->     PARTITION p2 VALUES IN (2, 5, 8)
+    -> );
+```
+
+**Hash分区**，NULL被视作0。
 
 # 单机运行多MySQL实例
 
