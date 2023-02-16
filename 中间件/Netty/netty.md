@@ -1,6 +1,8 @@
 # 资料
 
-官网：https://netty.io/index.html
+官网：https://netty.io
+
+书籍：《Netty权威指南(第2版)》
 
 芋道源码-Netty源码分析：http://svip.iocoder.cn/Netty
 
@@ -388,6 +390,17 @@ public class HttpHelloWorldServerHandler extends SimpleChannelInboundHandler<Htt
 ```
 
 从此案例可以看出来用Netty实现HTTP服务器非常简单，在处理器这边只需要根据业务进行分派处理即可。
+
+## 粘包和拆包
+
+关于粘包和拆包说明：Netty权威指南中p80-92
+
+Netty中提供的处理TCP粘包拆包问题的解码器有：
+
+- LineBasedFrameDecoder：基于行区分消息
+- DelimiterBasedFrameDecoder：基于自定义分隔符区分消息，注意会将分隔符从消息中过滤掉
+- FixedLengthFrameDecoder：定长消息
+- 
 
 ## 核心组件
 
@@ -814,7 +827,9 @@ Netty采用此模型，其EventLoopGroup和EventLoop就以这种模型开发。
 
 ### 案例
 
-下面代码是多Reactor多线程示例“
+最佳示例：我写的简单http协议解析库：https://github.com/uestc-fzk/http_server，其中core模块就是主从Reactor模型，且引入了ChannelHandler和ChannelContext机制。
+
+下面代码是多Reactor多线程简单示例：
 
 MainReactor如下：
 
@@ -990,15 +1005,33 @@ static class SubReactor implements Runnable {
         // 线程池异步处理
         executorService.execute(() -> {
             try {
+                // 前置检查：key是否有效
+                if(!key.isValid()){
+                    cancelKey(key);
+                    return;
+                }
+                // 前置检查：channel是否连接
                 SocketChannel sc = (SocketChannel) key.channel();
+                if(sc==null||!sc.isConnected()){
+                    cancelKey(key);
+                    return;
+                }
                 StringBuilder sb = new StringBuilder(128);
                 ByteBuffer buf = ByteBuffer.allocate(128);
 
-                while (sc.read(buf) > 0) {
+                // 注意：这里必须是-1，当没有内容时返回-1不是0!
+                if (sc.read(buf) == -1) {
+                    // 注意：没有内容说明客户端主动关闭连接
+                    cancelKey(key);
+                    return;
+                }
+                // 读内容
+                do{
                     buf.flip();
                     sb.append(StandardCharsets.UTF_8.decode(buf));
                     buf.clear();
-                }
+                } while (sc.read(buf) > 0);
+
                 String message = sb.toString();
                 System.out.printf("服务端收到来自%s的消息：%s\n", sc.getRemoteAddress(), message);
                 if ("ping".equals(message)) sc.write(ByteBuffer.wrap("pong".getBytes()));// 心跳
@@ -1009,6 +1042,21 @@ static class SubReactor implements Runnable {
                 e.printStackTrace();
             }
         });
+    }
+    // 取消key监听并关闭channel
+    private void cancelKey(SelectionKey key) {
+        if (key != null) {
+            key.cancel();
+            SocketChannel channel = (SocketChannel) key.channel();
+            if (channel != null) {
+                try {
+                    channel.close();
+                    MyLogger.logger.fine(String.format("close connection from %s", channel.getRemoteAddress()));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
     }
 }
 ```
@@ -1085,6 +1133,12 @@ public class Client {
                             while (socketChannel.read(buf) > 0) {
                                 buf.flip();
                                 sb.append(StandardCharsets.UTF_8.decode(buf));
+                            }
+                            // 注意：没消息说明对端关闭
+                            if(sb.length()==0){
+                                next.cancel();
+                                socketChannel.close();
+                                return;
                             }
                             String message = sb.toString();
                             System.out.printf("客户端%s收到消息: %s\n", clientName, message);
