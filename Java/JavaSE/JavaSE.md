@@ -212,6 +212,22 @@ IDEA中默认有Maven插件，也不是不能用，但是捏，它不符合国�
 
 `java.util.concurrent`的简称是JUC，即Java自带的一些并发工具类，提供了如Lock、阻塞队列、并发集合、并发映射这些工具供咱们使用。
 
+## 锁分类
+
+Java中锁有很多，但就其互斥实现方式可以分为两类：
+
+- Object Monitor：对象监视器，管程机制，如`synchronized关键字+Object#wait()+Object#notify()`
+
+- AQS队列同步器：基于AQS实现的Lock锁、CountDownLatch、阻塞队列等。
+
+![java线程状态变迁](JavaSE.assets/java线程状态变迁.png)
+
+synchronized通过监视器锁实现互斥，监视器锁依赖操作系统互斥锁，这种**依赖于操作系统Mutex Lock所实现的锁称为重量级锁**。JDK中对Synchronized做的种种优化如轻量级锁，都是为了减少这种重量级锁的使用。
+
+AQS同步队列实现原理：`CAS+LockSupport`，以int变量表示同步状态，以CAS原子获取/更新状态值，以`LockSupport.park()/LockSupport.unPark()`方法让线程等待或唤醒。
+
+> 因此可以说**Java锁的实现是模拟的**，不直接调用操作系统互斥锁或信号量机制，而是由程序以`LockSupport`控制线程的等待/运行状态，没有死锁检测，因此Java中出现死锁时无法自动走出来。
+
 ## 队列同步器AQS
 
 ```java
@@ -5506,7 +5522,7 @@ public class LogRecord {
 
 ## LogConf
 
-4、LogConf：配置文件
+4、LogConf：配置文件，自动探测配置文件
 
 ```java
 /**
@@ -5554,6 +5570,16 @@ public class LogConf {
         this.logFileSize = logFileSize;
     }
 
+    @Override
+    public String toString() {
+        return "LogConf{" +
+                "logPath='" + logPath + '\'' +
+                ", logLevel='" + logLevel + '\'' +
+                ", logQueueSize=" + logQueueSize +
+                ", logFileSize=" + logFileSize +
+                '}';
+    }
+
     public static LogConf getDefaultLogConf() {
         LogConf conf = new LogConf();
         conf.setLogLevel("info");
@@ -5561,6 +5587,71 @@ public class LogConf {
         conf.setLogQueueSize(1024);
         conf.setLogFileSize(16 * 1024 * 1024);// 16MB
         return conf;
+    }
+
+    /**
+     * 自动探测日志配置文件并解析，优先级如下：
+     * 1.工作目录下: conf/log.properties
+     * 2.类路径下: log.properties
+     * 3.默认配置
+     * 原因：工作目录下的配置可以随时修改，而类路径下会打包进jar，修改后需重新打包
+     *
+     * @return 有文件则解析文件，无则返回默认配置
+     * @throws IOException 文件解析出错
+     */
+    public static LogConf detectLogConf() throws IOException {
+        // 1.优先加载当前工作目录下 conf/log.properties
+        System.out.println("日志配置探测：工作路径下conf/log.properties");
+        if (Files.exists(Path.of("conf/log.properties"))) {
+            try (FileReader fileReader = new FileReader("conf/log.properties")) {
+                System.out.println("日志配置探测成功：读取工作目录下conf/log.properties");
+                Properties p = new Properties();
+                p.load(fileReader);
+                System.out.println("conf/log.properties下的配置为：" + p);
+                return parseToConf(p);
+            }
+        }
+
+        // 2.再尝试加载类路劲下 log.properties
+        System.out.println("日志配置探测：类路径下log.properties");
+        try (InputStream in = LogConf.class.getClassLoader().
+                getResourceAsStream("log.properties")) {
+            if (in != null) {// 说明不存在或没找到
+                System.out.println("日志配置探测成功：读取类路径下的log.properties");
+                Properties p = new Properties();
+                p.load(in);
+                System.out.println("类路径下的配置为：" + p);
+                return parseToConf(p);
+            }
+        }
+
+        // 3.返回默认配置
+        LogConf logConf = getDefaultLogConf();
+        System.err.println("未探测到日志配置文件: 类路劲下log.properties或当前工作目录下conf/log.properties");
+        System.out.println("日志默认配置: " + logConf);
+        return logConf;
+    }
+
+    private static LogConf parseToConf(Properties p) {
+        LogConf logConf = new LogConf();
+        logConf.logPath = p.getProperty("logPath");
+        logConf.logLevel = p.getProperty("logLevel");
+        logConf.logQueueSize = Integer.parseInt(p.getProperty("logQueueSize", "0"));
+        logConf.logFileSize = Integer.parseInt(p.getProperty("logFileSize", "0"));
+        // 检查
+        if (logConf.logPath == null || logConf.logPath.length() == 0) {
+            throw new RuntimeException("缺少属性logPath");
+        }
+        if (logConf.logLevel == null || logConf.logLevel.length() == 0) {
+            throw new RuntimeException("缺少属性logLevel");
+        }
+        if (logConf.logQueueSize < 128) {
+            throw new RuntimeException("缺少属性logQueueSize或值小于128");
+        }
+        if (logConf.logFileSize < (1 << 20)) {
+            throw new RuntimeException("缺少属性logFileSize或值小于1048576(1MB)");
+        }
+        return logConf;
     }
 }
 ```
@@ -5623,7 +5714,7 @@ public class Logger {
         }
     }
 
-    private static final LogConf defaultLogConf = LogConf.getDefaultLogConf();
+    private static final LogConf defaultLogConf;
     private static final LogLevel globalLevel;// 当前设置的日志级别，低于此级别的不会打印
     private static volatile ArrayList<LogRecord> queueWrite;// 各个日志写入此队列
     private static volatile ArrayList<LogRecord> queueRead;// flush线程从此队列处理日志
@@ -5634,7 +5725,9 @@ public class Logger {
 
     static {
         try {
-            // 1.创建或切割日志
+            // 1.日志配置探测
+            defaultLogConf = LogConf.detectLogConf();
+            // 2.创建或切割日志
             Path logPath = Path.of(defaultLogConf.getLogPath());
             createLogFile(logPath);
 

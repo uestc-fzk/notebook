@@ -76,9 +76,51 @@ DESCRIBE [table_name];
 SHOW CREATE TABLE table_name;
 ```
 
+## 批量更新
+
+一般更新语句只能设置字段为特定值，不能随着条件变化为变化。
+如果需要在不同条件下更新为不同值，往往都是执行多条update语句：
+
+```sql
+UPDATE tbl_name SET k1=1 WHERE id=101;
+UPDATE tbl_name SET k1=10 WHERE id=102;
+```
+
+多条语句意味着多次网络IO开销，可以使用 mysql 自带的语句构建批量更新，从而减少网络开销只有1次：
+
+```sql
+UPDATE tbl_name
+	SET k1 = CASE id
+		WHEN 101 THEN 1
+		WHEN 102 THEN 10
+	END
+WHERE id IN (101,102);
+```
+
+此批量更新语句的WHERE不会影响代码最终执行结果，但可以提高SQL过滤的效率。
+
+如果有多个字段需要更新：
+
+```sql
+UPDATE t1 
+    SET sex = CASE id 
+        WHEN 1 THEN 'male'
+        WHEN 2 THEN 'female'
+        WHEN 3 THEN 'male'
+    END, 
+    name = CASE id 
+        WHEN 1 THEN 'fzk1'
+        WHEN 2 THEN 'fzk2'
+        WHEN 3 THEN 'fzk3'
+    END
+WHERE id IN (1,2,3);
+```
+
+> 批量更新语句不但减少了网络IO次数开销，还能减少事务数量，进而减少磁盘IO次数开销。
+
 ## 索引管理
 
-#### 1.添加或删除索引
+### 1.添加或删除索引
 
 ```sql
 -- 普通索引
@@ -95,7 +137,7 @@ SHOW INDEX FROM table_name\G
 DROP INDEX 索引名 ON 表名;
 ```
 
-#### 2.全文索引
+### 2.全文索引
 
 在MySQL 5.6版本以前,只有MyISAM存储引擎支持全文引擎.在5.6版本中,InnoDB加入了对全文索引的支持,但是不支持中文全文索引.在5.7.6版本,MySQL内置了ngram全文解析器,用来支持亚洲语种的分词.
 
@@ -110,7 +152,7 @@ MySQL全文索引以**词频**作为唯一标准。
 > 2、“双B-Tree"结构会有更多的碎片，需要更多的OPTIMIZE TABLE操作；
 > 3、影响MySQL查询优化器的工作；
 
-##### 自然语言搜索
+#### 自然语言搜索
 
 就是普通的包含关键词的搜索.
 
@@ -129,7 +171,7 @@ SELECT * FROM articles WHERE MATCH (title,body) AGAINST ('精神');
 >
 > 绕过方法：《高性能MySQL》P301
 
-##### 布尔全文索引
+#### 布尔全文索引
 
 在布尔全文索引中，可以在查询里定义某个关键词的相关性，过滤噪声词。
 **搜索结果是未经排序的**。
