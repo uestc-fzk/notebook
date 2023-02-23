@@ -1154,7 +1154,13 @@ public class Client {
 }
 ```
 
-# 启动器
+# Netty全流程
+
+原图：https://www.processon.com/view/link/63f7273c075f2179bc9966bb
+
+![Netty全流程](netty.assets/Netty全流程.png)
+
+# BootStrap启动器
 
 ![image-20221012095044357](netty.assets/image-20221012095044357.png)
 
@@ -1253,6 +1259,12 @@ private ChannelFuture doBind(final SocketAddress localAddress) {
 - 先调用initAndREgister()：根据配置创建Channel，将Channel注册到EventLoopGroup中，最后再执行Channel的端口绑定并注册到SelectionKey中。
 - 再以回调方式注册doBind0()：主要是绑定Channel的端口，同时触发`ChannelPipeline#fireChannelActive()`回调
 
+> 为什么这里要以回调方式调用doBind0()进行端口绑定呢?
+>
+> 因为注册Channel到EventLoop，其实就是包装为task扔到EventLoop的taskQueue中，让EventLoop自己绑定的线程将Channel注册到Selector上。
+>
+> 这就是**全异步**的设计，凡是和EventLoop相关的操作统一包装为task由其自己绑定线程处理，不阻塞主线程或boss线程。
+
 ### initAndRegister
 
 `AbstractBootstrap#initAndRegister()`方法将根据传入的Channel实现类Class反射创建其实例，并对其初始化后，注册到EventLoopGroup中。
@@ -1302,11 +1314,11 @@ EventLoopGroup会调用某个`EventLoop#register()`注册Channel，即将Channel
 
 > 注意：将Channel注册到EventLoopGroup具体分析看下面EventLoopGroup注册Channel部分。
 
-### 绑定端口触发bind出站事件
+### 触发bind出站事件并绑定端口
 
 由上诉的bind()方法得知，此doBind0()以监听器形式监听到Channel注册Selector成功后回调。
 
-`AbstractBootstrap#doBind0()`方法主要是绑定Channel的端口，同时触发`ChannelPipeline#fireChannelActive()`回调
+`AbstractBootstrap#doBind0()`方法主要是绑定Channel的端口，然后会触发`ChannelPipeline#fireChannelActive()`回调以重置兴趣集。
 
 ```java
 // AbstractBootstrap.java
@@ -1314,16 +1326,7 @@ private static void doBind0(
     final ChannelFuture regFuture, final Channel channel,
     final SocketAddress localAddress, final ChannelPromise promise) {
 
-    // This method is invoked before channelRegistered() is triggered.  Give user handlers a chance to set up
-    // the pipeline in its channelRegistered() implementation.
-    channel.eventLoop().execute(new Runnable() {
-        @Override
-        public void run() {
-            if (regFuture.isSuccess()) {
-                channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-            } else promise.setFailure(regFuture.cause());
-        }
-    });
+    channel.eventLoop().execute(()->channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE));
 }
 public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
     @Override
@@ -1337,21 +1340,12 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
 ```java
 // AbstractChannel.AbstractUnsafe.java
-public final void bind(final SocketAddress localAddress, final ChannelPromise promise) {
-    // 省略检查
-    boolean wasActive = isActive();
-    // 省略try/catch
+public final void bind(final SocketAddress localAddress, final ChannelPromise promise) {  
     // 1.Channel 绑定端口
     doBind(localAddress);
-
-    if (!wasActive && isActive()) {
-        invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                // 2.ChannelPipeline#fireChannelActive()回调
-                pipeline.fireChannelActive();
-            }
-        });
+		// 2.ChannelPipeline#fireChannelActive()回调
+    if (isActive()) {
+        invokeLater(()->pipeline.fireChannelActive());
     }
     safeSetSuccess(promise);
 }
@@ -1359,13 +1353,17 @@ public final void bind(final SocketAddress localAddress, final ChannelPromise pr
 
 第1步`AbstractChannel#doBind()`方法进行端口绑定，抽象方法，在不同Channel实现类中调用不同的绑定方式，最终都是以JavaNio的Socket去绑定该端口地址。
 
+#### 触发active入站事件
+
+在上面AbstractChannel.AbstractUnsafe#bind()方法绑定完端口后，判断Channel是否活跃，绑定端口后一定是活跃的。
+
 第2步回调该AbstractChannel绑定的`ChannelPipeline#fireChannelActive()`回调，这将触发该pipeline内所有的`ChannelInboundHandler#channelActive()`回调。
 
 关于`pipeline#fireChannelActive出站事件`，它会在`HeadContext#channelActive()`方法中再触发`pipeline#read入站事件`，而`HeadContext#read()`方法会重置兴趣集。
 
 在上面注册Channel时可知，注册时兴趣集设置为0，触发`read入站事件`才会重置兴趣集为监听连接或监听读取。
 
-关于active出站事件的分析看EventLoop注册Channel部分的解析。
+关于active入站事件的分析看EventLoop注册Channel部分的解析。
 
 ## ServerBootstrap
 
@@ -1771,6 +1769,8 @@ private void register0(ChannelPromise promise) {
 
 #### 注册到Selector
 
+register0()方法第一步是将Channel注册到此EventLoop的Selector上：
+
 ```java
 // AbstractNioChannel.java
 protected void doRegister() throws Exception {
@@ -1784,6 +1784,14 @@ protected void doRegister() throws Exception {
 这里注册兴趣集为0**目的是获取`SelectionKey`保存起来**。因为`SelectionKey#interestOps(int ops)`方法可以随时修改兴趣集，所以此处将其保存到了AbstractNioChannel中。
 
 要重置兴趣集，一般需要触发`pipeline#read()出站事件`，由`HeadContext#read()`方法进行兴趣集重置。注意到`HeadContext#channelActive()`和`HeadContext#ChannelReadComplete()`两个入站事件方法会触发`pipeline#read()`出站事件。
+
+#### 初始器回调
+
+`AbstractChannel.AbstractUnsafe.register0()`方法第2步骤是执行可能的挂起的`ChannelHandler#handlerAdded()`回调任务，比如`ChannelInitializer`就是在这回调初始化，此回调常用来添加自定义ChannelHandler。
+
+#### 触发registerd入站事件
+
+`AbstractChannel.AbstractUnsafe.register0()`方法第3步骤是发布`pipeline#fireChannelRegisterd`入站事件，通知各个Handler此时Channel已经注册成功。
 
 #### 触发active入站事件
 
@@ -1814,7 +1822,7 @@ AbstractChannel的读操作触发`ChannelPipeline#read()`，它是出站事件�
 
 目前ChannelActive入站事件就HeadContext重写，并在这里触发read出站事件用于准备监听连接/读取数据操作。
 
-#### 触发read出站事件以重置兴趣集
+##### 触发read出站事件以重置兴趣集
 
 **read事件是出站事件，它的作用从代码来看就是重置兴趣集**，将兴趣集从0改回监听连接或监听读取事件。
 
@@ -1992,6 +2000,17 @@ final class SelectedSelectionKeySetSelector extends Selector {
 
 ### 专属线程运行run
 
+如下图所示，每个EventLoop所绑定线程都会运行如下3个阶段，有任务时会优先将任务和IO处理完成后，再进行select监听。
+
+- select：select监听是运行`Selector#select(timeout)`方法查询是否有到达事件，有则放入优化后的SelectedSelectionKeySet。
+
+- process selected keys：处理SelectionKey，服务端NioServerSocketChannel会调用`accept()`接受新连接，然后将连接包装为task扔到taskQueue。客户端连接SocketChannel则会处理读事件，将读取内容包装为task扔到taskQueue。这两个任务都是触发`pipeline#fireChannelRead入站事件`。
+- runTasks：处理普通任务和定时任务。比如上面放进来的channelRead入站事件任务，服务端pipeline中默认有ServerBootstrapAcceptor处理器，它会把新连接注册到worker group。客户端pipeline一般是自定义处理器。
+
+运行IO时间占用总时间由参数`ioRatio`控制，默认50%，即处理selected keys的时间和run tasks的时间控制为一样的。
+
+select操作不计入耗时，因为在有任务或有待处理selected keys时不会运行select监听。
+
 ![NioEventLoop](netty.assets/NioEventLoop#run.png)
 
 每个NioEventLoopGroup创建的NioEventLoop都会**创建并绑定专属自己的一个线程运行run()方法**：
@@ -2001,9 +2020,7 @@ protected void run() {
     int selectCnt = 0;
     for (;;) {
         // 省略最外层try/catch/finally
-        int strategy;
-
-        strategy = selectStrategy.calculateStrategy(selectNowSupplier, hasTasks());
+        int strategy = selectStrategy.calculateStrategy(selectNowSupplier, hasTasks());
         switch (strategy) { // 省略其它情况
             case SelectStrategy.SELECT:
                 // 1.监听到下个定时任务达到时间，没有则-1
