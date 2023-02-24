@@ -5878,6 +5878,74 @@ public class Logger {
 
 此目录记录一些自己写的小工具类。
 
+## 加密算法
+
+### AES
+
+```java
+/**
+ * AES 加密解密算法
+ * <p/>
+ * 算法采用加密模式：CBC；数据块：128；填充：PKCS5Padding
+ * <p/>
+ * key 与向量字符串的长度为 16 位
+ */
+public class AES {
+    // 算法名
+    public static final String NAME = "AES";
+    // 加密模式：CBC；数据块：128；填充：PKCS5Padding
+    public static final String MODE = "AES/CBC/PKCS5Padding";
+    // KEY 与 向量字符串的长度必须是16的整数倍
+    public static final int LENGTH = 16;
+    
+    /**
+     * AES加密
+     *
+     * @param content     要加密的字符串
+     * @param secretKey   加密用的key
+     * @param ivParameter 向量偏移量, 增加加密强度
+     * @return 加密后的字符串
+     */
+    public static String encrypt(String content, String secretKey, String ivParameter) {
+        // 1.参数检查: 秘钥和偏移量必须都是16位
+        if (secretKey == null || secretKey.getBytes().length != LENGTH || ivParameter == null || ivParameter.getBytes().length != LENGTH) {
+            throw new RuntimeException("参数错误, 秘钥和偏移量长度必须为16整数倍");
+        }
+        String result;
+        try {
+            Cipher cipher = Cipher.getInstance(MODE);
+            IvParameterSpec iv = new IvParameterSpec(ivParameter.getBytes());
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(secretKey.getBytes(), NAME), iv);
+            byte[] bytes = cipher.doFinal(content.getBytes());
+            result = HexFormat.of().formatHex(bytes);// 转换为16进制
+        } catch (Exception e) {
+            throw new RuntimeException("加密出错", e);
+        }
+        return result;
+    }
+
+    /**
+     * AES解密
+     *
+     * @param content     待解密的字符串
+     * @param secretKey   秘钥
+     * @param ivParameter 向量偏移量
+     * @return 解密后的字符串
+     */
+    public static String decrypt(String content, String secretKey, String ivParameter) {
+        try {
+            SecretKeySpec keySpec = new SecretKeySpec(secretKey.getBytes(), NAME);
+            Cipher cipher = Cipher.getInstance(MODE);
+            IvParameterSpec iv = new IvParameterSpec(ivParameter.getBytes());
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, iv);
+            return new String(cipher.doFinal(HexFormat.of().parseHex(content)));// 从16进制转换byte[]
+        } catch (Exception e) {
+            throw new RuntimeException("解密", e);
+        }
+    }
+}
+```
+
 ## 摘要算法
 
 ### MD5
@@ -5901,7 +5969,6 @@ public class MD5 {
         //一个byte是八位二进制，也就是2位十六进制字符（2的8次方等于16的2次方）
         return new BigInteger(1, md.digest()).toString(16);
     }
-
 
     /**
      * 解析文件的MD5值
