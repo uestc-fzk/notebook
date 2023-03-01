@@ -831,6 +831,10 @@ Netty采用此模型，其EventLoopGroup和EventLoop就以这种模型开发。
 
 下面代码是多Reactor多线程简单示例：
 
+> 注意：以下实现有问题，Reactor模型中，每个SubReactor仅绑定一个线程运行，它负责处理IO事件和任务队列，并控制IO处理时间和任务队列运行时间稳定在一定比例。
+>
+> 而下面实现中每个SubReactor绑定的是一个线程池，与Reactor模型相悖。
+
 MainReactor如下：
 
 ```java
@@ -1415,66 +1419,15 @@ void init(Channel channel) {
 
 ## Bootstrap
 
-在概述的简单入门的EchoClient案例如下：
-
-```java
-public final class EchoClient {
-    static final String HOST = System.getProperty("host", "127.0.0.1");
-    static final int PORT = Integer.parseInt(System.getProperty("port", "8007"));
-    static final int SIZE = Integer.parseInt(System.getProperty("size", "256"));
-
-    public static void main(String[] args) throws Exception {
-        // 配置SSL
-        final SslContext sslCtx = ServerUtil.buildSslContext();
-
-        // Configure the client.
-        EventLoopGroup group = new NioEventLoopGroup();
-        try {
-            // 创建Bootstrap客户端启动器
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-                .channel(NioSocketChannel.class)    // 设置Channel类型
-                .option(ChannelOption.TCP_NODELAY, true)    // 关闭TCP延迟
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    public void initChannel(SocketChannel ch) throws Exception {
-                        ChannelPipeline p = ch.pipeline();
-                        if (sslCtx != null) 
-                            p.addLast(sslCtx.newHandler(ch.alloc(), HOST, PORT));
-
-                        //p.addLast(new LoggingHandler(LogLevel.INFO));
-                        p.addLast(new EchoClientHandler());// 添加自定义处理器
-                    }
-                });
-
-            // 连接服务器并等待
-            ChannelFuture f = b.connect(HOST, PORT).sync();
-
-            // 发心跳消息测试
-            Thread.sleep(100);
-            f.channel().writeAndFlush(Unpooled.copiedBuffer("ping", CharsetUtil.UTF_8));
-            for (int i = 0; i < 10; i++) {
-                Thread.sleep(100);
-                f.channel().writeAndFlush(Unpooled.copiedBuffer("ping" + i, CharsetUtil.UTF_8));
-            }
-            // Wait until the connection is closed.
-            f.channel().close().sync(); // 手动关闭通道并等待
-            //            f.channel().closeFuture().sync(); // 等待直至通道关闭
-        } finally {
-            // 关闭EventLoopGroup
-            group.shutdownGracefully();
-        }
-    }
-}
-```
+如何以Bootstrap创建客户端可以看官方案例。
 
 ### connect
 
-从上面案例可知客户端的启动入口是`Bootstrap#connect()`：
-
-其核心流程如下图：
+从官方案例可知客户端的启动入口是`Bootstrap#connect()`，其核心流程如下图：
 
 ![connect](netty.assets/connect.png)
+
+
 
 ```java
 public ChannelFuture connect(SocketAddress remoteAddress) {
@@ -1495,28 +1448,24 @@ private ChannelFuture doResolveAndConnect(final SocketAddress remoteAddress, fin
 ```
 
 - 第1步调用`AbstractBootstrap#initAndRegister()`方法创建并初始化Channel，并将其注册到EventLoopGroup，分析见上文。
-- 第2步就是这个客户端启动器调用`Channel#connect()`连接到服务端。
+- 第2步就是这个客户端启动器线程将真正连接操作交给EventLoop绑定线程去连接到服务端。
 
 第2步最终会来到这里：
 
 ```java
-// AbstractNioChannel.AbstractNioUnsafe.java
-public final void connect(
-    final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
-    // 省略检查
-    // 省略try/catch
-    boolean wasActive = isActive();
-    // 1.连接远程地址，最终调用SocketChannel#connect()方法连接服务端
-    if (doConnect(remoteAddress, localAddress)) {
-        // 2.这里面会回调ChannelPipeline#fireChannelActive()回调
-        fulfillConnectPromise(promise, wasActive);
-    }
+private static void doConnect(
+    final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise connectPromise) {
+    final Channel channel = connectPromise.channel();
+    // 包装为task，会发布pipeline#connect出站事件
+    channel.eventLoop().execute(()->channel.connect(remoteAddress, connectPromise));
 }
 ```
 
+这里将连接操作包装为task放入EventLoop的taskQueue，由EventLoop绑定线程去发布connect出站事件。
+
 ### 初始化Channel
 
-在AbstractBootstrap#initAndRegister()方法创建完Channel后会初始化Channel，客户端启动器的实现如下：
+在上面的分析可知AbstractBootstrap#initAndRegister()方法创建完Channel后会初始化Channel，这个初始化方法由各个启动器重写，客户端启动器的实现如下：
 
 仅仅将启动器配置的Channel配置设置到Channel中。
 
@@ -1530,6 +1479,65 @@ void init(Channel channel) {
     setAttributes(channel, newAttributesArray());
 }
 ```
+
+### 发布connect出站事件
+
+在上面的connect分析处可知，客户端启动器线程将真正连接操作交给EventLoop绑定线程去连接到服务端。
+
+```java
+private static void doConnect(
+    final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise connectPromise) {
+    final Channel channel = connectPromise.channel();
+    // 包装为task，会发布pipeline#connect出站事件
+    channel.eventLoop().execute(()->channel.connect(remoteAddress, connectPromise));
+}
+```
+
+这里将连接操作包装为task放入EventLoop的taskQueue，由EventLoop绑定线程去发布connect出站事件。
+
+connect出站事件默认仅有HeadContext重写：它会调用`AbstractNioUnsafe#connect()`：
+
+```java
+// DefaultChannelPipeline.HeadContext.java
+public void connect(
+    ChannelHandlerContext ctx,
+    SocketAddress remoteAddress, SocketAddress localAddress,
+    ChannelPromise promise) {
+    unsafe.connect(remoteAddress, localAddress, promise);
+}
+
+// AbstractNioChannel.AbstractNioUnsafe.java
+public final void connect(
+    final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+    // 省略检查
+    boolean wasActive=isActive()
+    // 1.连接远程地址，最终调用SocketChannel#connect()方法连接服务端
+    if (doConnect(remoteAddress, localAddress)) {
+        // 2.这里面会发布ChannelPipeline#fireChannelActive()入站事件
+        fulfillConnectPromise(promise, wasActive);
+    }
+    // 省略异常连接关闭
+}
+```
+
+#### 发布active入站事件
+
+上面第2步将发布`pipeline#fireChannelActive入站事件`：
+
+```java
+// AbstractNioChannel.AbstractNioUnsafe.java
+private void fulfillConnectPromise(ChannelPromise promise, boolean wasActive) {
+    // 省略
+    boolean active = isActive();
+    // 发布pipeline#fireChannelActive入站事件
+    if (!wasActive && active) {// 连接成功这里必然是活跃的
+        pipeline().fireChannelActive();
+    }
+    // 省略
+}
+```
+
+`pipeline#fireChannelActive入站事件`在HeadContext处覆盖，其发布`pipeline#read出站事件`，而这个出站事件在HeadContext处又覆盖，其将重置兴趣集。一般客户端Channel的兴趣集为读事件`OP_READ`。
 
 # EventLoop
 
@@ -2781,7 +2789,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
 pipeline以`AbstractChannelHandlerContext`作为处理节点构建成双向链表，其实现了`ChannelOutboundInvoker`接口和`ChannelInboundInvoker`接口作为**出站和入站事件传播调用器**，其实现的各个方法如bind(args)唯一作用是将事件传播到下个节点并调用其handler相应回调函数。
 
-每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如bind(ctx,args)，**处理完成后需要调用ctx#bind(args)将此事件向后传播**，否则该事件传播就将提前终止了。
+> 每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如bind(ctx,args)，**处理完成后需要调用ctx#bind(args)将此事件向后传播**，否则该事件传播就将提前终止了。
 
 从这可以猜测`ChannelOutboundHandler`的实现`ChannelOutboundHandlerAdapter`的每个方法肯定是直接调用`ctx#xxx(args)`进行事件传播，而当我们要实现某个handler时，就重写其中某些方法即可：
 
@@ -2888,7 +2896,7 @@ oio是old io，即bio阻塞io。
 
 ## Unsafe
 
-Unsafe接口定义在`io.netty.channel.Channel`内部，和Channel的操作紧密结合。
+Unsafe接口定义在`io.netty.channel.Channel`内部，和Channel的操作紧密结合，是Channel的辅助接口。
 
 Unsafe接口不应在用户代码中调用unsafe方法。
 
@@ -2898,7 +2906,7 @@ Unsafe接口不应在用户代码中调用unsafe方法。
 
 - EventLoop检测到一些入站事件如accept和read，交由该Channel关联的Unsafe处理并**发布入站pipeline事件**。
 
-- Channel实现了ChannelOutboundInvoker接口，其实现了各个出站方法如write()，Channel出站方法仅仅负责发布`pipeline#write()`这类出站事件，最后交由管道内的HeadContext里持有的Unsafe处理具体的逻辑。
+- Channel实现了ChannelOutboundInvoker接口，其实现了各个出站方法如write()，Channel出站方法仅仅负责发布`pipeline#write()`这类出站事件，最后由Pipeline内的HeadContext覆盖出站方法，调用Channel关联的Unsafe处理具体的逻辑。
 
 即Unsafe通过与Channel关联的pipeline交互，并通过ByteBuf等缓冲，实现了Netty Channel的各个具体处理逻辑，并发布入站pipeline事件。
 注意其实真正和JavaNio的SocketChannel交互部分还是有Netty Channel去实现，并命名为doWrite()这种方法名字。
@@ -3140,24 +3148,19 @@ write和flush都是outbound事件，最终会由`HeadContext`节点的`Unsafe`�
 
 ```java
 protected abstract class AbstractUnsafe implements Unsafe {
-
+    // 写入缓冲区, write操作将消息写入此缓冲区暂存
     private volatile ChannelOutboundBuffer outboundBuffer = new ChannelOutboundBuffer(AbstractChannel.this);
 
     @Override
     public final void write(Object msg, ChannelPromise promise) {
-        // 省略
         ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
         // 内存队列为空，一般是 Channel 已经关闭，所以通知 Promise 异常结果
-        if (outboundBuffer == null) {
-            // 省略
-            return;
-        }
+        if (outboundBuffer == null) {/*...*/}
 
-        // 省略try/catch
         int size;
         // 1.过滤写入的消息，默认转为直接内存ByteBuf
         msg = filterOutboundMessage(msg);
-        size = pipeline.estimatorHandle().size(msg);
+        size = pipeline.estimatorHandle().size(msg);// 计算消息大小
         if (size < 0) size = 0;
         // 2.写入内存队列中暂存
         outboundBuffer.addMessage(msg, size, promise);
@@ -3168,19 +3171,18 @@ protected final Object filterOutboundMessage(Object msg) {
     // 将堆内存ByteBuf转换为直接内存的ByteBuf
     if (msg instanceof ByteBuf) {
         ByteBuf buf = (ByteBuf) msg;
-        if (buf.isDirect()) {
-            return msg;
-        }
+        if (buf.isDirect()) {return msg; }
         return newDirectBuffer(buf);
     }
-
-    if (msg instanceof FileRegion) {
-        return msg;
-    }
+	// 如果是文件块则不转换
+    if (msg instanceof FileRegion) { return msg; }
+    // 不支持类型抛出异常
     throw new UnsupportedOperationException(
         "unsupported message type: " + StringUtil.simpleClassName(msg) + EXPECTED_TYPES);
 }
 ```
+
+> 从消息过滤方法可以看出**ctx.write()写入响应消息仅支持写入ByteBuf和FileRegion类型**，其余均不支持。
 
 **将堆内存的ByteBuf转换为直接内存ByteBuf的原因是JVM堆内存写入Socket套接字时拷贝次数较多。**
 
@@ -3206,12 +3208,12 @@ flush同write一样是出站事件，最后由`HeadContext`节点的`Unsafe`进�
 
 ```java
 protected abstract class AbstractUnsafe implements Unsafe {
+    // 写入缓冲区，flush将缓冲区内消息写入socket
     private volatile ChannelOutboundBuffer outboundBuffer = new ChannelOutboundBuffer(AbstractChannel.this);
 
     private boolean inFlush0;
     @Override
     public final void flush() {
-        assertEventLoop();
         // 内存队列为 null ，一般是 Channel 已经关闭，所以直接返回
         ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
         if (outboundBuffer == null || outboundBuffer.isEmpty()) return;
@@ -3223,27 +3225,23 @@ protected abstract class AbstractUnsafe implements Unsafe {
     protected void flush0() {
         // 正在刷，避免重复刷
         if (inFlush0) return;
-
         // 内存队列为 null ，一般是 Channel 已经关闭，所以直接返回
         final ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
         if (outboundBuffer == null || outboundBuffer.isEmpty()) return;
 
         inFlush0 = true;
-        // 省略部分检查代码
-
-        try {
-            // 真正写入到套接字
-            doWrite(outboundBuffer);
-        } catch (Throwable t) {
-            handleWriteError(t);
-        } finally {
-            inFlush0 = false;
-        }
+        // 真正写入到套接字
+        doWrite(outboundBuffer);
+        inFlush0 = false;
     }
 }
 ```
 
-一般真正和JavaNio的SocketChannel套接字交互的方法还是有Netty Channel实现，并命名为doXxx()：
+flush方法标记内存队列开始flush并调用NioSocketChannel#doWrite()将消息写入Socket。
+
+### doWrite
+
+一般真正和JavaNio的SocketChannel套接字交互的方法还是有Netty Channel实现，并命名为doXxx()。比如将内存队列中暂存的消息真正写入Channel时将调用`NioSocketChannel#doWrite()`：
 
 ```java
 // NioSocketChannel.java
@@ -3257,64 +3255,53 @@ protected void doWrite(ChannelOutboundBuffer in) throws Exception {
         if (in.isEmpty()) {
             // 取消对 SelectionKey.OP_WRITE 的感兴趣
             clearOpWrite();
-            // Directly return here so incompleteWrite(...) is not called.
             return;
         }
 
         // 配置的每次写入最大字节数，默认无限制
         int maxBytesPerGatheringWrite = ((NioSocketChannelConfig) config).getMaxBytesPerGatheringWrite();
-        // 3.从内存队列中获得待写入的JavaNio的ByteBuffer数组
+        // 3.从内存队列中获得待写入的JavaNio的ByteBuffer数组，1次最多1024个
         ByteBuffer[] nioBuffers = in.nioBuffers(1024, maxBytesPerGatheringWrite);
         int nioBufferCnt = in.nioBufferCount();
 
+        // 4.将数据写入Socket，若无法写入则注册SelectionKey.OP_WRITE监听可写入事件
         switch (nioBufferCnt) {
+                // 4.1 内部的数据为 FileRegion, 调用FileChannel.transferTo()零拷贝文件传输
             case 0:
-                // 内部的数据为 FileRegion，可以暂时无视
                 writeSpinCount -= doWrite0(in);
                 break;
+                // 4.2 1个ByteBuffer，调用java.nio.channels.SocketChannel.write(ByteBuffer)
             case 1: {
                 ByteBuffer buffer = nioBuffers[0];
                 int attemptedBytes = buffer.remaining();
-                // 4.将数据写入SocketChannel套接字
+                // 将数据写入SocketChannel套接字
                 final int localWrittenBytes = ch.write(buffer);
-                // 写入字节小于等于 0 ，说明 NIO Channel 不可写，
+                // 5.写入字节小于等于 0 ，说明 NIO Channel 不可写，
                 // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写，并返回以结束循环
                 if (localWrittenBytes <= 0) {
                     incompleteWrite(true);
                     return;
                 }
                 adjustMaxBytesPerGatheringWrite(attemptedBytes, localWrittenBytes, maxBytesPerGatheringWrite);
-                in.removeBytes(localWrittenBytes);// 从内存队列中，移除已经写入的数据( 消息 )
+                in.removeBytes(localWrittenBytes);// 从内存队列中，移除已经写入的数据
                 --writeSpinCount;
                 break;
             }
-            default: {
-                long attemptedBytes = in.nioBufferSize();
-                // 5.将多个ByteBuffer聚合写入到SocketChannel套接字
-                final long localWrittenBytes = ch.write(nioBuffers, 0, nioBufferCnt);
-                // 写入字节小于等于 0 ，说明 NIO Channel 不可写，
-                // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写，并返回以结束循环
-                if (localWrittenBytes <= 0) {
-                    incompleteWrite(true);
-                    return;
-                }
-                adjustMaxBytesPerGatheringWrite((int) attemptedBytes, (int) localWrittenBytes,
-                                                maxBytesPerGatheringWrite);
-                in.removeBytes(localWrittenBytes);
-                --writeSpinCount;
-                break;
-            }
+                // 4.3 多个ByteBuffer, 调用java.nio.channels.SocketChannel.write(ByteBuffer[])
+            default: {/*步骤和4.2基本相同，故省略*/}
         }
     } while (writeSpinCount > 0);// 循环自旋写入
-    // 6.内存队列中的数据未完全写入，说明 NIO Channel 不可写，
-    // 所以注册 SelectionKey.OP_WRITE ，等待 NIO Channel 可写
+    // 6.多次自旋写入后内存队列中还有数据，注册 SelectionKey.OP_WRITE
+    // 因为不能让Reactor线程一直写，它得处理其它IO操作和任务队列
     incompleteWrite(writeSpinCount < 0);
 }
 ```
 
-为什么写入时要判断ByteBuffer的数量为1或多个呢？因为`SocketChannel#write()`有2个重载方法，分别写入单个ByteBuffer对象，或者批量写入ByteBuffer对象。
+可以看到所谓的FileRegion最终是调用`FileChannel#transferTo()`直接将文件内容发送到SocketChannel内核缓冲区以减少拷贝，即所谓零拷贝。
 
-注意：写入过程中会判断写入量是否小于0，如果小于0说明此时SocketChannel的内核缓冲区已经写满，所以注册 `SelectionKey.OP_WRITE` ，等待 NIO Channel 可写。因此，调用 `#incompleteWrite(true)` 方法。
+从内存队列中写入消息到SocketChannel每次自旋最多写入1024个ByteBuffer，最多自旋16次，**避免线程长时间处于处理消息写入过程，导致任务队列和其它IO事件长时间等待**。
+
+注意：写入过程中会判断写入量是否小于0，**如果小于0说明此时SocketChannel的内核缓冲区已经写满**，所以注册 `SelectionKey.OP_WRITE` ，等待 NIO Channel 可写。因此调用 `incompleteWrite(true)` 方法注册对写事件的监听并返回。
 
 ## ChannelOutboundBuffer
 
@@ -3687,15 +3674,23 @@ private void clearUserDefinedWritability(int index) {
 
 # Bytebuf
 
+Java nio的ByteBuffer的缺点：
+
+- ByteBuffer分配时长度固定，不能动态扩容。
+- ByteBuffer只有1个位置指针position，读写模式切换需手动调用flip()和rewind()进行翻转，使用必须小心谨慎。
+- ByteBuffer的功能API有限，如不支持组合。
+
+所以Netty自己实现了一个ByteBuf
+
 `io.netty.buffer.ByteBuf`位于buffer模块，功能定位上和JavaNio的ByteBuffer一样，并提供了额外优点：
 
-- A01. 它可以被用户自定义的**缓冲区类型**扩展
-- A02. 通过内置的符合缓冲区类型实现了透明的**零拷贝**
-- A03. 容量可以**按需增长**
-- A04. 读和写使用了**不同的索引**，读写模式切换无须像JavaNio那样调用 `Buffer#flip()` 方法
-- A05. 支持方法的**链式**调用
-- A06. 支持**引用计数**
-- A07. 支持**池化**
+- 它可以被用户自定义的**缓冲区类型**扩展
+- 通过内置的符合缓冲区类型实现了透明的**零拷贝**
+- **动态扩容**
+- 有2个**不同的读/写位置指针**，readIndex和writeIndex，读写模式切换无须像JavaNio手动切换
+- 支持方法的**链式调用**
+- 支持**引用计数**
+- 支持**池化**
 
 ```java
 /**
@@ -3717,8 +3712,8 @@ private void clearUserDefinedWritability(int index) {
 public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, ByteBufConvertible {
 
     /**
-     * 丢弃第 0 个索引和readerIndex之间的字节。
-     * 它将readerIndex和writerIndex之间的字节移动到第 0 个索引，并将readerIndex和writerIndex分别设置为0和oldWriterIndex - oldReaderIndex 。
+     * 丢弃索引0和readerIndex之间的字节。
+     * 它将readerIndex和writerIndex之间的字节移动到索引0，并将readerIndex和writerIndex分别设置为0和oldWriterIndex - oldReaderIndex 。
      * 
      * <pre>
  	 *  BEFORE discardReadBytes()
@@ -3745,15 +3740,6 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, 
      * 将此缓冲区的readerIndex和writerIndex设置为0 。此方法与setIndex(0, 0)相同。
      * 请注意，此方法的行为与 NIO 缓冲区的行为不同，后者将limit设置为缓冲区的capacity 。
      * <pre>
-     *  BEFORE clear()
-     *
-     *      +-------------------+------------------+------------------+
-     *      | discardable bytes |  readable bytes  |  writable bytes  |
-     *      +-------------------+------------------+------------------+
-     *      |                   |                  |                  |
-     *      0      <=      readerIndex   <=   writerIndex    <=    capacity
-     *
-     *
      *  AFTER clear()
      *
      *      +---------------------------------------------------------+
@@ -3791,7 +3777,6 @@ public abstract ByteBuf copy(int index, int length);
  * 注意：此方法不会调用retain()，因此不会增加引用计数
  */
 public abstract ByteBuf slice(int index, int length);
-
 ```
 
 4、转换为Java Nio ByteBuffer操作：
@@ -3852,7 +3837,7 @@ AbstractByteBuf子类非常多，总结起来是3种组合8个核心子类：
 上面8个类从名字来看由以下3个维度进行正交组合：
 
 - 按**内存类型**分类：
-  - 堆内存(HeapByteBuf)：字节数组分配在JVM堆，受GC管理影响，写入或从Socket缓冲区读数据会先把数据拷贝到直接内存，再从直接内存拷贝到堆内存(此过程没有safepoint，以避免出现GC)。
+  - **堆内存**(HeapByteBuf)：字节数组分配在JVM堆，分配回收速度快，受GC管理影响，写入或从Socket缓冲区读数据会先把数据拷贝到直接内存，再从直接内存拷贝到堆内存(此过程没有safepoint，以避免出现GC)。
   - **直接内存**(DirectByteBuf)：堆外内存，写入或从Socket缓冲区读数据，相比于堆内存少1次内存拷贝，IO效率高一点
 - 按**对象池**分类：
   - 对象池(PooledByteBuf)：基于**对象池技术**可以重用ByteBuf，减少对象创建和回收，减少GC次数
@@ -3865,9 +3850,109 @@ AbstractByteBuf子类非常多，总结起来是3种组合8个核心子类：
 
 默认情况下使用的是`PooledUnsafeDirectByteBuf`。
 
+最佳实践：在I/O通信时使用DirectByteBuf，在业务编解码模块中使用HeapByteBuf。
+
 ## 内存泄漏检测
 
-暂未深入分析：http://svip.iocoder.cn/Netty/ByteBuf-1-3-ByteBuf-resource-leak-detector/
+暂未深入分析：http://svip.iocoder.cn/Netty/ByteBuf-1-3-ByteBuf-resource-leak-detector
+
+从上面那张图可知，所有ByteBuf实现类都继承了AbstractReferenceCountedByteBuf以实现引用计数，主要是用于直接内存的ByteBuf的安全释放，(堆内存ByteBuf由GC释放)。
+
+```java
+public abstract class AbstractReferenceCountedByteBuf extends AbstractByteBuf {
+    // 标识refCnt字段的内存地址
+    private static final long REFCNT_FIELD_OFFSET =
+        ReferenceCountUpdater.getUnsafeOffset(AbstractReferenceCountedByteBuf.class, "refCnt");
+    private static final AtomicIntegerFieldUpdater<AbstractReferenceCountedByteBuf> AIF_UPDATER =
+        AtomicIntegerFieldUpdater.newUpdater(AbstractReferenceCountedByteBuf.class, "refCnt");
+	// 原子更新器，对refCnt字段原子更新以实现线程安全
+    private static final ReferenceCountUpdater<AbstractReferenceCountedByteBuf> updater =
+        new ReferenceCountUpdater<AbstractReferenceCountedByteBuf>() {
+        @Override
+        protected AtomicIntegerFieldUpdater<AbstractReferenceCountedByteBuf> updater() {
+            return AIF_UPDATER;
+        }
+        @Override
+        protected long unsafeOffset() {
+            return REFCNT_FIELD_OFFSET;
+        }
+    };
+	/**
+     * 对其所有访问必须通过更新器updater
+     * 引用计数初始值为1，申请增加，释放减少，若回到1则调用deallocate()回收对象内存
+     */
+    private volatile int refCnt;
+
+    protected AbstractReferenceCountedByteBuf(int maxCapacity) {
+        super(maxCapacity);
+        updater.setInitialValue(this);// 设置引用值为2，因为初始值为1，构造函数引用为1
+    }
+
+    // 增加引用计数
+    public ByteBuf retain(int increment) {
+        return updater.retain(this, increment);
+    }
+
+    // 记录此对象的当前访问位置以及用于调试目的的附加任意信息。
+    // 如果确定该对象被泄露，该操作记录的信息将通过ResourceLeakDetector提供给您。
+    public ByteBuf touch(Object hint) {
+        return this;
+    }
+
+    // 减少引用计数
+    public boolean release(int decrement) {
+        boolean result=updater.release(this, decrement);
+        if (result) deallocate();
+        return result;
+    }
+
+    // 释放内存对象，由不同子类实现
+    protected abstract void deallocate();
+}
+```
+
+释放内存方法由各个子类自行实现，如`UnpooledDirectByteBuf`会调用`PlatformDependent.freeDirectBuffer(ByteBuffer)`方法释放直接内存。而`UnpooledHeapByteBuf`就简单将byte[]数组字段设置为null即可。
+
+对于实现了内存池的PooledByteBuf抽象类及其子类，其deallocate()方法将释放内存回到Arena中并回收对象。
+
+## CompositeByteBuf
+
+CompositeByteBuf将多个ByteBuf实例组装在一起，对外提供统一视图。
+
+它在解析协议场景下很有用，如消息头和消息体分别以ByteBuf对象封装，若要将整个消息整合在一起，用jdk的nio ByteBuffer则只能复制拷贝新的ByteBuffer或以List数组等方式组合。但Netty通过CompositeByteBuf提供统一展示和处理。
+
+```java
+// 将多个缓冲区显示为单个合并缓冲区的虚拟缓冲区
+// 建议使用ByteBufAllocator.compositeBuffer()或Unpooled.wrappedBuffer(ByteBuf...)
+// 而不是显式调用构造函数
+public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements Iterable<ByteBuf> {
+    private final ByteBufAllocator alloc;
+    private final boolean direct;
+    private final int maxNumComponents;
+
+    private int componentCount;
+    private Component[] components; // resized when needed
+
+    private boolean freed;
+}
+```
+
+它定义了一个Component数组，Component实际是对ByteBuf的封装，聚合了ByteBuf对象，维护其位置偏移量信息：
+
+```java
+ private static final class Component {
+        final ByteBuf srcBuf; // the originally added buffer
+        final ByteBuf buf; // srcBuf unwrapped zero or more times
+
+        int srcAdjustment; // index of the start of this CompositeByteBuf relative to srcBuf
+        int adjustment; // index of the start of this CompositeByteBuf relative to buf
+
+        int offset; // offset of this component within this CompositeByteBuf
+        int endOffset; // end offset of this component within this CompositeByteBuf
+
+        private ByteBuf slice; // cached slice, may be null
+ }
+```
 
 # 内存管理
 
