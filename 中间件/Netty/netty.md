@@ -3041,29 +3041,31 @@ NIOServerSocketChannel的pipeline就HeadContext这个handler有覆盖，作用�
 
 ```java
 protected class NioByteUnsafe extends AbstractNioUnsafe {
-    // NioSocketChannel 读取新的数据
+    // NioSocketChannel 处理读I/O事件
     public final void read() {
-        // 省略
-        // 1.获得并重置 RecvByteBufAllocator.Handle 对象
-        final ByteBufAllocator allocator = config.getAllocator();
+        // 1.获得缓冲区分配器和预测器
+        // 1.1 获取ByteBuf分配器
+        final ByteBufAllocator allocator = config.getAllocator();// 默认是PooledByteBufferAllocator
+        // 默认是AdaptiveRecvByteBufAllocator: 动态接收缓冲区分配器
+        // 1.2 从unsafe获取绑定的 缓冲区预测处理器，第1次调用没有则新建
         final RecvByteBufAllocator.Handle allocHandle = recvBufAllocHandle();
         allocHandle.reset(config);
 
         ByteBuf byteBuf = null;
         boolean close = false;// 是否关闭连接
-        // 省略try/catch/finally
+
         do {
-            // 2.申请 ByteBuf 对象
+            // 2.缓冲区预测处理器确定此次接收缓冲区ByteBuf
             byteBuf = allocHandle.allocate(allocator);
-            // 3.读取数据到ByteBuf
-            // 设置最后读取字节数
+            // 3.从SocketChannel读取数据到ByteBuf并设置此次读取字节数
+            // 若此次读取填满缓冲区会调用record方法扩容
             allocHandle.lastBytesRead(doReadBytes(byteBuf));
-            // 没读取到数据则释放ByteBuf对象并关闭连接
+            // 3.1 没读取到数据说明读完了或对端关闭连接
             if (allocHandle.lastBytesRead() <= 0) {
-                // nothing was read. release the buffer.
+                // 3.2 释放缓存区，即放回PooledByteBufferAllocator
                 byteBuf.release();
                 byteBuf = null;
-                // 如果读取字节数小于0，说明对端已关闭连接
+                // 3.3 如果读取字节数为-1，说明对端已关闭连接，收到了EOF
                 close = allocHandle.lastBytesRead() < 0;
                 if (close) {
                     // There is nothing left to read as we received an EOF.
@@ -3077,24 +3079,143 @@ protected class NioByteUnsafe extends AbstractNioUnsafe {
             // 4.发布pipeline#fireChannelRead(byteBuf)事件
             pipeline.fireChannelRead(byteBuf);
             byteBuf = null;
-        } while (allocHandle.continueReading());
+        } while (allocHandle.continueReading());// 此次读取填满缓冲区则继续循环读取
 
+        // 5.缓冲区预测处理器 readComplete回调，
+        // 调用record方法以此次IO事件读取的所有字节数来调整预测缓冲区容量
         allocHandle.readComplete();
-        // 5.发布pipeline#fireChannelReadComplete()
+        // 6.发布pipeline#fireChannelReadComplete()
         pipeline.fireChannelReadComplete();
-        // 6.如果读取字节数小于0，说明对端已关闭连接，此时关闭Channel
-        if (close) {
-            closeOnRead(pipeline);
-        }
+        // 7.如果读取字节数为-1，说明对端已关闭连接，此时关闭Channel
+        if (close) { closeOnRead(pipeline); }
     }
 }
 ```
 
-对于NioSocketChannel的读事件，将数据读入ByteBuf后发布`pipeline#fireChannelRead(byteBuf)`事件，将byteBuf交由各个ChannelHandler进行处理，一般情况下都会设置一些编解码器，再设置业务处理器。
+对于NioSocketChannel的读事件，将数据读入ByteBuf后发布`pipeline#fireChannelRead(byteBuf)`事件，将byteBuf交由各个ChannelHandler进行处理，一般情况下都会设置一些编解码器，**半包处理器**，最后设置业务处理器。
 
-关键的读取操作交给ByteBuf进行处理，这里不对其进行深入分析。总之对于套接字数据的读取最终肯定是调用JavaNio的API：`SocketChannel#read(ByteBuffer buf)`。
+这里需要注意这个动态接受缓冲区分配器/预测器，它的解析看下面。
 
-## write处理
+### 动态接收缓冲区分配器
+
+read()方法第一步是获取动态接收缓冲区分配器，默认是`AdaptiveRecvByteBufAllocator`
+
+```java
+/**
+ * 动态接收缓冲区分配器会自动增加和减少反馈的预测缓冲区大小。
+ * 如果前一次读取完全填满分配的缓冲区，它会逐渐增加预期分配缓冲区大小。
+ * 如果读取操作无法连续两次填充满已分配缓冲区，它会逐渐减少预期分配缓冲区大小
+ */
+public class AdaptiveRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufAllocator {
+    static final int DEFAULT_MINIMUM = 64;// 最小缓冲区长度
+    // Use an initial value that is bigger than the common MTU of 1500
+    static final int DEFAULT_INITIAL = 2048;// 默认缓冲区初始容量, 稍大于MTU 1500B
+    static final int DEFAULT_MAXIMUM = 65536;// 默认缓冲区最大容量
+
+    // 动态调整容量的步进索引参数
+    private static final int INDEX_INCREMENT = 4;// 扩张的步进索引为4
+    private static final int INDEX_DECREMENT = 1;// 收缩的步进索引为1
+
+    private static final int[] SIZE_TABLE;// 长度向量表，向量数组每个值对应1个ByteBuf容量
+
+    static {
+        // 初始化向量表
+        List<Integer> sizeTable = new ArrayList<Integer>();
+        // 小容量每间隔16一个容量
+        for (int i = 16; i < 512; i += 16) {
+            sizeTable.add(i);
+        }
+
+        // 大容量说明解码的消息码流较大，采用2倍扩张以减少动态扩容频率
+        for (int i = 512; i > 0; i <<= 1) { // lgtm[java/constant-comparison]
+            sizeTable.add(i);
+        }
+
+        SIZE_TABLE = new int[sizeTable.size()];
+        for (int i = 0; i < SIZE_TABLE.length; i++) {
+            SIZE_TABLE[i] = sizeTable.get(i);
+        }
+    }
+
+    // 二分查找大于size的第一个向量表索引
+    private static int getSizeTableIndex(final int size) {
+        // 二分查找实现，有手就行!
+    }
+
+    // 缓冲区预测处理器
+    public Handle newHandle() {
+        return new HandleImpl(minIndex, maxIndex, initial);
+    }
+
+    @Override
+    public AdaptiveRecvByteBufAllocator respectMaybeMoreData(boolean respectMaybeMoreData) {
+        super.respectMaybeMoreData(respectMaybeMoreData);
+        return this;
+    }
+}
+```
+
+NioSocketChannel每次处理读取事件时调用`AdaptiveRecvByteBufAllocator`新建一个**缓冲区预测处理器**用于调整此次事件读取过程中循环读取时的ByteBuf缓冲区容量。缓冲区预测处理器为其静态内部类：`HandlerImpl`
+
+```java
+// io/netty/channel/AdaptiveRecvByteBufAllocator.java
+// 缓冲区预测处理器
+private final class HandleImpl extends MaxMessageHandle {
+    private final int minIndex;// 向量表最小索引
+    private final int maxIndex;// 向量表最大索引
+    private int index;// 当前向量表索引, 默认为33，即缓冲区容量默认2048, 刚好大于MTU 1500B
+    private int nextReceiveBufferSize;// 下次预分配ByteBuf大小
+    private boolean decreaseNow;// 是否立刻执行容量收缩操作
+
+    // 返回调整/预测的下次缓冲区分配容量
+    public int guess() {return nextReceiveBufferSize;}
+
+    // 每次NioSocketChannel执行读取操作后会record方法以对下次读取时预分配ByteBuf进行容量设定
+    // 根据每次实际读取字节数调整下次读取缓冲区容量
+    private void record(int actualReadBytes) {
+        // 1.若此次读取字节数<此次分配的ByteBuf容量在向量表中前一个向量容量，
+        // 则判断需要缩容，缩容步进索引为1
+        if (actualReadBytes <= SIZE_TABLE[max(0, index - INDEX_DECREMENT)]) {
+            if (decreaseNow) {
+                // 1.2 第2次则立刻缩减下次预分配ByteBuf容量
+                index = max(index - INDEX_DECREMENT, minIndex);// 向量表索引-1
+                nextReceiveBufferSize = SIZE_TABLE[index];
+                decreaseNow = false;
+            } else {
+                // 1.1 第1次先标记需要缩容，但不立刻缩减下次分配ByteBuf
+                decreaseNow = true;
+            }
+        } else if (actualReadBytes >= nextReceiveBufferSize) {
+            // 2.若此次读取字节数>=此次分配的ByteBuf容量，说明读取填满缓冲区
+            // 将下次分配ByteBuf直接扩容,扩容步进索引为4
+            index = min(index + INDEX_INCREMENT, maxIndex);// 向量表索引+4
+            nextReceiveBufferSize = SIZE_TABLE[index];
+            decreaseNow = false;
+        }
+    }
+
+    // 读取完成时回调，用本次循环读取总字节数来调整下次IO事件发生时的预测缓冲区容量
+    // 目的在于下次读取事件发生时可一次性分配能完全读取的缓冲区，避免动态扩容
+    public void readComplete() {
+        record(totalBytesRead());
+    }
+}
+```
+
+从这个缓冲区预测处理器可知，默认缓冲区为2048B，读取时动态调整：
+
+- **此次读取填满缓冲区，则扩容**，步进索引为4，即小容量时每次增加16*4=64B，大容量时每次扩容2^4=16倍。
+- **连续两次读取无法填满已分配缓冲区的前一个向量表容量，则缩容**，步进索引为1，即小容量时每次减少16B，大容量时每次缩容一半。
+
+最后循环读取完成时回调readComplete()方法来确保下次读取事件发生时**预测器分配一次性即可读完所有内容的缓冲区容量，避免多次触发pipeline#fireChannelRead事件，减少handler对TCP拆包的逻辑处理**。
+
+为什么使用动态缓冲区，而不是固定1024或2048容量呢？
+
+> **Netty作为通用IO框架，需适配不同场景，不同场景下码流大小千差万别**，聊天场景则码流很小，文件传输则码流很大。因此Netty需根据上次读取码流大小动态预测下次接收缓冲区容量。
+>
+> 设置合适的缓冲区可以减少read IO 调用，同时节省内存。缓冲区过小会频繁read io调用，过大则浪费内存。
+
+## write->内存队列
 
 Netty的Channel有3中写入API方法，都继承自`ChannelOutboundInvoker`接口：
 
@@ -3200,7 +3321,7 @@ public void channelRead(ChannelHandlerContext ctx, Object msg) {
 
 这两种都会交由`head`节点处理，都能成功发送到对端Socket，具体使用哪一种呢，看自己的ChannelHandler是否有拦截`write()出站事件`的需求(一般不会拦截)，有则必须第2种。
 
-## flush处理
+## flush->Socket套接字
 
 Netty `Channel#write()`方法最后仅将数据写入了内存缓冲ByteBuf中，调用`Channel#flush()`才会将数据写入Socket套接字。
 
