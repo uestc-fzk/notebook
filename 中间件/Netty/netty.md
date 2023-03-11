@@ -400,7 +400,7 @@ Netty中提供的处理TCP粘包拆包问题的解码器有：
 - LineBasedFrameDecoder：基于行区分消息
 - DelimiterBasedFrameDecoder：基于自定义分隔符区分消息，注意会将分隔符从消息中过滤掉
 - FixedLengthFrameDecoder：定长消息
-- 
+- **LengthFieldBasedFrameDecoder：指定自定义长度字段划分消息**
 
 ## 核心组件
 
@@ -2407,477 +2407,6 @@ private static void processSelectedKey(SelectionKey k, NioTask<SelectableChannel
 
 > 注意：从这里的处理程序来看，当自定义处理逻辑出现了异常，Netty并不会帮我们关闭Channel，因此如有必要，可以在`NioTask#channelUnregistered()`回调方法中手动关闭Channel捏。
 
-# ChannelPipeline
-
-ChannelPipeline是ChannelHandler链，负责处理和拦截inbound或outbound事件流。
-
-![ChannelPipeline](netty.assets/ChannelPipeline.png)
-
-
-
-```java
-// 通常在创建Channel时一起创建
-public class DefaultChannelPipeline implements ChannelPipeline {
-    // 自定义的ChannelHandler加入在head和tail之间
-    final HeadContext head;// pipeline执行链头结点
-    final TailContext tail;// pipeline执行链尾结点
-
-    private final Channel channel;// 所属的Channel
-    private final ChannelFuture succeededFuture;
-    private final VoidChannelPromise voidPromise;
-
-    // 挂起的ChannelHandler回调任务
-    // 如可以存放的是还未执行ChannelHandler#handlerAdded()回调的处理器Context任务PendingHandlerAddedTask
-    private PendingHandlerCallback pendingHandlerCallbackHead;
-    private boolean registered;// 所属的Channel是否注册到EventLoop
-
-    protected DefaultChannelPipeline(Channel channel) {
-        this.channel = ObjectUtil.checkNotNull(channel, "channel");
-        succeededFuture = new SucceededChannelFuture(channel, null);
-        voidPromise = new VoidChannelPromise(channel, true);
-
-        tail = new TailContext(this);
-        head = new HeadContext(this);
-
-        head.next = tail;
-        tail.prev = head;
-    }
-}
-```
-
-## 添加ChannelHandler
-
-注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
-
-往ChannelPipeline中添加ChannelHandler的方法是`DefaultChannelPipeline#addLast()`：
-
-```java
-public final ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
-    final AbstractChannelHandlerContext newCtx;
-    synchronized (this) {// 加锁防止多线程并发操作pipeline的双向链表
-        // 1.检查重复handler，若某个handler被多次添加到pipeline，且未标注@Shareble注解则抛异常
-        checkMultiplicity(handler);
-
-        // 2.创建DefaultChannelHandlerContext封装handler作为新节点，并添加到pipeline的双向执行链中
-        newCtx = newContext(group, filterName(name, handler), handler);
-        addLast0(newCtx);
-
-        // 3.如果此时pipeline所属的Channel还未注册到EventLoop，
-        // 则包装为PendingHandlerAddedTask任务挂起，该任务将在通道注册后再回调此ChannelHandler.handlerAdded()
-        // 详细见 DefaultChannelPipeline#invokeHandlerAddedIfNeeded()
-        if (!registered) {
-            newCtx.setAddPending();
-            callHandlerCallbackLater(newCtx, true);
-            return this;// 直接返回
-        }
-
-        // 省略
-    }
-    // 4.回调ChannelHandler#handlerAdded()方法
-    callHandlerAdded0(newCtx);
-    return this;
-}
-```
-
-注意第3步的挂起回调任务，下面分析为什么要挂起而不是如第4步那样直接回调。
-
-### 挂起Handler回调任务
-
-DefaultChannelPipeline中有个属性`PendingHandlerCallback pendingHandlerCallbackHead`，它保存了一些挂起任务，比如像这个`PendingHandlerAddedTask`任务，它其实就是保存了ChannelHandlerContext，以执行`ChannelHandler#handlerAdded()`回调。
-
-```java
-private abstract static class PendingHandlerCallback implements Runnable {
-    final AbstractChannelHandlerContext ctx;// 保存的ChannelHandler上下文
-    PendingHandlerCallback next;// 下一个挂起的回调任务
-    PendingHandlerCallback(AbstractChannelHandlerContext ctx) {
-        this.ctx = ctx;
-    }
-    abstract void execute();
-}
-
-// 挂起的ChannelHandler#handlerAdded()回调任务
-private final class PendingHandlerAddedTask extends PendingHandlerCallback {
-    @Override
-    void execute() {
-        EventExecutor executor = ctx.executor();
-        if (executor.inEventLoop()) {
-            callHandlerAdded0(ctx);// 这里就是调用ChannelHandler#handlerAdded()回调
-        } else {
-            // 省略
-        }
-    }
-}
-```
-
-**那为什么会有`PendingHandlerCallback`挂起任务，而不直接执行handlerAdded()回调？**
-
-> 因为 ChannelHandler 添加到 pipeline 中，会触发 `ChannelHandler#handlerAdded()`回调，并且该事件需要在 Channel 所属的 EventLoop 中执行。
->
-> 但是 Channel 并未注册在 EventLoop 上时，需要暂时将“触发 ChannelHandler 的添加完成( added )事件”的逻辑，作为一个 PendingHandlerCallback 进行“缓存”。在 Channel 注册到 EventLoop 上时，进行回调执行。
->
-> 在`EventLoop#register()`注册Channel到EventLoop的Selector完成后，会调用`DefaultChannelPipeline#invokeHandlerAddedIfNeeded()`去执行这些挂起的回调任务。
->
-> 移除ChannelHandler时也会有一个挂起任务PendingHandlerRemovedTask，就不细究了。
-
-如下面是Channel注册到EventLoop的方法：第2步会触发这些挂起任务的执行。
-
-```java
-// AbstractChannel.AbstractUnsafe.java
-private void register0(ChannelPromise promise) {
-    try {
-        if (!promise.setUncancellable() || !ensureOpen(promise)) {return;}
-        boolean firstRegistration = neverRegistered;
-        // 1.执行注册逻辑
-        // 将SelectableChannel注册到此EventLoop的Selector上，不过此时注册的兴趣集为0
-        doRegister();
-        neverRegistered = false;
-        registered = true;
-
-        // 2.执行可能的挂起的ChannelHandler#handlerAdded()回调任务
-        // 比如ChannelInitializer就是在这回调初始化，此回调常用来添加ChannelHandler
-        pipeline.invokeHandlerAddedIfNeeded();
-
-        safeSetSuccess(promise);
-        // 3.触发ChannelInboundHandler#channelRegistered()回调
-        pipeline.fireChannelRegistered();
-        // 省略部分代码
-    } catch (Throwable t) {
-        // 省略
-    }
-}
-```
-
-## ChannelHandlerContext
-
-注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
-
-![DefaultChannelHandlerContext](netty.assets/DefaultChannelHandlerContext.png)
-
-### Abstract
-
-```java
-abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, ResourceLeakHint {
-    volatile AbstractChannelHandlerContext next;// 上一个节点
-    volatile AbstractChannelHandlerContext prev;// 下一个节点
-
-    private final DefaultChannelPipeline pipeline;// 所属pipeline
-    private final String name;// 此context在pipeline中的唯一名字
-    private final boolean ordered;
-    // 此context的执行码，可用于快速判断入站和出站各个事件拦截
-    private final int executionMask;
-
-    AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor,
-                                  String name, Class<? extends ChannelHandler> handlerClass) {
-        this.name = ObjectUtil.checkNotNull(name, "name");
-        this.pipeline = pipeline;
-        this.executor = executor;
-        this.executionMask = mask(handlerClass);// 根据传入的Handler类型计算执行掩码
-        ordered = executor == null || executor instanceof OrderedEventExecutor;
-    }
-}
-```
-
-### 执行掩码
-
-在上面AbstractChannelHandlerContext中有`executionMask`执行掩码属性，它用于快速判断此context包含的handler是否能拦截某个出站或入站事件，它由`ChannelHandlerMask`管理：
-
-```java
-// 入站和出站的执行掩码，这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
-final class ChannelHandlerMask {
-    // Using to mask which methods must be called for a ChannelHandler.
-    static final int MASK_EXCEPTION_CAUGHT = 1;
-    static final int MASK_CHANNEL_REGISTERED = 1 << 1;
-    static final int MASK_CHANNEL_UNREGISTERED = 1 << 2;
-    static final int MASK_CHANNEL_ACTIVE = 1 << 3;
-    static final int MASK_CHANNEL_INACTIVE = 1 << 4;
-    static final int MASK_CHANNEL_READ = 1 << 5;
-    static final int MASK_CHANNEL_READ_COMPLETE = 1 << 6;
-    static final int MASK_USER_EVENT_TRIGGERED = 1 << 7;
-    static final int MASK_CHANNEL_WRITABILITY_CHANGED = 1 << 8;
-    static final int MASK_BIND = 1 << 9;
-    static final int MASK_CONNECT = 1 << 10;
-    static final int MASK_DISCONNECT = 1 << 11;
-    static final int MASK_CLOSE = 1 << 12;
-    static final int MASK_DEREGISTER = 1 << 13;
-    static final int MASK_READ = 1 << 14;
-    static final int MASK_WRITE = 1 << 15;
-    static final int MASK_FLUSH = 1 << 16;
-    // 所有入站事件掩码
-    static final int MASK_ONLY_INBOUND = MASK_CHANNEL_REGISTERED |
-        MASK_CHANNEL_UNREGISTERED | MASK_CHANNEL_ACTIVE | MASK_CHANNEL_INACTIVE | MASK_CHANNEL_READ |
-        MASK_CHANNEL_READ_COMPLETE | MASK_USER_EVENT_TRIGGERED | MASK_CHANNEL_WRITABILITY_CHANGED;
-    private static final int MASK_ALL_INBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_INBOUND;
-    // 所有出站事件掩码
-    static final int MASK_ONLY_OUTBOUND = MASK_BIND | MASK_CONNECT | MASK_DISCONNECT |
-        MASK_CLOSE | MASK_DEREGISTER | MASK_READ | MASK_WRITE | MASK_FLUSH;
-    private static final int MASK_ALL_OUTBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_OUTBOUND;
-
-    private static final FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>> MASKS =
-        new FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>>() {
-        @Override
-        protected Map<Class<? extends ChannelHandler>, Integer> initialValue() {
-            return new WeakHashMap<Class<? extends ChannelHandler>, Integer>(32);
-        }
-    };
-
-    // 根据ChannelHandler的具体类型获取执行掩码
-    static int mask(Class<? extends ChannelHandler> clazz) {
-        // 先从缓存获取，没有则计算再放入缓存
-        Map<Class<? extends ChannelHandler>, Integer> cache = MASKS.get();
-        Integer mask = cache.get(clazz);
-        if (mask == null) {
-            mask = mask0(clazz);
-            cache.put(clazz, mask);
-        }
-        return mask;
-    }
-
-    // 判断handler的某个方法上是否标有@Skip注解以判断是否在执行链中跳过该方法
-    private static boolean isSkippable(
-        final Class<?> handlerType, final String methodName, final Class<?>... paramTypes) throws Exception {
-        return AccessController.doPrivileged(new PrivilegedExceptionAction<Boolean>() {
-            @Override
-            public Boolean run() throws Exception {
-                // 省略try/catch
-                Method m = handlerType.getMethod(methodName, paramTypes);
-                return m.isAnnotationPresent(Skip.class);// 是否标有@Skip
-            }
-        });
-    }
-
-    // ChannelHandler中的带此注解的事件处理方法不会被pipeline调用
-    @Target(ElementType.METHOD)
-    @Retention(RetentionPolicy.RUNTIME)
-    @interface Skip {}
-}
-```
-
-根据handler类型计算掩码的细节如下：
-
-```java
-/**
- * 计算某个ChannelHandler类型的执行掩码
- * 这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
- */
-private static int mask0(Class<? extends ChannelHandler> handlerType) {
-    int mask = MASK_EXCEPTION_CAUGHT;
-	// 省略try/catch
-    // 1.如果实现了入站事件接口
-    if (ChannelInboundHandler.class.isAssignableFrom(handlerType)) {
-        mask |= MASK_ALL_INBOUND;
-        // 判断是否以@Skip注解跳过某些入站事件回调
-        if (isSkippable(handlerType, "channelRegistered", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_REGISTERED;
-        }
-        if (isSkippable(handlerType, "channelUnregistered", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_UNREGISTERED;
-        }
-        if (isSkippable(handlerType, "channelActive", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_ACTIVE;
-        }
-        if (isSkippable(handlerType, "channelInactive", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_INACTIVE;
-        }
-        if (isSkippable(handlerType, "channelRead", ChannelHandlerContext.class, Object.class)) {
-            mask &= ~MASK_CHANNEL_READ;
-        }
-        if (isSkippable(handlerType, "channelReadComplete", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_READ_COMPLETE;
-        }
-        if (isSkippable(handlerType, "channelWritabilityChanged", ChannelHandlerContext.class)) {
-            mask &= ~MASK_CHANNEL_WRITABILITY_CHANGED;
-        }
-        if (isSkippable(handlerType, "userEventTriggered", ChannelHandlerContext.class, Object.class)) {
-            mask &= ~MASK_USER_EVENT_TRIGGERED;
-        }
-    }
-    // 2.如果实现了出站事件接口
-    if (ChannelOutboundHandler.class.isAssignableFrom(handlerType)) {
-        mask |= MASK_ALL_OUTBOUND;
-        // 判断是否以@Skip注解跳过某些出站事件回调
-        if (isSkippable(handlerType, "bind", ChannelHandlerContext.class,
-                        SocketAddress.class, ChannelPromise.class)) {
-            mask &= ~MASK_BIND;
-        }
-        if (isSkippable(handlerType, "connect", ChannelHandlerContext.class, SocketAddress.class,SocketAddress.class, ChannelPromise.class)) {
-            mask &= ~MASK_CONNECT;
-        }
-        if (isSkippable(handlerType, "disconnect", ChannelHandlerContext.class, ChannelPromise.class)) {
-            mask &= ~MASK_DISCONNECT;
-        }
-        if (isSkippable(handlerType, "close", ChannelHandlerContext.class, ChannelPromise.class)) {
-            mask &= ~MASK_CLOSE;
-        }
-        if (isSkippable(handlerType, "deregister", ChannelHandlerContext.class, ChannelPromise.class)) {
-            mask &= ~MASK_DEREGISTER;
-        }
-        if (isSkippable(handlerType, "read", ChannelHandlerContext.class)) {
-            mask &= ~MASK_READ;
-        }
-        if (isSkippable(handlerType, "write", ChannelHandlerContext.class,
-                        Object.class, ChannelPromise.class)) {
-            mask &= ~MASK_WRITE;
-        }
-        if (isSkippable(handlerType, "flush", ChannelHandlerContext.class)) {
-            mask &= ~MASK_FLUSH;
-        }
-    }
-
-    if (isSkippable(handlerType, "exceptionCaught", ChannelHandlerContext.class, Throwable.class)) {
-        mask &= ~MASK_EXCEPTION_CAUGHT;
-    }
-
-    return mask;
-}
-```
-
-这种通过执行掩码以**位运算**判断是否执行某些回调方法的方式非常值得学习，远远比每次都通过反射调用判断是否某个注解再决定是否执行的方式快的多。
-
-## outbound事件传播
-
-**outbound事件发起者是Channel，处理者是`Unsafe`**，在pipeline中传播方向：`tail->head`。
-
-在 ChannelHandler 中处理事件时, 如果这个 Handler 不是最后一个 Handler ，则需要调用 `ctx.xxx` (如 `ctx.connect()` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
-
-在 `io.netty.channel.ChannelOutboundInvoker` 接口中，定义了所有 Outbound 事件对应的方法：
-
-```java
-ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise);
-ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise);
-ChannelFuture disconnect(ChannelPromise promise);
-ChannelFuture close(ChannelPromise promise);
-ChannelFuture deregister(ChannelPromise promise);
-ChannelOutboundInvoker read();// HeadContext#read()会重置兴趣集
-ChannelFuture write(Object msg, ChannelPromise promise);
-ChannelOutboundInvoker flush();
-ChannelFuture writeAndFlush(Object msg, ChannelPromise promise);
-```
-
-pipeline的处理节点DefaultChannelHandlerContext实现了该出站事件调用器，用于出站事件传播。
-
-### bind事件传播
-
-在上面分析AbstractBootstrap启动器时分析了其bind()方法，其在初始化并注册了Channel后会调用`AbstractBootstrap#doBind0()`方法：
-
-```java
-// AbstractBootstrap.java
-private static void doBind0(
-    final ChannelFuture regFuture, final Channel channel,
-    final SocketAddress localAddress, final ChannelPromise promise) {
-    channel.eventLoop().execute(new Runnable() {
-        @Override
-        public void run() {
-            if (regFuture.isSuccess()) {
-                channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-            } else promise.setFailure(regFuture.cause());
-        }
-    });
-}
-public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
-    @Override
-    public ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise) {
-        return pipeline.bind(localAddress, promise);// 想管道pipeline传播出站事件bind
-    }
-}
-```
-
-这里的`AbstractChannel#bind(SocketAddress localAddress, ChannelPromise promise)`是一个pipeline的出站事件，从`tail->head`，最终会调用HeadContext这个pipeline头节点里保存的`AbstractUnsafe#bind()`进行端口绑定。
-
-**bind事件的出站传播过程如下**：其它出站事件传播过程和这个一模一样，将bind换成write是完全可以的。
-
-![outbound事件传播](netty.assets/outbound事件传播.png)
-
-pipeline以`AbstractChannelHandlerContext`作为处理节点构建成双向链表，其实现了`ChannelOutboundInvoker`接口和`ChannelInboundInvoker`接口作为**出站和入站事件传播调用器**，其实现的各个方法如bind(args)唯一作用是将事件传播到下个节点并调用其handler相应回调函数。
-
-> 每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如bind(ctx,args)，**处理完成后需要调用ctx#bind(args)将此事件向后传播**，否则该事件传播就将提前终止了。
-
-从这可以猜测`ChannelOutboundHandler`的实现`ChannelOutboundHandlerAdapter`的每个方法肯定是直接调用`ctx#xxx(args)`进行事件传播，而当我们要实现某个handler时，就重写其中某些方法即可：
-
-```java
-public class ChannelOutboundHandlerAdapter extends ChannelHandlerAdapter implements ChannelOutboundHandler {
-
-    // 调用ChannelHandlerContext.bind(SocketAddress, ChannelPromise)以转发到ChannelPipeline中的下一个ChannelOutboundHandler 
-    // 子类可以会覆盖此方法以更改行为。
-    @Skip
-    @Override
-    public void bind(ChannelHandlerContext ctx, SocketAddress localAddress,
-                     ChannelPromise promise) throws Exception {
-        ctx.bind(localAddress, promise);
-    }
-    // 其它方法是一样的，不列出
-}
-```
-
-注意到还多了一个注解`@Skip`，根据前面分析的ChannelHandlerContext的执行掩码可知，如果我们自定义handler未覆盖某个事件方法如bind(args)，bind事件根本不会传播到此处理节点，也就是说只会传播到覆盖了某个事件处理方法并且未标注`@Skip`注解的节点。不得不感叹优化到极致了。
-
-## inbound事件传播
-
-**inbound事件发起者是Unsafe，处理者是TailContext**，如果用户没有实现自定义的处理方法, 那么Inbound 事件默认的处理者是 TailContext, 并且其处理方法是空实现。
-
-inbound事件传播方向：`head->tail`，如果这个 Handler 不是最后一个 Handler，则需要调用 `ctx.fireIN_EVT` (如 `ctx.fireChannelActive` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
-
-在 `io.netty.channel.ChannelInboundInvoker` 接口中，定义了所有 Inbound 事件传播对应的方法：
-
-```java
-ChannelInboundInvoker fireChannelRegistered();
-ChannelInboundInvoker fireChannelUnregistered();
-
-ChannelInboundInvoker fireChannelActive();// 触发read出站事件以重置兴趣集
-ChannelInboundInvoker fireChannelInactive();
-
-ChannelInboundInvoker fireExceptionCaught(Throwable cause);
-
-ChannelInboundInvoker fireUserEventTriggered(Object event);
-
-ChannelInboundInvoker fireChannelRead(Object msg);
-ChannelInboundInvoker fireChannelReadComplete(); // 触发read出站事件以重置兴趣集
-
-ChannelInboundInvoker fireChannelWritabilityChanged();
-```
-
-`ChannelInboundInvoker`接口的入站事件传播方法多了fire前缀，`ChannelInboundHandler`接口的入站事件处理方法没有此前缀，这和出站事件那边全是同名方法有了明显的区分性。
-
-### channelActive事件传播
-
-`pipeline#fireChannelActive()`事件触发点如下：
-
-- 服务端启动器`AbstractBootstrap#bind()`方法绑定端口，绑定成功向服务端Channel对应的pipeline发布此事件
-
-- 客户端启动器`Bootstrap#connect()`连接服务端，连接成功向客户端Channel对应的pipeline发布此事件
-
-在DefaultChannelPipeline中实现如下：
-
-```java
-// DefaultChannelPipeline.java
-public final ChannelPipeline fireChannelActive() {
-    AbstractChannelHandlerContext.invokeChannelActive(head);
-    return this;
-}
-```
-
-**channelActive事件的出站传播过程如下**：其它入站事件传播过程和这个一模一样，将channelActive换成channelRead是完全可以的。
-
-![inbound事件传播](netty.assets/inbound事件传播.png)
-
-每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如channelActive(ctx)，**处理完成后需要调用ctx#fireChannelActive()将此事件向后传播**，否则该事件传播就将提前终止了。
-
-如`io.netty.handler.logging.LoggingHandler`处理器的方法如下：
-
-```java
-final class LoggingHandler implements ChannelInboundHandler, ChannelOutboundHandler {
-    //... 省略无关方法
-    @Override
-    public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        // 打印日志
-        if (logger.isEnabled(internalLevel)) {
-            logger.log(internalLevel, format(ctx, "ACTIVE"));
-        }
-        // 传递 Channel active 事件，给下一个节点
-        ctx.fireChannelActive();
-    }
-}
-```
-
 # Channel
 
 `io.netty.channel.Channel`是 Netty 网络操作抽象类，它除了包括基本的 I/O 操作，如 bind、connect、read、write 之外，还包括了 Netty 框架相关的一些功能，如获取该 Channel 的 EventLoop。
@@ -3793,6 +3322,861 @@ private void clearUserDefinedWritability(int index) {
 }
 ```
 
+# ChannelPipeline
+
+ChannelPipeline是ChannelHandler链，负责传播inbound或outbound事件流。内部维护了ChannelHandler双向链表和迭代器，方便的进行ChannelHandler的查找、添加、替换、删除。
+
+![ChannelPipeline](netty.assets/ChannelPipeline.png)
+
+
+
+```java
+// 通常在创建Channel时一起创建
+public class DefaultChannelPipeline implements ChannelPipeline {
+    // 自定义的ChannelHandler加入在head和tail之间
+    final HeadContext head;// pipeline执行链头结点
+    final TailContext tail;// pipeline执行链尾结点
+
+    private final Channel channel;// 所属的Channel
+    private final ChannelFuture succeededFuture;
+    private final VoidChannelPromise voidPromise;
+
+    // 挂起的ChannelHandler回调任务
+    // 如可以存放的是还未执行ChannelHandler#handlerAdded()回调的处理器Context任务PendingHandlerAddedTask
+    private PendingHandlerCallback pendingHandlerCallbackHead;
+    private boolean registered;// 所属的Channel是否注册到EventLoop
+
+    protected DefaultChannelPipeline(Channel channel) {
+        this.channel = ObjectUtil.checkNotNull(channel, "channel");
+        succeededFuture = new SucceededChannelFuture(channel, null);
+        voidPromise = new VoidChannelPromise(channel, true);
+
+        tail = new TailContext(this);
+        head = new HeadContext(this);
+
+        head.next = tail;
+        tail.prev = head;
+    }
+}
+```
+
+## 添加ChannelHandler
+
+注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
+
+往ChannelPipeline中添加ChannelHandler的方法是`DefaultChannelPipeline#addLast()`：
+
+```java
+public final ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
+    final AbstractChannelHandlerContext newCtx;
+    synchronized (this) {// 加锁防止多线程并发操作pipeline的双向链表
+        // 1.检查重复handler，若某个handler被多次添加到pipeline，且未标注@Shareble注解则抛异常
+        checkMultiplicity(handler);
+
+        // 2.创建DefaultChannelHandlerContext封装handler作为新节点，并添加到pipeline的双向执行链中
+        newCtx = newContext(group, filterName(name, handler), handler);
+        addLast0(newCtx);
+
+        // 3.如果此时pipeline所属的Channel还未注册到EventLoop，
+        // 则包装为PendingHandlerAddedTask任务挂起，该任务将在通道注册后再回调此ChannelHandler.handlerAdded()
+        // 详细见 DefaultChannelPipeline#invokeHandlerAddedIfNeeded()
+        if (!registered) {
+            newCtx.setAddPending();
+            callHandlerCallbackLater(newCtx, true);
+            return this;// 直接返回
+        }
+
+        // 省略
+    }
+    // 4.回调ChannelHandler#handlerAdded()方法
+    callHandlerAdded0(newCtx);
+    return this;
+}
+```
+
+注意第3步的挂起回调任务，下面分析为什么要挂起而不是如第4步那样直接回调。
+
+### 挂起Handler回调任务
+
+DefaultChannelPipeline中有个属性`PendingHandlerCallback pendingHandlerCallbackHead`，它保存了一些挂起任务，比如像这个`PendingHandlerAddedTask`任务，它其实就是保存了ChannelHandlerContext，以执行`ChannelHandler#handlerAdded()`回调。
+
+```java
+private abstract static class PendingHandlerCallback implements Runnable {
+    final AbstractChannelHandlerContext ctx;// 保存的ChannelHandler上下文
+    PendingHandlerCallback next;// 下一个挂起的回调任务
+    PendingHandlerCallback(AbstractChannelHandlerContext ctx) {
+        this.ctx = ctx;
+    }
+    abstract void execute();
+}
+
+// 挂起的ChannelHandler#handlerAdded()回调任务
+private final class PendingHandlerAddedTask extends PendingHandlerCallback {
+    @Override
+    void execute() {
+        EventExecutor executor = ctx.executor();
+        if (executor.inEventLoop()) {
+            callHandlerAdded0(ctx);// 这里就是调用ChannelHandler#handlerAdded()回调
+        } else {
+            // 省略
+        }
+    }
+}
+```
+
+**那为什么会有`PendingHandlerCallback`挂起任务，而不直接执行handlerAdded()回调？**
+
+> 因为 ChannelHandler 添加到 pipeline 中，会触发 `ChannelHandler#handlerAdded()`回调，并且该事件需要在 Channel 所属的 EventLoop 中执行。
+>
+> 但是 Channel 并未注册在 EventLoop 上时，需要暂时将“触发 ChannelHandler 的添加完成( added )事件”的逻辑，作为一个 PendingHandlerCallback 进行“缓存”。在 Channel 注册到 EventLoop 上时，进行回调执行。
+>
+> 在`EventLoop#register()`注册Channel到EventLoop的Selector完成后，会调用`DefaultChannelPipeline#invokeHandlerAddedIfNeeded()`去执行这些挂起的回调任务。
+>
+> 移除ChannelHandler时也会有一个挂起任务PendingHandlerRemovedTask，就不细究了。
+
+如下面是Channel注册到EventLoop的方法：第2步会触发这些挂起任务的执行。
+
+```java
+// AbstractChannel.AbstractUnsafe.java
+private void register0(ChannelPromise promise) {
+    if (!promise.setUncancellable() || !ensureOpen(promise)) {return;}
+    boolean firstRegistration = neverRegistered;
+    // 1.执行注册逻辑
+    // 将SelectableChannel注册到此EventLoop的Selector上，不过此时注册的兴趣集为0
+    doRegister();
+    neverRegistered = false;
+    registered = true;
+
+    // 2.执行可能的挂起的ChannelHandler#handlerAdded()回调任务
+    // 比如ChannelInitializer就是在这回调初始化，此回调常用来添加ChannelHandler
+    pipeline.invokeHandlerAddedIfNeeded();
+
+    safeSetSuccess(promise);
+    // 3.触发ChannelInboundHandler#channelRegistered()回调
+    pipeline.fireChannelRegistered();
+}
+```
+
+## ChannelHandlerContext
+
+注意：在pipeline的双向执行链中，以`AbstractChannelHandlerContext`作为执行节点，其中封装有ChannlerHandler，默认实现是`DefaultChannelHandlerContext`。
+
+![DefaultChannelHandlerContext](netty.assets/DefaultChannelHandlerContext.png)
+
+### Abstract
+
+```java
+abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, ResourceLeakHint {
+    volatile AbstractChannelHandlerContext next;// 上一个节点
+    volatile AbstractChannelHandlerContext prev;// 下一个节点
+
+    private final DefaultChannelPipeline pipeline;// 所属pipeline
+    private final String name;// 此context在pipeline中的唯一名字
+    private final boolean ordered;
+    // 此context的执行码，可用于快速判断此handler是否拦截入站和出站各个事件
+    private final int executionMask;
+
+    AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor,
+                                  String name, Class<? extends ChannelHandler> handlerClass) {
+        this.name = ObjectUtil.checkNotNull(name, "name");
+        this.pipeline = pipeline;
+        this.executor = executor;
+        this.executionMask = mask(handlerClass);// 根据传入的Handler类型计算执行掩码
+        ordered = executor == null || executor instanceof OrderedEventExecutor;
+    }
+}
+```
+
+### 执行掩码
+
+在上面AbstractChannelHandlerContext中有`executionMask`执行掩码属性，它用于快速判断此context包含的handler是否能拦截某个出站或入站事件，它由`ChannelHandlerMask`管理：
+
+```java
+// 入站和出站的执行掩码，这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
+final class ChannelHandlerMask {
+    // Using to mask which methods must be called for a ChannelHandler.
+    static final int MASK_EXCEPTION_CAUGHT = 1;
+    static final int MASK_CHANNEL_REGISTERED = 1 << 1;
+    static final int MASK_CHANNEL_UNREGISTERED = 1 << 2;
+    static final int MASK_CHANNEL_ACTIVE = 1 << 3;
+    static final int MASK_CHANNEL_INACTIVE = 1 << 4;
+    static final int MASK_CHANNEL_READ = 1 << 5;
+    static final int MASK_CHANNEL_READ_COMPLETE = 1 << 6;
+    static final int MASK_USER_EVENT_TRIGGERED = 1 << 7;
+    static final int MASK_CHANNEL_WRITABILITY_CHANGED = 1 << 8;
+    static final int MASK_BIND = 1 << 9;
+    static final int MASK_CONNECT = 1 << 10;
+    static final int MASK_DISCONNECT = 1 << 11;
+    static final int MASK_CLOSE = 1 << 12;
+    static final int MASK_DEREGISTER = 1 << 13;
+    static final int MASK_READ = 1 << 14;
+    static final int MASK_WRITE = 1 << 15;
+    static final int MASK_FLUSH = 1 << 16;
+    // 所有入站事件掩码
+    static final int MASK_ONLY_INBOUND = MASK_CHANNEL_REGISTERED |
+        MASK_CHANNEL_UNREGISTERED | MASK_CHANNEL_ACTIVE | MASK_CHANNEL_INACTIVE | MASK_CHANNEL_READ |
+        MASK_CHANNEL_READ_COMPLETE | MASK_USER_EVENT_TRIGGERED | MASK_CHANNEL_WRITABILITY_CHANGED;
+    private static final int MASK_ALL_INBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_INBOUND;
+    // 所有出站事件掩码
+    static final int MASK_ONLY_OUTBOUND = MASK_BIND | MASK_CONNECT | MASK_DISCONNECT |
+        MASK_CLOSE | MASK_DEREGISTER | MASK_READ | MASK_WRITE | MASK_FLUSH;
+    private static final int MASK_ALL_OUTBOUND = MASK_EXCEPTION_CAUGHT | MASK_ONLY_OUTBOUND;
+
+    private static final FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>> MASKS =
+        new FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>>() {
+        @Override
+        protected Map<Class<? extends ChannelHandler>, Integer> initialValue() {
+            return new WeakHashMap<Class<? extends ChannelHandler>, Integer>(32);
+        }
+    };
+
+    // 根据ChannelHandler的具体类型获取执行掩码
+    static int mask(Class<? extends ChannelHandler> clazz) {
+        // 先从缓存获取，没有则计算再放入缓存
+        Map<Class<? extends ChannelHandler>, Integer> cache = MASKS.get();
+        Integer mask = cache.get(clazz);
+        if (mask == null) {
+            mask = mask0(clazz);
+            cache.put(clazz, mask);
+        }
+        return mask;
+    }
+
+    // 判断handler的某个方法上是否标有@Skip注解以判断是否在执行链中跳过该方法
+    private static boolean isSkippable(
+        final Class<?> handlerType, final String methodName, final Class<?>... paramTypes) throws Exception {
+        return AccessController.doPrivileged(new PrivilegedExceptionAction<Boolean>() {
+            @Override
+            public Boolean run() throws Exception {
+                // 省略try/catch
+                Method m = handlerType.getMethod(methodName, paramTypes);
+                return m.isAnnotationPresent(Skip.class);// 是否标有@Skip
+            }
+        });
+    }
+
+    // ChannelHandler中的带此注解的事件处理方法不会被pipeline调用
+    @Target(ElementType.METHOD)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Skip {}
+}
+```
+
+根据handler类型计算掩码的细节如下：
+
+```java
+/**
+ * 计算某个ChannelHandler类型的执行掩码
+ * 这种以掩码方式快速计算某个方法是否拦截执行的方式值得学习
+ */
+private static int mask0(Class<? extends ChannelHandler> handlerType) {
+    int mask = MASK_EXCEPTION_CAUGHT;
+	// 省略try/catch
+    // 1.如果实现了入站事件接口
+    if (ChannelInboundHandler.class.isAssignableFrom(handlerType)) {
+        mask |= MASK_ALL_INBOUND;
+        // 判断是否以@Skip注解跳过某些入站事件回调
+        if (isSkippable(handlerType, "channelRegistered", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_REGISTERED;
+        }
+        if (isSkippable(handlerType, "channelUnregistered", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_UNREGISTERED;
+        }
+        if (isSkippable(handlerType, "channelActive", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_ACTIVE;
+        }
+        if (isSkippable(handlerType, "channelInactive", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_INACTIVE;
+        }
+        if (isSkippable(handlerType, "channelRead", ChannelHandlerContext.class, Object.class)) {
+            mask &= ~MASK_CHANNEL_READ;
+        }
+        if (isSkippable(handlerType, "channelReadComplete", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_READ_COMPLETE;
+        }
+        if (isSkippable(handlerType, "channelWritabilityChanged", ChannelHandlerContext.class)) {
+            mask &= ~MASK_CHANNEL_WRITABILITY_CHANGED;
+        }
+        if (isSkippable(handlerType, "userEventTriggered", ChannelHandlerContext.class, Object.class)) {
+            mask &= ~MASK_USER_EVENT_TRIGGERED;
+        }
+    }
+    // 2.如果实现了出站事件接口
+    if (ChannelOutboundHandler.class.isAssignableFrom(handlerType)) {
+        mask |= MASK_ALL_OUTBOUND;
+        // 判断是否以@Skip注解跳过某些出站事件回调
+        if (isSkippable(handlerType, "bind", ChannelHandlerContext.class,
+                        SocketAddress.class, ChannelPromise.class)) {
+            mask &= ~MASK_BIND;
+        }
+        if (isSkippable(handlerType, "connect", ChannelHandlerContext.class, SocketAddress.class,SocketAddress.class, ChannelPromise.class)) {
+            mask &= ~MASK_CONNECT;
+        }
+        if (isSkippable(handlerType, "disconnect", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_DISCONNECT;
+        }
+        if (isSkippable(handlerType, "close", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_CLOSE;
+        }
+        if (isSkippable(handlerType, "deregister", ChannelHandlerContext.class, ChannelPromise.class)) {
+            mask &= ~MASK_DEREGISTER;
+        }
+        if (isSkippable(handlerType, "read", ChannelHandlerContext.class)) {
+            mask &= ~MASK_READ;
+        }
+        if (isSkippable(handlerType, "write", ChannelHandlerContext.class,
+                        Object.class, ChannelPromise.class)) {
+            mask &= ~MASK_WRITE;
+        }
+        if (isSkippable(handlerType, "flush", ChannelHandlerContext.class)) {
+            mask &= ~MASK_FLUSH;
+        }
+    }
+
+    if (isSkippable(handlerType, "exceptionCaught", ChannelHandlerContext.class, Throwable.class)) {
+        mask &= ~MASK_EXCEPTION_CAUGHT;
+    }
+
+    return mask;
+}
+```
+
+这种通过执行掩码以**位运算**判断是否执行某些回调方法的方式非常值得学习，远远比每次都通过反射调用判断是否某个注解再决定是否执行的方式快的多。
+
+## outbound事件传播
+
+outbound出站事件通常由用户主动发起的网络I/O操作，如用户发起连接、绑定、write等操作。
+
+**outbound事件发起者是Channel，处理者是`Unsafe`**，在pipeline中传播方向：`tail->head`。
+
+在 ChannelHandler 中处理事件时, 如果这个 Handler 不是最后一个 Handler ，则需要调用 `ctx.xxx` (如 `ctx.connect()` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
+
+在 `io.netty.channel.ChannelOutboundInvoker` 接口中，定义了所有 Outbound 事件对应的方法：
+
+```java
+ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise);
+ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise);
+ChannelFuture disconnect(ChannelPromise promise);
+ChannelFuture close(ChannelPromise promise);
+ChannelFuture deregister(ChannelPromise promise);
+ChannelOutboundInvoker read();// HeadContext#read()会重置兴趣集
+ChannelFuture write(Object msg, ChannelPromise promise);
+ChannelOutboundInvoker flush();
+ChannelFuture writeAndFlush(Object msg, ChannelPromise promise);
+```
+
+pipeline的处理节点DefaultChannelHandlerContext实现了该出站事件调用器，用于出站事件传播。
+
+### bind事件传播
+
+在上面分析AbstractBootstrap启动器时分析了其bind()方法，其在初始化并注册了Channel后会调用`AbstractBootstrap#doBind0()`方法：
+
+```java
+// AbstractBootstrap.java
+private static void doBind0(
+    final ChannelFuture regFuture, final Channel channel,
+    final SocketAddress localAddress, final ChannelPromise promise) {
+    channel.eventLoop().execute(new Runnable() {
+        @Override
+        public void run() {
+            if (regFuture.isSuccess()) {
+                channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            } else promise.setFailure(regFuture.cause());
+        }
+    });
+}
+public abstract class AbstractChannel extends DefaultAttributeMap implements Channel {
+    @Override
+    public ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise) {
+        return pipeline.bind(localAddress, promise);// 想管道pipeline传播出站事件bind
+    }
+}
+```
+
+这里的`AbstractChannel#bind(SocketAddress localAddress, ChannelPromise promise)`是一个pipeline的出站事件，从`tail->head`，最终会调用HeadContext这个pipeline头节点里保存的`AbstractUnsafe#bind()`进行端口绑定。
+
+**bind事件的出站传播过程如下**：其它出站事件传播过程和这个一模一样，将bind换成write是完全可以的。
+
+![outbound事件传播](netty.assets/outbound事件传播.png)
+
+pipeline以`AbstractChannelHandlerContext`作为处理节点构建成双向链表，其实现了`ChannelOutboundInvoker`接口和`ChannelInboundInvoker`接口作为**出站和入站事件传播调用器**，其实现的各个方法如bind(args)唯一作用是将事件传播到下个节点并调用其handler相应回调函数。
+
+> 每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如bind(ctx,args)，**处理完成后需要调用ctx#bind(args)将此事件向后传播**，否则该事件传播就将提前终止了。
+
+从这可以猜测`ChannelOutboundHandler`的实现`ChannelOutboundHandlerAdapter`的每个方法肯定是直接调用`ctx#xxx(args)`进行事件传播，而当我们要实现某个handler时，就重写其中某些方法即可：
+
+```java
+public class ChannelOutboundHandlerAdapter extends ChannelHandlerAdapter implements ChannelOutboundHandler {
+
+    // 调用ChannelHandlerContext.bind(SocketAddress, ChannelPromise)以转发到ChannelPipeline中的下一个ChannelOutboundHandler 
+    // 子类可以会覆盖此方法以更改行为。
+    @Skip
+    @Override
+    public void bind(ChannelHandlerContext ctx, SocketAddress localAddress,
+                     ChannelPromise promise) throws Exception {
+        ctx.bind(localAddress, promise);
+    }
+    // 其它方法是一样的，不列出
+}
+```
+
+注意到还多了一个注解`@Skip`，根据前面分析的ChannelHandlerContext的执行掩码可知，如果我们自定义handler未覆盖某个事件方法如bind(args)，bind事件根本不会传播到此处理节点，也就是说只会传播到覆盖了某个事件处理方法并且未标注`@Skip`注解的节点。不得不感叹优化到极致了。
+
+## inbound事件传播
+
+inbound入站事件通常由I/O线程触发，如TCP链路建立、读事件等。
+
+**inbound事件发起者是Unsafe，处理者是TailContext**，如果用户没有实现自定义的处理方法, 那么Inbound 事件默认的处理者是 TailContext, 并且其处理方法是空实现。
+
+inbound事件传播方向：`head->tail`，如果这个 Handler 不是最后一个 Handler，则需要调用 `ctx.fireIN_EVT` (如 `ctx.fireChannelActive` ) 将此事件继续传播下去，否则此事件的传播会提前终止。
+
+在 `io.netty.channel.ChannelInboundInvoker` 接口中，定义了所有 Inbound 事件传播对应的方法：
+
+```java
+ChannelInboundInvoker fireChannelRegistered();
+ChannelInboundInvoker fireChannelUnregistered();
+
+ChannelInboundInvoker fireChannelActive();// 触发read出站事件以重置兴趣集
+ChannelInboundInvoker fireChannelInactive();
+
+ChannelInboundInvoker fireExceptionCaught(Throwable cause);
+
+ChannelInboundInvoker fireUserEventTriggered(Object event);
+
+ChannelInboundInvoker fireChannelRead(Object msg);
+ChannelInboundInvoker fireChannelReadComplete(); // 触发read出站事件以重置兴趣集
+
+ChannelInboundInvoker fireChannelWritabilityChanged();
+```
+
+`ChannelInboundInvoker`接口的入站事件传播方法多了fire前缀，`ChannelInboundHandler`接口的入站事件处理方法没有此前缀，这和出站事件那边全是同名方法有了明显的区分性。
+
+### channelActive事件传播
+
+`pipeline#fireChannelActive()`事件触发点如下：
+
+- 服务端启动器`AbstractBootstrap#bind()`方法绑定端口，绑定成功向服务端Channel对应的pipeline发布此事件
+
+- 客户端启动器`Bootstrap#connect()`连接服务端，连接成功向客户端Channel对应的pipeline发布此事件
+
+在DefaultChannelPipeline中实现如下：
+
+```java
+// DefaultChannelPipeline.java
+public final ChannelPipeline fireChannelActive() {
+    AbstractChannelHandlerContext.invokeChannelActive(head);
+    return this;
+}
+```
+
+**channelActive事件的出站传播过程如下**：其它入站事件传播过程和这个一模一样，将channelActive换成channelRead是完全可以的。
+
+![inbound事件传播](netty.assets/inbound事件传播.png)
+
+每个节点处理出站或入站事件时以内置的`ChannelHandler`调用相应的出站或入站事件回调，并**将自己作为ctx传入回调函数**如channelActive(ctx)，**处理完成后需要调用ctx#fireChannelActive()将此事件向后传播**，否则该事件传播就将提前终止了。
+
+如`io.netty.handler.logging.LoggingHandler`处理器的方法如下：
+
+```java
+final class LoggingHandler implements ChannelInboundHandler, ChannelOutboundHandler {
+    //... 省略无关方法
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        // 打印日志
+        if (logger.isEnabled(internalLevel)) {
+            logger.log(internalLevel, format(ctx, "ACTIVE"));
+        }
+        // 传递 Channel active 事件，给下一个节点
+        ctx.fireChannelActive();
+    }
+}
+```
+
+# ChannelHandler
+
+ChannelHandler是通道处理器，拦截处理各个入站出站事件，并**控制事件的传递或终止**。ChannelHandler支持2个注解：
+
+- `@Sharable`：标注在类上，表示可以将带注释的ChannelHandler的同一实例多次添加到一个或多个ChannelPipeline中，而不会出现竞争条件。
+- `@Skip`：标注在方法上，用于计算此ChannelHandler的**执行掩码**，在Pipeline事件传播此方法时，该handler被直接忽略，跳到下一个ChannelHandler。
+
+```java
+public interface ChannelHandler {
+
+    // handler添加到pipeline后回调，一般用于handler初始化
+    void handlerAdded(ChannelHandlerContext ctx) throws Exception;
+
+    // hanler从Pipeline移除后回调，一般用于handler的资源回收操作等
+    void handlerRemoved(ChannelHandlerContext ctx) throws Exception;
+
+
+    /**
+     * 表示是否可以将1个handler实例添加到多个pipeline中，而不会出现竞争条件，即此handler是否可共享(线程安全)
+     * 若handler未标注此注解，则每次添加到pipeline中必须创建新的实例
+     * 一般来说，若handler中有成员变量，记录此SocketChannel的一些数据，都必须每个pipeline创建一个新实例
+     */
+    @Inherited
+    @Documented
+    @Target(ElementType.TYPE)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface Sharable {}
+}
+```
+
+![ChannelHandler层次](netty.assets/ChannelHandler层次.png)
+
+通常自定义处理器都是继承ChannelInboundHandlerAdapter或ChannelOutboundHandlerAdapter，这两个adapter实现了入站或出站接口的各个事件方法，**默认以`@Skip`标注方法以直接将事件透传到pipeline的下一个handler**，自定义handler覆盖其中部分事件方法即可实现事件拦截，未覆盖的方法将直接透传到下个handler。
+
+> 关于如何以`@Skip`计算执行掩码以及其如何通过位运算快速判断handler是否拦截了某个事件方法的分析看ChannelPipeline分析部分。
+
+```java
+/**
+ * ChannelInboundHandler实现的抽象基类，它提供了所有方法的实现。
+ * 此实现只是将操作转发给ChannelPipeline中的下一个ChannelHandler 。子类可以覆盖方法实现来改变它。
+ * 请注意， channelRead(ChannelHandlerContext, Object)方法自动返回后不会释放消息。
+ * 如果您正在寻找自动释放接收到的消息的ChannelInboundHandler实现，请参阅SimpleChannelInboundHandler 
+ */
+public class ChannelInboundHandlerAdapter extends ChannelHandlerAdapter implements ChannelInboundHandler {
+    @Skip // 此注解表明此handler在此事件方法可直接忽略，直接透传到下个handler
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        ctx.fireChannelRead(msg);
+    }
+    // 其它入站方法实现类似则忽略
+}
+```
+
+接下来分析几个常用的ChannelHandler实现类。
+
+## ChannelInitializer初始化器
+
+它是一个特殊的ChannelHandler，用于Channel的自定义初始化，一般是添加自定义ChannelHandler到Channel绑定的pipeline中。
+
+比如以下案例：
+
+```java
+ServerBootstrap b = new ServerBootstrap();
+b.option(ChannelOption.SO_BACKLOG, 1024);
+b.group(bossGroup, workerGroup) // 配置主从线程组
+    .channel(NioServerSocketChannel.class) // 配置要使用的Channel类
+    .childHandler(new ChannelInitializer<SocketChannel>() {
+        @Override
+        protected void initChannel(SocketChannel ch) throws Exception {
+            ChannelPipeline p = ch.pipeline();
+            // 3.设置接入服务端的SocketChannel的处理器管道
+            // 向管道内加入HTTP协议的编码/解码器
+            p.addLast(new HttpServerCodec());
+            p.addLast(new HttpServerExpectContinueHandler());
+            p.addLast(new HttpHelloWorldServerHandler());// 自定义handler
+        }
+    });
+```
+
+启动器以childHandler()方法指定了worker group的handler，每个新建的SocketChannel注册到worker group时都会把这个handler放入其pipeline中，也就是说**每个SocketChannel刚创建完成时pipeline中只有3个handler：`HeadContext、childHander、TailContext`。**
+
+一般来说这个childHandler都会设置为初始化器ChannelInitializer并重写其`initChannel()`方法以自定义初始化。
+
+从之前分析的NioEventLoop注册SocketChannel可知，注册到Selector后会触发`handler#handlerAdded()`回调方法。
+
+> 初始化器重写handlerAdded()方法会调用initChannel()方法以执行自定义的初始化操作，并最后将自己从pipeline中移除。一般都是向pipeline中添加自定义handler。
+
+比如ServerBootstrap将ServerSocketChannel注册到boss EventLoopGroup后，初始化器将ServerBootstrapAcceptor连接接收handler添加到ServerSocketChannel的pipeline中，并移除自己。
+
+SocketChannel注册到worker EventLoopGroup后，初始化器将自定义handler添加到其绑定的pipeline中，并移除自己。
+
+## SimpleChannelInboundHandler
+
+从netty的example模块可以得知，自定义handler一般是继承自`SimpleChannelInboundHandler<T>`，并重写`channelRead0()`方法。
+
+该抽象类继承自`ChannelInboundHandlerAdapter`并重写了`channelRead()`方法。主要是**实现了ByteBuf的自动资源释放**，避免了用户忘记释放资源时发生内存泄漏。其次实现了消息类型的匹配。
+
+```java
+/**
+ * 它可以根据泛型解析，从而只处理特定类型的消息，不匹配消息将传给下个handler
+ * 它实现了消息资源的自动释放，避免用户释放忘记发生内存泄漏
+ * 注意：由于自动资源释放的存在，若您需要将消息传给下一个handler，可能需要调用ReferenceCountUtil.retain(Object)以增加引用数，否则可能会报错
+ */
+public abstract class SimpleChannelInboundHandler<I> extends ChannelInboundHandlerAdapter {
+    // 类型匹配器，将只匹配给定泛型的消息，不匹配的直接传给下个handler
+    private final TypeParameterMatcher matcher;
+
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        boolean release = true;
+        try {
+            // 1.消息匹配泛型时，调用channelRead0()方法
+            if (acceptInboundMessage(msg)) {
+                I imsg = (I) msg;
+                channelRead0(ctx, imsg);
+            } else {
+                // 2.泛型不匹配时，则直接将消息传入下个handler
+                release = false;
+                ctx.fireChannelRead(msg);
+            }
+        } finally {
+            if (autoRelease && release) {
+                ReferenceCountUtil.release(msg);// 释放资源，即ByteBuf引用数-1
+            }
+        }
+    }
+
+    // 消息类型匹配泛型时将调用此方法，用户自定义handler一般重写此方法
+    protected abstract void channelRead0(ChannelHandlerContext ctx, I msg) throws Exception;
+}
+```
+
+> 注意：若**用户自定义`channelRead0()`方法**中将消息传入了下个handler，则必须调用`ReferenceCountUtil.retain(Object)`以增加引用数，因为此handler会自动调用`ReferenceCountUtil.release(msg)`以减少引用数。
+>
+> 若不增加引用数，下个handler执行完成并减少引用数后(正常逻辑都会减少)，此handler自动减少引用数会因为引用数不正常而抛出错误。
+
+若定义了多个业务handler，必须将消息传入下个handler的情况下，示例如下：
+
+```java
+public class HttpHelloWorldServerHandler extends SimpleChannelInboundHandler<HttpObject> {
+    @Override
+    public void channelRead0(ChannelHandlerContext ctx, HttpObject msg) {
+        // ...逻辑处理...
+        
+        if(/*条件*/){
+            // 若需要将此消息传入下个handler，则必须增加引用数
+            ReferenceCountUtil.retain(msg);
+            ctx.fireChannelRead(msg);// 将消息继续传入下个handler
+        }
+        // 一般情况下，自定义handler往往放在最后(TailContext之前)，无须再将消息后传了
+    }
+}
+```
+
+`TailContext#channelRead()`默认实现是也是调用`ReferenceCountUtil.release(msg)`以减少引用计数进而释放资源。
+
+关于ByteBuf的引用计数增加retain()与减少release()是如何实现内存自动释放与内存泄漏检测的请看ByteBuf分析部分。
+
+## 编码解码器
+
+![编解码器](netty.assets/编解码器.png)
+
+Codec(编解码)=Encode(编码)+Decode(解码)
+
+HttpRequestDecoder继承ByteToMessageDecoder，将ByteBuf解码为HttpRequest。
+
+HttpResponseEncoder继承MessageToMessageEncoder，将HttpResponse编码为ByteBuf。
+
+HttpServerCodec继承ChannelDuplexHandler，聚合了HTTP的编码和解码能力。
+
+### ByteToMessageDecoder
+
+ByteToMessageDecoder将ByteBuf对象转换为其它/ByteBuf对象，一般需要处理TCP的粘包与拆包。
+
+![ByteToMessageDecoder](netty.assets/ByteToMessageDecoder.png)
+
+这4种消息帧解码器基本能解决绝大部分用户场景的拆解包问题，其中`LengthFieldBasedFrameDecoder`使用最多。
+
+```java
+/**
+ * 帧完整性检测
+ * 一般可以向pipeline中添加上述几个消息帧解码器实现帧检测
+ * 若需自定义帧解码器，需注意不要修改ByteBuf的readerIndex
+ * 要在不修改读取器索引的情况下检查完整的帧，请使用ByteBuf.getInt(int)之类的方法
+ * 注意ByteBuf的有效起始位置不一定是0，请改用in.getInt(in.readerIndex())
+ * 
+ * 请注意， ByteToMessageDecoder的子类不得使用@Sharable注释。
+ * 一些方法如ByteBuf.readBytes(int)如果返回的缓冲区没有被释放或添加到out List中，将导致内存泄漏。
+ * 使用像ByteBuf.readSlice(int)这样的派生缓冲区来避免内存泄漏。
+ */
+public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter {
+
+    // 合并累加器：使用内存拷贝
+    public static final Cumulator MERGE_CUMULATOR = new Cumulator() {
+        // 省略
+    };
+
+    // 组合累加器：使用组合缓冲区
+    public static final Cumulator COMPOSITE_CUMULATOR = new Cumulator() {
+        // 省略
+    };
+
+    ByteBuf cumulation;// 累加缓冲区
+    private Cumulator cumulator = MERGE_CUMULATOR;// 默认累加器为合并拷贝累加器
+    private int discardAfterReads = 16;// 读取释放阈值
+    private int numReads;// 再读取 {@link #discardAfterReads} 次数据后，如果无法全部解码完，则进行释放，避免OOM
+
+}
+```
+
+ByteToMessageDecoder默认接受16次ByteBuf后若还未解码完成就将释放读取缓冲区，避免OOM。
+
+#### 累加器
+
+Cumulator ，是 ByteToMessageDecoder 的**内部**接口。中文翻译为“累加器”，用于将读取到的数据进行累加到一起，然后再尝试**解码**，从而实现**拆包**。
+
+也是因为 Cumulator 的累加，所以能将不完整的包累加到一起，从而完整。当然，累加的过程，没准又进入了一个不完整的包。所以，这是一个不断累加，不断解码拆包的过程。
+
+```java
+// 累加ByteBuf
+public interface Cumulator {
+    /**
+     * 将原有的cumulation累加上新到的in，返回累加后的ByteBuf
+     * 该实现负责正确处理给定ByteBuf的生命周期，因此如果ByteBuf被完全消耗，则调用ByteBuf.release()
+     */
+    ByteBuf cumulate(ByteBufAllocator alloc, ByteBuf cumulation, ByteBuf in);
+}
+```
+
+在ByteToMessageDecoder中提供了2种默认实现：
+
+- 缓冲区**拷贝累加器**（默认）
+- 缓冲区**组合累加器**
+
+```java
+// 通过拷贝合并为一个ByteBuf来累加
+public static final Cumulator MERGE_CUMULATOR = new Cumulator() {
+    @Override
+    public ByteBuf cumulate(ByteBufAllocator alloc, ByteBuf cumulation, ByteBuf in) {
+        // 在累加缓冲区为空，且in是单个缓存区(不是组合缓冲区Composite)，直接使用in
+        if (!cumulation.isReadable() && in.isContiguous()) {
+            cumulation.release();
+            return in;
+        }
+        try {
+            final int required = in.readableBytes();
+            if (required > cumulation.maxWritableBytes() ||
+                required > cumulation.maxFastWritableBytes() && cumulation.refCnt() > 1 ||
+                cumulation.isReadOnly()) {
+                // 在无法扩容、引用数大于1(说明用户使用了 slice().retain())、无法写的情况下
+                // 扩展并替换新的ByteBuf
+                return expandCumulation(alloc, cumulation, in);
+            }
+            // 将in拷贝到累加缓冲区
+            cumulation.writeBytes(in, in.readerIndex(), required);
+            in.readerIndex(in.writerIndex());
+            return cumulation;
+        } finally {in.release();/*in已读完, 必须释放in*/  }
+    }
+};
+
+/**
+ * 通过将ByteBuf添加到CompositeByteBuf来累积 ByteBuf，内存零拷贝
+ * 注意，CompositeByteBuf维护复杂索引，可能比MERGE_CUMULATOR慢
+ */
+public static final Cumulator COMPOSITE_CUMULATOR = new Cumulator() {
+    @Override
+    public ByteBuf cumulate(ByteBufAllocator alloc, ByteBuf cumulation, ByteBuf in) {
+        if (!cumulation.isReadable()) {
+            cumulation.release();
+            return in;
+        }
+        CompositeByteBuf composite = null;
+        try {
+            // 原本是CompositeByteBuf类型或引用数为1则直接添加
+            if (cumulation instanceof CompositeByteBuf && cumulation.refCnt() == 1) {
+                composite = (CompositeByteBuf) cumulation;
+                // Writer index must equal capacity if we are going to "write"
+                // new components to the end
+                if (composite.writerIndex() != composite.capacity()) {
+                    composite.capacity(composite.writerIndex());
+                }
+            } else {// 否则需要分配一个组合缓冲区
+                composite = alloc.compositeBuffer(Integer.MAX_VALUE).addFlattenedComponents(true, cumulation);
+            }
+            // 将in直接累加到组合缓冲区
+            composite.addFlattenedComponents(true, in);
+            in = null;
+            return composite;
+        } finally {
+            if (in != null) {// 引用数-1
+                // We must release if the ownership was not transferred as otherwise it may produce a leak
+                in.release();
+                // Also release any new buffer allocated if we're not returning it
+                if (composite != null && composite != cumulation) {
+                    composite.release();
+                }
+            }
+        }
+    }
+};
+```
+
+
+
+#### channelRead
+
+EventLoop解析读事件并将内容读取到ByteBuf后发布pipeline#fireChannelRead事件。ByteToMessageDecoder作为一个handler在其channelRead()方法处理3件事情：
+
+- 首先把ByteBuf**消息进行累加**
+- 然后调用解码方法**解码消息**，解码方法由子类实现
+- 若解码出消息，则将解码的每条消息向后**发布pipeline#fireChannelRead事件**
+
+```java
+public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+    selfFiredChannelRead = true;
+    // 存放解码后的消息集合
+    CodecOutputList out = CodecOutputList.newInstance();
+    try {
+        // 1.使用累加器对缓冲区进行累加
+        first = cumulation == null;
+        cumulation = cumulator.cumulate(ctx.alloc(), first ? Unpooled.EMPTY_BUFFER : cumulation, (ByteBuf) msg);
+        // 2.执行解码，将调用decode()方法解码消息
+        callDecode(ctx, cumulation, out);
+    } finally {
+        // 累加缓冲区中数据已读取完成，释放缓冲区
+        if (cumulation != null && !cumulation.isReadable()) {
+            numReads = 0;
+            cumulation.release();
+            cumulation = null;
+        } else if (++numReads >= discardAfterReads) {
+            // 读取次数打到阈值，释放已读取缓冲区，避免OOM
+            numReads = 0;
+            discardSomeReadBytes();
+        }
+
+        // 3.将集合内每个解码消息向pipeline发布 fireChannelRead事件
+        int size = out.size();
+        firedChannelRead |= out.insertSinceRecycled();
+        fireChannelRead(ctx, out, size);
+    }
+}
+
+// 从累加缓冲区中解码消息，由子类实现
+protected abstract void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception;
+```
+
+### 消息帧解码器
+
+ByteToMessageDecoder将ByteBuf对象转换为其它/ByteBuf对象，一般需要处理TCP的粘包与拆包。
+
+![ByteToMessageDecoder](netty.assets/ByteToMessageDecoder.png)
+
+这4种消息帧解码器基本能解决绝大部分用户场景的拆解包问题，其中`LengthFieldBasedFrameDecoder`使用最多。
+
+其中固定长度是指定长度字段帧解码器的一种特例，行分割又是自定义特定分隔符帧解码器的一种特例。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## LengthFieldBasedFrameDecoder
+
+资料：https://www.jianshu.com/p/a0a51fd79f62
+
+
+
+
+
+
+
+
+
 # Bytebuf
 
 Java nio的ByteBuffer的缺点：
@@ -3977,7 +4361,7 @@ AbstractByteBuf子类非常多，总结起来是3种组合8个核心子类：
 
 暂未深入分析：http://svip.iocoder.cn/Netty/ByteBuf-1-3-ByteBuf-resource-leak-detector
 
-从上面那张图可知，所有ByteBuf实现类都继承了AbstractReferenceCountedByteBuf以实现引用计数，主要是用于直接内存的ByteBuf的安全释放，(堆内存ByteBuf由GC释放)。
+从上面那张图可知，所有ByteBuf实现类都继承了AbstractReferenceCountedByteBuf以实现引用计数，主要是用于直接内存的ByteBuf的安全释放，以及内存池分配的ByteBuf的回收，(Unpooled堆内存ByteBuf由GC释放)。
 
 ```java
 public abstract class AbstractReferenceCountedByteBuf extends AbstractByteBuf {
