@@ -4147,35 +4147,100 @@ ByteToMessageDecoder将ByteBuf对象转换为其它/ByteBuf对象，一般需要
 
 其中固定长度是指定长度字段帧解码器的一种特例，行分割又是自定义特定分隔符帧解码器的一种特例。
 
+另外3个消息帧解码器实现比较简单，直接看源码即可，这里不再分析。
 
+下面就LengthFieldBaseFrameDecoder具体分析。
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## LengthFieldBasedFrameDecoder
+### LengthFieldBasedFrameDecoder
 
 资料：https://www.jianshu.com/p/a0a51fd79f62
 
+在目前自定义RPC中，一般都会有长度字段指定消息体或整个消息的长度，由netty提供的通用消息帧解码器`LengthFieldBasedFrameDecoder`将根据消息中指定字段的长度解码消息，非常适合自定义消息格式的场景。
 
+它有5个参数：
 
+- `lengthFieldOffset`：长度字段偏移量，即消息中第几个字节开始为长度字段。一般来说自定义协议开头有魔数、版本号等信息，然后才会是长度字段。
+- `lengthFieldLength`：长度字段长度，只支持1/2/3/4/8.
+- `lengthAdjustment`：长度修正，默认0。比如长度字段偏移量为0，消息内容长12B，若长度字段设置为(14B=长度字段长度2B+12B消息内容，即长度字段是整个消息的长度)，此时需设置长度修正值为-2，以正确调整剩余消息长度。
+- `initailBytesToStrip`：舍弃开头的几个字节，默认0。一般将长度字段放于消息开头，可以配置此参数将传递给业务的内容舍弃长度字段
+- `maxFrameLength`：消息帧最大长度，超出将抛出异常
 
+接下来就分析它的decode方法如何解析消息帧：
 
+```java
+@Override
+protected final void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+    Object decoded = decode(ctx, in);
+    if (decoded != null) {
+        out.add(decoded);// 解析出的消息帧放入
+    }
+}
+```
 
+从上面解析的累加器可知，这个`ByteBuf in`就是累加缓冲区
 
+```java
+// 从累加缓冲区中切片出消息帧
+protected Object decode(ChannelHandlerContext ctx, ByteBuf in) throws Exception {
+    long frameLength = 0;
+    if (frameLengthInt == -1) { // new frame
+        // 是否处于discard模式，将丢弃此超过长度限制的帧内容
+        if (discardingTooLongFrame) {
+            discardingTooLongFrame(in);
+        }
 
+        // 长度字段还未出现，稍后等到下个ByteBuf到来再解析
+        if (in.readableBytes() < lengthFieldEndOffset) {
+            return null;
+        }
+
+        // 1.获取长度字段的内容，即消息帧长度
+        int actualLengthFieldOffset = in.readerIndex() + lengthFieldOffset;
+        frameLength = getUnadjustedFrameLength(in, actualLengthFieldOffset, lengthFieldLength, byteOrder);
+
+        // 2.消息帧长度矫正
+        frameLength += lengthAdjustment + lengthFieldEndOffset;
+        
+        // 3.如果帧长度超过帧最大限制，进入discard模式，丢弃此帧内容重新解析下一帧
+        if (frameLength > maxFrameLength) {
+            exceededFrameLength(in, frameLength);
+            return null;
+        }
+        // 解析出的帧长度
+        frameLengthInt = (int) frameLength;
+    }
+    // 消息内容不足一个帧，等待下个ByteBuf到来再解析
+    if (in.readableBytes() < frameLengthInt) {
+        return null;
+    }
+
+    // 跳过指定数量的初始字节
+    in.skipBytes(initialBytesToStrip);
+
+    // extract frame
+    int readerIndex = in.readerIndex();
+    int actualFrameLength = frameLengthInt - initialBytesToStrip;
+    // 4.从累加缓冲区ByteBuf中切片即可
+    ByteBuf frame = extractFrame(ctx, in, readerIndex, actualFrameLength);
+    in.readerIndex(readerIndex + actualFrameLength);// 跳帧累加缓冲区读指针
+    frameLengthInt = -1;// 重置为-1
+    return frame;
+}
+// 帧长度超过限制时进入discard模式
+private void exceededFrameLength(ByteBuf in, long frameLength) {
+    long discard = frameLength - in.readableBytes();
+    tooLongFrameLength = frameLength;
+
+    if (discard < 0) {// 缓冲区内已有此帧，丢弃指定长度字节，即丢弃此帧
+        in.skipBytes((int) frameLength);
+    } else {// 进入discard模式直接完全丢弃此帧
+        discardingTooLongFrame = true;
+        bytesToDiscard = discard;
+        in.skipBytes(in.readableBytes());
+    }
+    failIfNecessary(true);
+}
+```
 
 # Bytebuf
 
