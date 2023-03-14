@@ -814,6 +814,8 @@ Tomcat大致采用此模型，一个Acceptor线程负责监听新连接，Poller
 
 ## 多Reactor多线程
 
+绝大多数场景下，Reactor多线程模型已经满足性能要求，但在百万并发连接、服务端需对客户端握手进行安全认证且认证较损耗性能时，**单个Acceptor线程/Selector线程可能存在性能不足问题**。
+
 ![多Reactor多线程](netty.assets/多Reactor多线程.png)
 
 主Reactor就负责监听新连接，通过Acceptor的accept获取连接后分配给某个子线程SubReactor(一个SubReactor可以注册监听多个连接，不是一个连接一个线程哈)。
@@ -1305,8 +1307,8 @@ final ChannelFuture initAndRegister() {
 
 `AbstractBootstrap#init()`初始化方法是空实现，交予子类实现：
 
-- 在`ServerBootstrap#init()`中会往ChannelPipeline中添加一个`ServerBootstrapAcceptor`的处理器ChannelHandler，它会将新连接注册到workerEventLoopGroup中。具体分析在ServerBootstrap中分析。
-- 在`Bootstrap#init()`中则仅仅设置Channel属性。
+- 在`ServerBootstrap#init()`中会往Pipeline中添加一个`ChannelInitializer`并重写其`initChannel()`方法用于将`ServerBootstrapAcceptor`这个handler加入pipeline，它会将新连接注册到workerEventLoopGroup中。具体分析在ServerBootstrap中分析。
+- 在`Bootstrap#init()`中则仅仅设置Channel属性，并将启动器中用户配置的handler添加到pipeline，一般用户配置的也是`ChannelInitializer`，并重写其`initChannel()`方法用于在Channel注册到EventLoop后添加自定义handler。
 
 #### 注册Channel到Group
 
@@ -1375,7 +1377,7 @@ public final void bind(final SocketAddress localAddress, final ChannelPromise pr
 
 在AbstractBootstrap#initAndRegister()中，创建Channel之后，将对其进行初始化，ServerBootstrap的init()方法实现如下：
 
-在`ServerBootstrap#init()`中会往ChannelPipeline中添加一个`ServerBootstrapAcceptor`的处理器ChannelHandler，它会将新连接注册到workerEventLoopGroup中。
+在`ServerBootstrap#init()`中会往ChannelPipeline中添加`ChannelInitializer`并重写其`initChannel()`方法用于将`ServerBootstrapAcceptor`加入pipeline，它会将新连接注册到workerEventLoopGroup中。
 
 ```java
 void init(Channel channel) {
@@ -1415,7 +1417,7 @@ void init(Channel channel) {
 
 这个ServerBootstrapstrapAcceptor作为ChannelHandler放入Bossgroup的ChannelPipeline中，用于将监听到的新连接放入注册到workgroup中。
 
-> 注意：这里使用ChannelInitializer方式将ServerBootstrapAcceptor加入到Pipeline中，在ServerSocketChannel注册到EventLoopGroup后将回调此初始化器，以将ServerBootstrapAcceptor这个handler放入ServerSocketChannel的pipeline中。
+> 注意：这里使用ChannelInitializer方式将ServerBootstrapAcceptor加入到Pipeline中，在ServerSocketChannel注册到EventLoopGroup后将触发handlerAdded回调，此初始化器的handlerAdded()方法会调用重写的initChannel()方法，以将ServerBootstrapAcceptor这个handler放入ServerSocketChannel的pipeline中。
 
 ## Bootstrap
 
@@ -1479,6 +1481,8 @@ void init(Channel channel) {
     setAttributes(channel, newAttributesArray());
 }
 ```
+
+一般来说，用户在启动器中配置的handler是初始化器`ChannelInitializer`，用于添加自定义handler。
 
 ### 发布connect出站事件
 
@@ -1553,6 +1557,8 @@ Netty NIO服务端一般会创建2个EventLoopGroup：
 - `wokerGroup`：对应Reactor模型SubReactor，默认SubReactor个数和CPU核心数*2相等。
 
 `bossGroup` 如果配置多个线程，是否可以使用**多个 mainReactor** 呢？一个 Netty NIO 服务端**同一时间**，只能 bind 一个端口，那么只能使用一个 Selector 处理客户端连接事件。又因为，Selector 操作是非线程安全的，所以无法在多个 EventLoop ( 多个线程 )中，同时操作。所以这样就导致，即使 `bossGroup` 配置多个线程，实际能够使用的也就是一个线程。
+
+但是如果启动多个ServerBootstrap启动器并且每个都传入同一个bossGroup，此时多个ServerSocketChannel可以注册到不同的mainReactor，那么配置多个EventLoop是有意义的。
 
 ## NioEventLoopGroup
 
@@ -1681,6 +1687,10 @@ private static final class GenericEventExecutorChooser implements EventExecutorC
 
 ## NioEventLoop
 
+**NioEventLoop绑定单独I/O线程**，进行了无锁化设计，单个I/O线程进行串行的操作。这种**局部无锁化设计**相比于一个工作队列多个工作线程的竞争模型实际上性能更优。
+
+当用户线程操作NioEventLoop的资源时，如手动注册Channel时，会将它们包装为任务调用NioEventLoop的execute(Runnable)提交到任务队列，由其自己绑定的I/O线程负责具体执行，**防止锁竞争，从而实现局部无锁化**。
+
 ![NioEventLoop](netty.assets/NioEventLoop.png)
 
 NioEventLoop就是Reactor模型中的Reactor，保存有Selector和线程池。
@@ -1793,7 +1803,7 @@ protected void doRegister() throws Exception {
 
 要重置兴趣集，一般需要触发`pipeline#read()出站事件`，由`HeadContext#read()`方法进行兴趣集重置。注意到`HeadContext#channelActive()`和`HeadContext#ChannelReadComplete()`两个入站事件方法会触发`pipeline#read()`出站事件。
 
-#### 初始器回调
+#### 添加handler回调
 
 `AbstractChannel.AbstractUnsafe.register0()`方法第2步骤是执行可能的挂起的`ChannelHandler#handlerAdded()`回调任务，比如`ChannelInitializer`就是在这回调初始化，此回调常用来添加自定义ChannelHandler。
 
@@ -2407,6 +2417,18 @@ private static void processSelectedKey(SelectionKey k, NioTask<SelectableChannel
 
 > 注意：从这里的处理程序来看，当自定义处理逻辑出现了异常，Netty并不会帮我们关闭Channel，因此如有必要，可以在`NioTask#channelUnregistered()`回调方法中手动关闭Channel捏。
 
+## 最佳实践
+
+Netty的线程模型实际上取决于用户的启动BootStrap参数配置，通过设置不同的参数可以支持Reactor单线程模型、Reactor多线程模型、主从Reactor多线程模型。
+
+Netty的NioEventLoop内有任务队列和定时任务队列，可以提交普通任务和定时任务，但是毕竟是单I/O线程执行，不适合处理复杂计算任务。
+
+业务复杂，如存在阻塞线程的磁盘操作、数据库操作、网络操作等，**最好将解码后的消息封装为Task交给业务线程池处理**，NIO线程仅负责I/O处理，以保证NIO线程尽快释放处理其它IO操作。
+
+**最佳实践：bossGroup+workerGroup+业务线程池**
+
+**关于EventLoopGroup的EventLoop数量和业务线程池的参数设置**，只能根据用户场景进行测试，性能测试选出相对合理范围。
+
 # Channel
 
 `io.netty.channel.Channel`是 Netty 网络操作抽象类，它除了包括基本的 I/O 操作，如 bind、connect、read、write 之外，还包括了 Netty 框架相关的一些功能，如获取该 Channel 的 EventLoop。
@@ -2947,7 +2969,7 @@ protected void doWrite(ChannelOutboundBuffer in) throws Exception {
 }
 ```
 
-可以看到所谓的FileRegion最终是调用`FileChannel#transferTo()`直接将文件内容发送到SocketChannel内核缓冲区以减少拷贝，即所谓零拷贝。
+可以看到所谓的FileRegion最终是调用`FileChannel#transferTo()`直接将文件内容发送到SocketChannel内核缓冲区以减少拷贝，即所谓**文件传输零拷贝**。
 
 从内存队列中写入消息到SocketChannel每次自旋最多写入1024个ByteBuffer，最多自旋16次，**避免线程长时间处于处理消息写入过程，导致任务队列和其它IO事件长时间等待**。
 
@@ -4242,6 +4264,17 @@ private void exceededFrameLength(ByteBuf in, long frameLength) {
 }
 ```
 
+## 流量整形
+
+流量整形traffic shaping：是一种**主动调整流量输出速率**的措施，有2个作用：
+
+- 防止上下游网元性能不均衡导致下游网元被压垮
+- 防止由于通信模块接受消息过快，**后端业务线程处理不及时导致消息积压**
+
+流量整形原理：对每次读取的ByteBuf计算字节，计算当前报文流量，与流量整形阈值比对，超过阈值则计算等待等待时间，将该ByteBuf消息放到定时任务队列缓存。
+
+流量整形与流控的最大区别：流控会拒绝消息，**流量整形不会拒绝和丢弃消息**，以恒定速率下发消息，类似于变压器。
+
 # Bytebuf
 
 Java nio的ByteBuffer的缺点：
@@ -5532,5 +5565,12 @@ Netty内存管理基于jemalloc4实现，结合以下关键类实现：
 
 ![内存申请流程图](netty.assets/内存申请流程图.png)
 
+# 总结
 
+Netty高性能设计：
+
+- NIO、**Reactor模型、局部无锁化**
+- TCP接收和发送缓冲区采用**直接内存**，减少内存拷贝。环形数组缓冲区减少channel写次数。文件传输采用DefaultFileRegion通过`FileChannel#transferTo()`实现**文件传输零拷贝**。
+- **ByteBuf切片**、Composite组合等方式减少内存拷贝。
+- 内存池、引用计数器、jemalloc算法等实现的**内存管理**减少了内存申请/释放和GC
 
