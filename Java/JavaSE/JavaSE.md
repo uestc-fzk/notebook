@@ -5736,7 +5736,8 @@ public class Logger {
             queueRead = new ArrayList<>(defaultLogConf.getLogQueueSize());
             // 4.日志level设置
             globalLevel = LogLevel.getLevel(defaultLogConf.getLogLevel());
-        } catch (IOException e) {
+        } catch (Exception e) {// 静态初始化最好拦截Exception，避免RuntimeException拦截不到
+            e.printStackTrace();
             throw new RuntimeException(e);
         }
         // 5.日志刷新线程启动
