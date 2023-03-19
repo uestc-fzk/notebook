@@ -428,3 +428,23 @@ $ git archive
 # git提交注意
 
 https://www.oschina.net/news/69705/git-commit-message-and-changelog-guide
+
+# git配置代理
+
+github不太稳定，可以搞个vpn，然后git配置代理:
+
+```shell
+git config --global http.proxy http://127.0.0.1:{port}
+git config --global https.proxy https://127.0.0.1:{port}
+git config --global -l
+```
+
+**这个端口就是VPN的代理端口，不同vpn软件各不相同。**
+git配置代理后所有git流量都从该端口转发, 如果vpn没开会出错, 此时需要关闭git代理。
+取消git的代理配置: 
+
+```shell
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+git config --global -l
+```
