@@ -9,7 +9,6 @@ git-unproxy:
 # git提交信息
 msg="auto"
 git-push:
-	echo msg
 	git add .
-	git commit -m msg
+	git commit -m $(msg)
 	git push origin master
