@@ -7,7 +7,7 @@ git-unproxy: # 关闭git代理
 	git config --global --unset https.proxy
 	git config --global -l
 # git提交信息
-msg="auto"
+msg=auto
 git-push:
 	echo "open git proxy, please make sure you have open vpn"
 	make git-proxy
