@@ -6,7 +6,10 @@ git-unproxy:
 	git config --global --unset http.proxy
 	git config --global --unset https.proxy
 	git config --global -l
+# git提交信息
+msg="auto"
 git-push:
+	echo msg
 	git add .
-	git commit -m "auto"
+	git commit -m msg
 	git push origin master
