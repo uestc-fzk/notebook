@@ -2975,7 +2975,7 @@ protected void doWrite(ChannelOutboundBuffer in) throws Exception {
 
 注意：写入过程中会判断写入量是否小于0，**如果小于0说明此时SocketChannel的内核缓冲区已经写满**，所以注册 `SelectionKey.OP_WRITE` ，等待 NIO Channel 可写。因此调用 `incompleteWrite(true)` 方法注册对写事件的监听并返回。
 
-## ChannelOutboundBuffer
+## 发送队列
 
 `Channel#write()`写入消息时，pipeline末尾的HeadContext的`AbstractUnsafe#write()`先将消息写入`ChannelOutboundBuffer内存队列`中，调用flush()方法时才将内存队列所有消息写入SocketChannel套接字。
 
@@ -4264,16 +4264,485 @@ private void exceededFrameLength(ByteBuf in, long frameLength) {
 }
 ```
 
-## 流量整形
+## netty-handler
 
-流量整形traffic shaping：是一种**主动调整流量输出速率**的措施，有2个作用：
+netty的handler包下提供了一些常用的handler供用户使用：
+
+![netty-handler](netty.assets/netty-handler.png)
+
+### 流量整形
+
+流量整形traffic shaping：是一种**主动调整流量输出速率**的措施，**即带宽限制**：
 
 - 防止上下游网元性能不均衡导致下游网元被压垮
 - 防止由于通信模块接受消息过快，**后端业务线程处理不及时导致消息积压**
 
-流量整形原理：对每次读取的ByteBuf计算字节，计算当前报文流量，与流量整形阈值比对，超过阈值则计算等待等待时间，将该ByteBuf消息放到定时任务队列缓存。
+**流量整形原理**：对每次读取的ByteBuf计算字节，计算当前报文流量，与流量整形阈值比对，超过阈值则计算等待等待时间，**在该时间段内关闭channel的自动读取**。
 
-流量整形与流控的最大区别：流控会拒绝消息，**流量整形不会拒绝和丢弃消息**，以恒定速率下发消息，类似于变压器。
+> 流量整形与流控的最大区别：流控会拒绝消息，**流量整形不会拒绝和丢弃消息**，以恒定速率下发消息，类似于变压器。
+
+`TrafficCounter`：此类实现处理程序所需的计数器。可以访问它以获取一些额外的信息，例如自上次检查以来的读取或写入字节数、自上次检查以来的读取和写入带宽。
+
+要激活或停用统计信息，您可以将延迟调整为低值（出于效率原因建议不少于 200 毫秒）或高值（让假设以毫秒为单位的 24H 足够大而不会出现问题）或者甚至使用0，这意味着不会进行任何计算。如果您想对这些统计数据做任何事情，只需覆盖doAccounting方法。
+
+`AbstractTrafficShapingHandler`：这个抽象类实现了流量整形的内核。它可以扩展以满足您的需求。
+
+`ChannelTrafficShapingHandler`：Channel流量整形，Channel的带宽限制
+
+`GlobalTrafficShapingHandler`：全局流量整形，带宽的全局限制
+
+`GlobalChannelTrafficShapingHandler`：全局和Channel的流量整形，带宽的全局限制
+
+#### 流量统计
+
+先看看AbstractTrafficShapingHandler：
+
+```java
+/**
+ * 使用TrafficCounter监视几乎实时带宽，该监视器在每个checkInterval回调此程序的doAccounting()方法
+ */
+public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler {
+    // Traffic Counter
+    protected TrafficCounter trafficCounter;
+
+    // 写流速限制
+    private volatile long writeLimit;
+    // 读流速限制
+    private volatile long readLimit;
+
+    // 最大等待时间, 默认15s
+    protected volatile long maxTime = DEFAULT_MAX_TIME;
+    // 检查间隔，默认1s
+    protected volatile long checkInterval = DEFAULT_CHECK_INTERVAL;
+
+    // 停止写入的最大写时延, 默认4s
+    volatile long maxWriteDelay = 4 * DEFAULT_CHECK_INTERVAL;
+    // 停止写入的消息存储的最大缓存大小, 默认4MB
+    volatile long maxWriteSize = DEFAULT_MAX_SIZE;
+
+    /**
+     * 在 UserDefinedWritability 中排名（通道为 1，全局流量整形处理程序为 2）。
+     * 在最终构造函数中设置。必须介于 1 和 31 之间
+     * 说明Channel流量整形优先级高于全局流量整形
+     */
+    final int userDefinedWritabilityIndex;
+    // Channel UserDefinedWritability 索引的默认值
+    static final int CHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX = 1;
+    // 全局 UserDefinedWritability 索引的默认值
+    static final int GLOBAL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX = 2;
+    // GlobalChannel UserDefinedWritability 索引的默认值
+    static final int GLOBALCHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX = 3;
+
+    @Override
+    public void channelRead(final ChannelHandlerContext ctx, final Object msg) throws Exception {
+        // 1.计算消息字节数，即流量
+        long size = calculateSize(msg);
+        long now = TrafficCounter.milliSecondFromNano();
+        if (size > 0) {
+            // 2.根据消息大小(即流量)和给定的读速度限制readLimit计算等待时间
+            long wait = trafficCounter.readTimeToWait(size, readLimit, maxTime, now);
+            wait = checkWaitReadTime(ctx, wait, now);// 如果超过最大等待时间则设为最大等待时间15s
+            // 3.如果等待时间大于最小值10ms，则暂时关闭channel的自动读取并设置定时任务在计算的等待时间之后再打开
+            if (wait >= MINIMAL_WAIT) { // At least 10ms seems a minimal
+                Channel channel = ctx.channel();
+                ChannelConfig config = channel.config();
+                // 如果是自动读取则暂时关闭并添加定时任务来恢复自动读取
+                if (config.isAutoRead() && isHandlerActive(ctx)) {
+                    config.setAutoRead(false);
+                    channel.attr(READ_SUSPENDED).set(true);
+                    Attribute<Runnable> attr = channel.attr(REOPEN_TASK);
+                    Runnable reopenTask = attr.get();
+                    if (reopenTask == null) {
+                        reopenTask = new ReopenReadTimerTask(ctx);
+                        attr.set(reopenTask);
+                    }
+                    ctx.executor().schedule(reopenTask, wait, TimeUnit.MILLISECONDS);
+                }
+            }
+        }
+        // 4.通知处理完成, 由子类实现
+        informReadOperation(ctx, now);
+        // 5. 将消息向后传递
+        ctx.fireChannelRead(msg);
+    }
+
+    @Override
+    public void write(final ChannelHandlerContext ctx, final Object msg, final ChannelPromise promise)
+        throws Exception {
+        // 1.计算待发送消息字节数，即流量
+        long size = calculateSize(msg);
+        long now = TrafficCounter.milliSecondFromNano();
+        if (size > 0) {
+            // 2.根据消息大小(即流量)和给定写速度限制writeLimit计算等待时间
+            long wait = trafficCounter.writeTimeToWait(size, writeLimit, maxTime, now);
+            if (wait >= MINIMAL_WAIT) {
+                // 3.消息延时发送
+                submitWrite(ctx, msg, size, wait, now, promise);
+                return;
+            }
+        }
+        // 4.立刻发送消息
+        submitWrite(ctx, msg, size, 0, now, promise);
+    }
+	// 由子类实现消息的延时发送或立刻发送
+    abstract void submitWrite(
+        ChannelHandlerContext ctx, Object msg, long size, long delay, long now, ChannelPromise promise);
+}
+```
+
+`AbstractTrafficShapingHandler`计算读消息流量并通过关闭Channel的自动读取实现了读流量整形，计算写流量并由子类实现消息的延时或立刻发送，进而实现写流量整形。
+
+#### 全局流量整形
+
+`GlobalTrafficShapingHandler`全局流量整形在继承了AbstractTrafficShapingHandler后仅仅需要实现`submitWrite()`方法以实现写流量整形即可实现全局的带宽限制。
+
+```java
+@Sharable // 此handler是共享的，注意其添加到pipeline的方式
+public class GlobalTrafficShapingHandler extends AbstractTrafficShapingHandler {
+    // channel hashcode-->暂存队列
+    private final ConcurrentMap<Integer, PerChannel> channelQueues = PlatformDependent.newConcurrentHashMap();
+
+    long maxGlobalWriteSize = DEFAULT_MAX_SIZE * 100; // default 400MB
+
+    private static final class PerChannel {
+        ArrayDeque<ToSend> messagesQueue;
+        long queueSize;
+        long lastWriteTimestamp;
+        long lastReadTimestamp;
+    }
+
+    @Override
+    void submitWrite(final ChannelHandlerContext ctx, final Object msg,
+                     final long size, final long writedelay, final long now,
+                     final ChannelPromise promise) {
+        // 1.根据Channel的hashcode找到其消息暂存队列
+        Channel channel = ctx.channel();
+        Integer key = channel.hashCode();
+        PerChannel perChannel = channelQueues.get(key);
+        if (perChannel == null) {
+            // in case write occurs before handlerAdded is raised for this handler
+            // imply a synchronized only if needed
+            perChannel = getOrSetPerChannel(ctx);
+        }
+        final ToSend newToSend;
+        long delay = writedelay;
+        boolean globalSizeExceeded = false;
+        // write operations need synchronization
+        synchronized (perChannel) {
+            // 2.写消息延时为0，即立刻写入
+            if (writedelay == 0 && perChannel.messagesQueue.isEmpty()) {
+                trafficCounter.bytesRealWriteFlowControl(size);
+                ctx.write(msg, promise);
+                perChannel.lastWriteTimestamp = now;
+                return;
+            }
+            // 3.将消息暂存到队列并以定时任务延时发送
+            if (delay > maxTime && now + delay - perChannel.lastWriteTimestamp > maxTime) {
+                delay = maxTime;
+            }
+            newToSend = new ToSend(delay + now, msg, size, promise);
+            perChannel.messagesQueue.addLast(newToSend);
+            perChannel.queueSize += size;
+            queuesSize.addAndGet(size);
+            checkWriteSuspend(ctx, delay, perChannel.queueSize);
+            if (queuesSize.get() > maxGlobalWriteSize) {
+                globalSizeExceeded = true;
+            }
+        }
+        if (globalSizeExceeded) {
+            setUserDefinedWritability(ctx, false);
+        }
+        final long futureNow = newToSend.relativeTimeAction;
+        final PerChannel forSchedule = perChannel;
+        ctx.executor().schedule(new Runnable() {
+            @Override
+            public void run() {
+                sendAllValid(ctx, forSchedule, futureNow);
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+    }
+
+    // 将通道内延时结束的消息发送
+    private void sendAllValid(final ChannelHandlerContext ctx, final PerChannel perChannel, final long now) {
+        // write operations need synchronization
+        synchronized (perChannel) {
+            ToSend newToSend = perChannel.messagesQueue.pollFirst();
+            for (; newToSend != null; newToSend = perChannel.messagesQueue.pollFirst()) {
+                if (newToSend.relativeTimeAction <= now) {
+                    long size = newToSend.size;
+                    trafficCounter.bytesRealWriteFlowControl(size);
+                    perChannel.queueSize -= size;
+                    queuesSize.addAndGet(-size);
+                    ctx.write(newToSend.toSend, newToSend.promise);
+                    perChannel.lastWriteTimestamp = now;
+                } else {
+                    perChannel.messagesQueue.addFirst(newToSend);
+                    break;
+                }
+            }
+            if (perChannel.messagesQueue.isEmpty()) {
+                releaseWriteSuspended(ctx);
+            }
+        }
+        ctx.flush();
+    }
+}
+```
+
+#### 连接流量整形
+
+ChannelTrafficShapingHandler实现了每个Channel的流量整形，继承自AbstractTrafficShapingHandler，仅仅需要重写`submitWrite()`方法以实现写流量整形即可实现每个连接的带宽限制。
+
+```java
+public class ChannelTrafficShapingHandler extends AbstractTrafficShapingHandler {
+    // 此Channel的暂存队列
+    private final ArrayDeque<ToSend> messagesQueue = new ArrayDeque<ToSend>();
+    private long queueSize;
+    @Override
+    void submitWrite(final ChannelHandlerContext ctx, final Object msg,
+                     final long size, final long delay, final long now,
+                     final ChannelPromise promise) {
+        final ToSend newToSend;
+        // write order control
+        synchronized (this) {
+            // 1.消息延时为0则立即发送
+            if (delay == 0 && messagesQueue.isEmpty()) {
+                trafficCounter.bytesRealWriteFlowControl(size);
+                ctx.write(msg, promise);
+                return;
+            }
+            // 2.将消息暂存到队列中
+            newToSend = new ToSend(delay + now, msg, promise);
+            messagesQueue.addLast(newToSend);
+            queueSize += size;
+            checkWriteSuspend(ctx, delay, queueSize);
+        }
+        // 3.定时任务发送已经到期的消息
+        final long futureNow = newToSend.relativeTimeAction;
+        ctx.executor().schedule(new Runnable() {
+            @Override
+            public void run() {
+                sendAllValid(ctx, futureNow);
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+    }
+    
+    // 发送到期的消息
+    private void sendAllValid(final ChannelHandlerContext ctx, final long now) {
+        // write order control
+        synchronized (this) {
+            ToSend newToSend = messagesQueue.pollFirst();
+            for (; newToSend != null; newToSend = messagesQueue.pollFirst()) {
+                if (newToSend.relativeTimeAction <= now) {
+                    long size = calculateSize(newToSend.toSend);
+                    trafficCounter.bytesRealWriteFlowControl(size);
+                    queueSize -= size;
+                    ctx.write(newToSend.toSend, newToSend.promise);
+                } else {
+                    messagesQueue.addFirst(newToSend);
+                    break;
+                }
+            }
+            if (messagesQueue.isEmpty()) {
+                releaseWriteSuspended(ctx);
+            }
+        }
+        ctx.flush();
+    }
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### 超时控制
+
+![timeout](netty.assets/timeout.png)
+
+超时控制有 3 个 ChannelHandler 实现类：
+
+- `IdleStateHandler` ，当Channel**读空闲或写空闲超时，即链路空闲超时，将触发`IdleStateEvent`事件**。
+  用户可自定义ChannelInboundHandler实现类并重写`userEventTriggered()`方法，处理该事件。
+
+- `ReadTimeoutHandler`，继承 IdleStateHandler 类，Channel 的**读空闲超时**，抛出 ReadTimeoutException 异常，并自动关闭Channel 。
+  用户可自定义ChannelInboundHandler实现类并重写`exceptionCaught()`方法，处理该异常。
+
+- `WriteTimeoutHandler`，当**写超时**，抛出WriteTimeoutException异常，并自动关闭Channel 。
+  用户可自定义ChannelInboundHandler实现类并重写 `#exceptionCaught()` 方法，处理该异常。
+
+#### 链路空闲超时handler
+
+`IdleStateHandler`可用于：
+
+- 单独检测读空闲空时
+- 单独检测写空闲超时
+- 检测读写空闲超时，即链路空闲超时
+
+检测到超时将触发IdleStateEvent事件，用户可自定义拦截该事件并判断是读空闲或写空闲超时。
+
+其实现很简单：
+
+- EventLoop中有定时任务队列scheduledTaskQueue，此handler会以**定时任务检测读空闲或写空闲时间**
+- 重写`channelRead()`入站事件方法和`channelReadComplete()`入站事件方法**记录lastReadTime**
+- 重写`write()`出站事件方法向pipeline中添加listener的方式在其将消息暂存到发送队列后**记录lastWriteTime**
+
+如果配置IdleStateHandler为检测链路空闲，其定时任务如下：
+
+```java
+private final class AllIdleTimeoutTask extends AbstractIdleTask {
+    protected void run(ChannelHandlerContext ctx) {
+        // 链路空闲超时时间
+        long nextDelay = allIdleTimeNanos;
+        // 1.如果不是正在处理消息则计算是否空闲超时
+        if (!reading) {
+            nextDelay -= ticksInNanos() - Math.max(lastReadTime, lastWriteTime);
+        }
+        // 2.空闲超时了
+        if (nextDelay <= 0) {
+            // 2.1 调度下次空闲检测定时任务
+            allIdleTimeout = schedule(ctx, this, allIdleTimeNanos, TimeUnit.NANOSECONDS);
+            // 是否为第一次超时
+            boolean first = firstAllIdleEvent;
+            firstAllIdleEvent = false;
+            // 2.2 发布链路空闲超时事件
+            IdleStateEvent event = newIdleStateEvent(IdleState.ALL_IDLE, first);
+            channelIdle(ctx, event);
+        } else {
+            // 3.未超时则继续调度定时任务等待下次检测
+            allIdleTimeout = schedule(ctx, this, nextDelay, TimeUnit.NANOSECONDS);
+        }
+    }
+}
+
+// 空闲超时发布事件
+protected void channelIdle(ChannelHandlerContext ctx, IdleStateEvent evt) throws Exception {
+    ctx.fireUserEventTriggered(evt);
+}
+```
+
+如果配置IdleStateHandler为单独检测读空闲超时或写空闲超时，其定时任务和上面这个大同小异。
+
+用户需要自定义handler重写`userEventTriggered()`方法，处理该事件。
+
+> 注意：出现了超时事件，IdlestateHandler不会关闭channel，若有需要，用户可自己处理超时事件后再关闭channel。
+
+#### 读空闲超时handler
+
+ReadTimeoutHandler继承自IdleStateHandler，IdleStateHandler在检测到读空闲超时将回调channelIdle()方法发布超时事件，而ReadTimeoutHandler重写了`channelIdle()`方法，向pipeline发布读超时异常：
+
+```java
+public class ReadTimeoutHandler extends IdleStateHandler {
+    private boolean closed;// 防止重入
+
+    @Override
+    protected final void channelIdle(ChannelHandlerContext ctx, IdleStateEvent evt) throws Exception {
+        assert evt.state() == IdleState.READER_IDLE;
+        readTimedOut(ctx);
+    }
+	// 向pipeline发布超时异常并关闭channel
+    protected void readTimedOut(ChannelHandlerContext ctx) throws Exception {
+        if (!closed) {
+            ctx.fireExceptionCaught(ReadTimeoutException.INSTANCE);
+            ctx.close();
+            closed = true;
+        }
+    }
+}
+```
+
+用户需要自定义handler重写`exceptionCaught()`方法处理该异常。
+
+> 注意：它关闭了Channel，而IDLEStateHandler默认不会关闭Channel。
+
+#### 写超时handler
+
+IdleStateHandler检测的写空闲超时，而WriteTimeoutHandler检测的是写超时，不一样的。
+
+它的实现也很简单，定时任务+ChannelPromise：将定时任务同时添加到定时任务队列和Channelpromise的监听器，若定时任务先调度则写超时，发布写超时异常，若监听器先调度说明消息已经flush成功，取消该定时任务。
+
+```java
+@Override
+public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+    if (timeoutNanos > 0) {
+        promise = promise.unvoid();
+        scheduleTimeout(ctx, promise);
+    }
+    ctx.write(msg, promise);
+}
+
+private void scheduleTimeout(final ChannelHandlerContext ctx, final ChannelPromise promise) {
+    // 添加定时任务
+    final WriteTimeoutTask task = new WriteTimeoutTask(ctx, promise);
+    task.scheduledFuture = ctx.executor().schedule(task, timeoutNanos, TimeUnit.NANOSECONDS);
+    // 任务还没被调度完成, 理论上不至于这么快就调度完成吧?
+    if (!task.scheduledFuture.isDone()) {
+        // 加入链表末尾
+        addWriteTimeoutTask(task);
+        // 将检测超时任务作为监听器添加到该promise，若其消息发送完成, 将取消此检测超时任务
+        promise.addListener(task);
+    }
+}
+
+private final class WriteTimeoutTask implements Runnable, ChannelFutureListener {
+
+    private final ChannelHandlerContext ctx;
+    private final ChannelPromise promise;
+
+    // 为什么要将定时任务另外维护一个双向链表呢???
+    WriteTimeoutTask prev;
+    WriteTimeoutTask next;
+
+    Future<?> scheduledFuture;
+
+    @Override
+    public void run() {
+        // 定时任务调度了，且消息未处理完则发布异常并关闭channel
+        if (!promise.isDone()) {
+            writeTimedOut(ctx);
+        }
+        removeWriteTimeoutTask(this);// 从链表中移除此任务
+    }
+
+    // promise完成消息发送将回调监听器的这个方法
+    public void operationComplete(ChannelFuture future) throws Exception {
+        // 取消定时任务
+        scheduledFuture.cancel(false);
+        removeWriteTimeoutTask(this);// 从链表移除
+    }
+}
+
+// 发布写超时异常并关闭channel
+protected void writeTimedOut(ChannelHandlerContext ctx) throws Exception {
+    if (!closed) {
+        ctx.fireExceptionCaught(WriteTimeoutException.INSTANCE);
+        ctx.close();
+        closed = true;
+    }
+}
+```
+
+为什么要维护这个双向链表???
+
+> 警告：出现写超时会自动关闭channel并释放发送队列，**它不会把这些未发送完成的消息返给用户，如果这些消息非常重要，一定要提前保存在其它地方，发送成功则标记已处理，否则定时重发。**
 
 # Bytebuf
 
@@ -5565,12 +6034,23 @@ Netty内存管理基于jemalloc4实现，结合以下关键类实现：
 
 ![内存申请流程图](netty.assets/内存申请流程图.png)
 
+# SSL(待续)
+
+
+
 # 总结
 
-Netty高性能设计：
+1、Netty高性能设计：
 
 - NIO、**Reactor模型、局部无锁化**
 - TCP接收和发送缓冲区采用**直接内存**，减少内存拷贝。环形数组缓冲区减少channel写次数。文件传输采用DefaultFileRegion通过`FileChannel#transferTo()`实现**文件传输零拷贝**。
 - **ByteBuf切片**、Composite组合等方式减少内存拷贝。
 - 内存池、引用计数器、jemalloc算法等实现的**内存管理**减少了内存申请/释放和GC
+
+2、优化建议：
+
+- **发送队列容量限制**：Netty的NIO消息发送队列ChannelOutboundBuffer没有设置容量上限，如果对方网络差，会造成消息积压，进而可能造成内存溢出。
+  可以在Bootstrap启动器指定参数ChannelOption设置发送队列长度。
+- **消息发送失败处理**：当发生网络故障时，Netty会关闭链路，并释放发送队列中的消息，再通知listener。它并没有将发送队列中的失败消息一起通知给listener。
+  **因此对于重要消息，一定要提前存起来，发送成功再标记发送成功，发送失败则等待网络恢复重新发送。**
 
