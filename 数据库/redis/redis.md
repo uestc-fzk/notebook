@@ -4943,3 +4943,265 @@ rm -rf 6381Dir/appendonlydir
 ```
 
 `bind ipv4`这个是只能连接内网ip吗，公网ip解析不了，为什么呢，被阿里云拦截了吗？不过就算是bind阿里云的内网ip也是解析不了。我看网上的bind 192.xxx的都是可以成功的，看来是bind内网ip是可以的。
+
+# 经典应用
+
+## 分布式锁
+
+`SETNX key value`可以保证只有1个客户端能够设置成功，可以实现分布式锁。`DEL key`可以释放锁。为了避免后端服务获取到锁后执行业务逻辑中出现异常/崩溃/网络抖动而无法释放锁造成其它服务永远拿不到锁的情况，都会给锁设置过期时间来兜底，`EXPIRE key timeout`设置锁过期时间。
+
+```shell
+127.0.0.1:6379> SETNX k1 v1
+(integer) 1
+127.0.0.1:6379> expire k1 60
+(integer) 1
+127.0.0.1:6379> ttl k1
+(integer) 58
+127.0.0.1:6379> del k1
+(integer) 1
+```
+
+但是这种方式存在弊端，**SETNX和expire命令不是原子性的**，如果SETNX命令执行完成后，后端服务崩了或网络抖动，这个锁没有过期时间就无法自动释放了。
+
+保证其执行的原子性有3种方式：
+
+1. `SET key value NX EX timeout`原子命令同时设置key和过期时间，推荐。
+
+```shell
+127.0.0.1:6379> SET k1 v1 NX EX 60
+OK
+127.0.0.1:6379> ttl k1
+(integer) 56
+127.0.0.1:6379> del k1
+(integer) 1
+```
+
+2. lua脚本保证原子性
+
+
+3. 事务
+
+## red lock
+
+SETNX命令可以保证分布式互斥，但是如果key所在的redis节点挂了，redis cluster会自动将挂掉节点的槽迁移到其它节点，那么锁就相当于自动释放了，在一些严格要求互斥的情况下可能会有问题。
+
+redis开发者对此提供了一个red lock方案：go代码如下
+
+```go
+const (
+	// 解锁脚本
+	unlockScript = `
+if redis.call("EXISTS",KEYS[1]) == 0 then 
+	return 1
+else if redis.call("get",KEYS[1]) == ARGV[1] then
+	return redis.call("del",KEYS[1]) 
+else 
+	return 0 
+end end`
+)
+
+var (
+	// ErrLockFailed 加锁失败
+	ErrLockFailed = errors.New("lock failed")
+)
+
+// 全局锁id
+var randomUid string
+
+// RedLock redis实现分布式锁
+type RedLock struct {
+	clients          []*redis.Client // Redis客户端
+	successClients   []*redis.Client // 加锁成功的客户端
+	unlockScript     *redis.Script   // 解锁脚本
+	resource         string          // 锁定的资源
+	randomValue      string          // 随机值
+	watchDog         chan struct{}   // 看门狗
+	Ttl              time.Duration   // 生命周期
+	ResetTTLInterval time.Duration   // 重置周期
+	once             *sync.Once      // 安全关闭管道
+	Err              error           // 错误
+}
+
+// NewRedLock 新建分布式锁
+func NewRedLock(resource string) (*RedLock, error) {
+	var client []*redis.Client
+	server, ok := service.GetService(code.RPC_REDIS_SERVER_MODULE)
+	if !ok {
+		return nil, errors.New("get redis resource error")
+	}
+
+	// 获取服务集群列表地址并逐步链接
+	rdsAddrList, err := RdsGetHostList(server)
+	if err != nil {
+		return nil, err
+	}
+
+	// 链接所有redis
+	for _, rdsAddr := range rdsAddrList {
+		tasklog.Info(rdsAddr.String())
+		client = append(client, RdsGetConn(server, rdsAddr))
+	}
+
+	// 随机生成UUID 避免不同进程误解锁
+	randomUid = uuid.NewV4().String()
+
+	return &RedLock{
+		clients:          client,
+		unlockScript:     redis.NewScript(unlockScript),
+		resource:         resource,
+		Ttl:              time.Second * 30,
+		ResetTTLInterval: time.Second * 25,
+	}, nil
+}
+
+// 安全关闭看门狗
+func (r *RedLock) safeClose() {
+	r.once.Do(func() { close(r.watchDog) })
+}
+
+// TryLock 尝试获取redis分布式锁
+func (r *RedLock) TryLock() error {
+	var wg sync.WaitGroup
+	wg.Add(len(r.clients))
+	// 成功获得锁的Redis实例的客户端
+	successClients := make(chan *redis.Client, len(r.clients))
+	// 针对集群内redis实例  分别加锁
+	for _, redisClient := range r.clients {
+		// 检测锁定目标是否已经被占用
+		keyRes, _ := redisClient.Get(r.resource).Result()
+		// 可重入锁
+		if keyRes != "" {
+			tasklog.Notice(keyRes)
+			if keyRes == randomUid {
+				tasklog.Notice("判定重如锁")
+				return nil
+			}
+			tasklog.Notice("判定已上锁")
+			return ErrLockFailed
+		}
+
+		// 异步加锁
+		go func(redisClient *redis.Client) {
+			defer wg.Done()
+			// 所有redis实例都异步加锁
+			tasklog.Notice("未上锁，本次上锁值：" + randomUid)
+			success, err := redisClient.SetNX(r.resource, randomUid, r.Ttl).Result()
+			// 加锁失败退出
+			if err != nil {
+				r.Err = err
+				return
+			}
+			if !success {
+				r.Err = errors.New("redis operation returns 0")
+				return
+			}
+			// 加锁成功启动看门狗模式
+			go r.startWatchDog()
+			// 传递成功客户端信息
+			successClients <- redisClient
+		}(redisClient)
+	}
+	// 等待所有加锁实例执行完毕
+	wg.Wait()
+	close(successClients)
+
+	// 如果成功加锁的客户端少于总数量的一半判定集群加锁失败
+	if len(successClients) < len(r.clients)/2+1 {
+		// 加锁失败释放所有成功上锁的redis集群列表
+		for _, redisClient := range r.successClients {
+			go func(redisClient *redis.Client) {
+				err := r.unlockScript.Run(redisClient, []string{r.resource}, randomUid).Err()
+				if err != nil {
+					r.Err = err
+					return
+				}
+			}(redisClient)
+		}
+		return ErrLockFailed
+	}
+	// 加锁成功启动看门狗监听续期情况
+	r.randomValue = randomUid
+	r.successClients = nil
+	for successClient := range successClients {
+		r.successClients = append(r.successClients, successClient)
+	}
+	return nil
+}
+
+// 启动看门狗
+func (r *RedLock) startWatchDog() {
+	r.watchDog = make(chan struct{})
+	// 定时器
+	ticker := time.NewTicker(r.ResetTTLInterval)
+	// 监听定时器消息
+	for {
+		select {
+		case <-ticker.C:
+			// 一个周期内对成功加锁客户端列表进行呢续期
+			for _, redisClient := range r.successClients {
+				go func(redisClient *redis.Client) {
+					err := redisClient.Expire(r.resource, r.Ttl).Err()
+					if err != nil {
+						r.Err = err
+						return
+					}
+				}(redisClient)
+			}
+
+		case <-r.watchDog:
+			// 成功解锁关闭管道退出死循环
+			return
+		}
+	}
+}
+
+// Unlock redis解锁
+func (r *RedLock) Unlock() error {
+	// 对所有成功加锁的客户端列表进行解锁
+	for _, redisClient := range r.successClients {
+		go func(redisClient *redis.Client) {
+			tasklog.Notice("开始解锁拉")
+			err := r.unlockScript.Run(redisClient, []string{r.resource}, r.randomValue).Err()
+			tasklog.ErrorWithCode(taskerr.ERRNO_REDIS_UNLOCKSCRIPT_RUN_FAILED, taskerr.GetErrMessage(taskerr.ERRNO_REDIS_UNLOCKSCRIPT_RUN_FAILED), fmt.Sprintf("Unlock unlockScript.Run err: %v", err))
+		}(redisClient)
+	}
+	// 关闭看门狗
+	r.safeClose()
+	return r.Err
+}
+
+// RdsGetConn 获取redis链接
+func RdsGetConn(s service.Service, addr *service.Addr) *redis.Client {
+	address := addr.String()
+	conn := redis.NewClient(&redis.Options{
+		Addr:         address,
+		ReadTimeout:  s.GetReadTimeout(),
+		WriteTimeout: s.GetWriteTimeout(),
+		Password:     s.GetRalConf().Password,
+		PoolSize:     runtime.NumCPU(), //设置为逻辑CPU个数
+		MaxConnAge:   10 * time.Minute,
+	})
+	return conn
+}
+
+// RdsGetHostList 获取当前ral服务中所有RDS集群实例地址
+func RdsGetHostList(ser service.Service) ([]*service.Addr, error) {
+	hosts, err := ser.GetPriorityHost()
+	if err != nil {
+		return nil, err
+	}
+	if len(hosts) > 0 {
+		return hosts, nil
+	}
+
+	hosts, err = ser.GetAllHost()
+	if err != nil {
+		return nil, err
+	}
+	if len(hosts) > 0 {
+		return hosts, nil
+	}
+
+	return nil, errors.New("get redis resource failed")
+}
+```
