@@ -6331,6 +6331,103 @@ public class MyFileUtil {
 }
 ```
 
+### 读取指定包下class文件
+
+一般在需要扫描出哪些类标注了某个注解时（如Spring的@Component自动扫描），就需要读取包下的class文件：
+
+```java
+    /**
+     * 加载指定包下的所有class文件
+     *
+     * @param packageName 包名, 如com.fzk.controller
+     * @return class文件, 没有则为空集合, 不会为null
+     */
+    public static List<Class<?>> loadPackageClasses(String packageName) throws IOException, ClassNotFoundException {
+        ArrayList<Class<?>> classes = new ArrayList<>();
+        ArrayList<String> classNames = new ArrayList<>();// 全类名
+
+        final URL packageDirUrl = Thread.currentThread().getContextClassLoader().getResource(packageName.replaceAll("\\.", "/"));
+        if (packageDirUrl == null) {
+            return classes;
+        }
+        // 1.file协议, 一般是IDEA直接运行
+        if (packageDirUrl.getProtocol().equals("file")) {
+            final Path packageDirPath = Path.of(new File(packageDirUrl.getFile()).getPath());
+            if (!Files.isDirectory(packageDirPath)) {
+                throw new RuntimeException("");
+            }
+            // 遍历文件协议目录下所有文件
+            Queue<Path> dirs = new LinkedList<>();
+            dirs.add(packageDirPath);
+            while (dirs.size() > 0) {
+                Path curDir = dirs.poll();
+                try (DirectoryStream<Path> stream = Files.newDirectoryStream(curDir)) {
+                    stream.forEach((cur) -> {
+                        if (Files.isDirectory(cur)) {
+                            dirs.add(cur);
+                        } else if (isClassFile(cur)) {// 只添加class文件
+                            classNames.add(getClassname(cur, packageName));
+                        }
+                    });
+                }
+            }
+        } else if (packageDirUrl.getProtocol().equals("jar")) {
+            // 2.jar协议，一般是运行可执行jar
+            JarURLConnection urlConnection = (JarURLConnection) packageDirUrl.openConnection();
+            Enumeration<JarEntry> entries = urlConnection.getJarFile().entries();
+            while (entries.hasMoreElements()) {
+                // 获取jar里的一个实体 可以是目录 和一些jar包里的其他文件 如META-INF等文件
+                JarEntry entry = entries.nextElement();
+                if (!entry.isDirectory()) {
+                    String name = entry.getName();
+                    if (name.endsWith(".class")) {
+                        // 注意这个在windows下也是 com/fzk/Hello.class
+                        name = name.replaceAll("/", ".");
+                        name = name.replaceAll("\\\\", ".");
+                        // 全类名 com.fzk.Hello
+                        String classname = name.substring(0, name.lastIndexOf(".class"));
+                        classNames.add(classname);
+                    }
+                }
+            }
+        }
+
+        // 3.加载class文件，会引起class的静态初始化
+        for (String classname : classNames) {
+            Class<?> clazz = Class.forName(classname);
+            classes.add(clazz);
+        }
+        return classes;
+    }
+
+    /**
+     * class文件绝对路径获取全类名
+     *
+     * @param classPath   class文件绝对路径, 如 D:\\test\\com\\fzk\\Hello.class 或 /opt/com/fzk/Hello.class
+     * @param packageName 包名, 如com.fzk
+     * @return 全类名, 如com.fzk.Hello
+     */
+    private static String getClassname(Path classPath, String packageName) {
+        String absolutePath = classPath.toAbsolutePath().toString();// D:\\test\\com\\fzk\\Hello.class 或 /opt/com/fzk/Hello.class
+        if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+            // D:\\test\\com\\fzk\\Hello.class 替换为 D:.test.com.fzk.Hello.class
+            absolutePath = absolutePath.replaceAll("\\\\", ".");
+        } else {
+            // /opt/com/fzk/Hello.class 替换为 .opt.com.fzk.Hello.class
+            absolutePath = absolutePath.replaceAll("/", ".");
+        }
+        // com.fzk.Hello.class
+        String substr = absolutePath.substring(absolutePath.lastIndexOf(packageName));
+        // 取出.class后缀 得到全类名 com.fzk.Hello
+        return substr.substring(0, substr.lastIndexOf(".class"));
+    }
+
+    public static boolean isClassFile(Path path) {
+        // 注意不能用path.endWith("lastPath")方法, 这个不是判断文件后缀的
+        return path.getFileName().toString().endsWith(".class");
+    }
+```
+
 ## 一致性hash
 
 一致性hash一般用于多节点负载均衡，相比于random策略，hash策略可以将请求固定分发给某个节点。但普通hash在出现节点故障或扩缩容时，大量请求会分配到与原本不同的节点。而一致性hash则解决了这个痛点，在出现扩缩容时依旧可以保证除了故障节点外的其它请求依旧会分配到原本节点，故障节点的请求则按照策略分配给下一个节点。
