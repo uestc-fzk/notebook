@@ -393,6 +393,16 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
 
+# 函数与运算符
+
+## 锁
+
+https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html
+
+操作用户级锁的函数。
+
+- `GET_LOCK(str, timeout)`
+
 
 
 # MySQL应用程序
@@ -1493,13 +1503,9 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
 
 清除系统还负责截断撤消表空间。您可以配置该 [`innodb_purge_rseg_truncate_frequency`](https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_purge_rseg_truncate_frequency) 变量来控制清除系统查找要截断的撤消表空间的频率。有关详细信息，请参阅 [截断撤消表空间](https://dev.mysql.com/doc/refman/8.0/en/innodb-undo-tablespaces.html#truncate-undo-tablespace)。
 
-
-
-
-
-
-
 ## 锁与事务
+
+> 文档索引：https://dev.mysql.com/doc/refman/8.0/en/dynindex-isolevel.html
 
 ### 锁
 
@@ -1936,7 +1942,7 @@ CHANGE REPLICATION TO # 8.0.23以后
 
 # 分区
 
-仅Innodb、NDB引擎支持分区。
+仅Innodb、NDB引擎支持分区，单表最大分区数为8192。
 
 MySQL仅支持水平分区：表中不同行分布在不同的物理分区。MySQL不支持垂直分区同时也不计划引入。
 
@@ -2145,6 +2151,180 @@ mysql> CREATE TABLE ts3 (
 ```
 
 **Hash分区**，NULL被视作0。
+
+## 分区管理
+
+### range和list分区管理
+
+range分区和list分区语法基本一致。
+
+创建range分区：
+
+```sql
+CREATE TABLE tr (
+	name VARCHAR(50), 
+	purchased DATE
+)PARTITION BY RANGE( YEAR(purchased) ) (
+	PARTITION p0 VALUES LESS THAN (1990),
+	PARTITION p1 VALUES LESS THAN (2000),
+	PARTITION p2 VALUES LESS THAN (2010),
+	PARTITION p3 VALUES LESS THAN MAXVALUE);
+```
+
+在MySQL的数据目录下，每个表分区都会创建一个表空间文件：
+
+```shell
+[root@k8s-master test]# ls
+tr#p#p0.ibd  tr#p#p1.ibd  tr#p#p2.ibd  tr#p#p3.ibd
+```
+
+查询某个分区内的数据：
+
+```sql
+SELECT * FROM tr PARTITION (p2);
+```
+
+删除某个分区：这将同时删除该分区内所有数据
+
+```sql
+ALTER TABLE tr DROP PARTITION p2;
+```
+
+添加分区：对于range分区，只能将新分区添加到分区列表的高端，否则会报错。
+
+```sql
+ALTER TABLE tr ADD PARTITION (PARTITION p6 VALUES LESS THAN (2020));-- 此时必报错
+```
+
+若某个分区数据过于膨胀，可以将存在的分区重新组织为多个新的分区：注意范围必须兼容
+
+```sql
+ALTER TABLE tr 
+REORGANIZE PARTITION p3 INTO(
+	PARTITION p31 VALUES LESS THAN (2020),
+	PARTITION p4 VALUES LESS THAN MAXVALUE
+);
+```
+
+若发现两个分区数据较少，可合并相邻分区：
+
+```sql
+ALTER TABLE tr REORGANIZE PARTITION p0,p1 INTO(
+	PARTITION p01 VALUES LESS THAN (2000)
+);
+```
+
+此时使用`SHOW CREATE TABLE`语句可看到表的DDL语句如下：
+
+```sql
+CREATE TABLE `tr` (
+  `name` varchar(50) DEFAULT NULL,
+  `purchased` date DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY RANGE (year(`purchased`))
+(PARTITION p01 VALUES LESS THAN (2000) ENGINE = InnoDB,
+ PARTITION p31 VALUES LESS THAN (2020) ENGINE = InnoDB,
+ PARTITION p4 VALUES LESS THAN MAXVALUE ENGINE = InnoDB) */
+```
+
+### HASH和KEY分区的管理
+
+HASH分区和KEY分区的管理命令基本一致。
+
+创建HASH分区：
+
+```sql
+CREATE TABLE tr(
+	id INT,
+	signed datetime
+)
+PARTITION BY HASH(MONTH(signed))
+PARTITIONS 12
+;
+```
+
+缩减分区数量：减少4个分区
+
+```sql
+ALTER TABLE tr COALESCE PARTITION 4;
+```
+
+增加分区数量：
+
+```sql
+ALTER TABLE tr ADD PARTITION PARTITIONS 6;
+```
+
+此时该表的DDL语句如下：
+
+```sql
+CREATE TABLE `tr` (
+  `id` int DEFAULT NULL,
+  `signed` datetime DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY HASH (month(`signed`))
+PARTITIONS 14 */
+```
+
+### 分区维护
+
+1、重建分区：类似于删除数据并重新插入，可整理碎片
+
+```sql
+ALTER TABLE t1 REBUILD PARTITION p0,p1;
+```
+
+2、优化分区：回收任何未使用的空间并进行碎片整理分区数据文件
+
+```sql
+ALTER TABLE t1 OPTIMIZE PARTITION p0,p1;
+```
+
+3、清空分区数据：
+
+```sql
+ALTER TABLE t1 TRUNCATE PARTITION p0,p1;
+```
+
+### 分区限制
+
+**禁止存储过程**
+
+单表最大分区数为8192
+
+Innodb引擎**分区不支持外键**
+
+分区表不支持全文索引
+
+不能使用空间列如POINT、GEOMETRY等空间数据类型。
+
+分区键必须是整数列或解析为整数的表达式，可以为NULL
+
+**子分区必须使用HASH或KEY分区，可以RANGE和LIST分区可以被子分区。**
+
+> **表上的每个唯一键都必须使用表的分区表达式中的每一列。**
+
+# 元信息表
+
+`INFORMATION_SCHEMA`提供对数据库元数据的访问，有关 MySQL 服务器的信息，例如数据库或表的名称、列的数据类型或访问权限。其他术语是 数据字典和 系统目录。
+
+INFORMATION_SCHEMA是一个内置数据库，存储有关MySQL服务器维护的其他数据库信息。
+
+该数据库实际仅包含几个只读表，其实都是视图，无基表，所以没有表空间文件，也不存在该数据库目录。
+
+库内所有表：https://dev.mysql.com/doc/refman/8.0/en/information-schema-table-reference.html
+
+
+
+
+
+
+
+
+
+
+
+
 
 # 单机运行多MySQL实例
 
