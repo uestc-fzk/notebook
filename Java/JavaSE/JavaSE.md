@@ -2084,8 +2084,9 @@ public void acquire(int permits) throws InterruptedException {
 线程间交换数据
 
 
-
 ## ThreadPoolExecutor
+
+![线程池工作流程](JavaSE.assets/线程池工作流程.png)
 
 ```java
 /*
