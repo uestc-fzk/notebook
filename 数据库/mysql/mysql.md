@@ -467,8 +467,72 @@ REPLACE INTO table_name (col_names...) VALUES(...),(...)...
 
 ## 子查询
 
+**标量或列子查询**返回单个值或一列值：
 
+```sql
+SELECT * FROM t1 WHERE column1 = (SELECT MAX(column2) FROM t2);
+SELECT s1 FROM t1 WHERE s1 IN (SELECT s1 FROM t2);
+```
 
+**行子查询**是子查询变体，返回单行：行子查询最多只能返回一行。
+
+```sql
+SELECT * FROM t1
+  WHERE (col1,col2) = (SELECT col3, col4 FROM t2 WHERE id = 10);
+  
+SELECT * FROM t1
+  WHERE ROW(col1,col2) = (SELECT col3, col4 FROM t2 WHERE id = 10);
+  
+SELECT column1,column2,column3
+  FROM t1
+  WHERE (column1,column2,column3) IN
+         (SELECT column1,column2,column3 FROM t2);
+```
+
+## WITH
+
+公用表表达式 (CTE) 是一个命名的临时结果集，它存在于单个语句的范围内，稍后可以在该语句中引用，可能多次引用。
+
+```sql
+WITH
+  cte1 AS (SELECT a, b FROM table1),
+  cte2 AS (SELECT c, d FROM table2)
+SELECT b, d FROM cte1 JOIN cte2
+WHERE cte1.a = cte2.c;
+```
+
+## 事务
+
+```sql
+START TRANSACTION; -- 开启事务
+BEGIN; -- 开启事务
+
+COMMIT; -- 提交事务
+ROLLBACK; -- 回滚事务
+
+SET autocommit={ 1 | 0 }; -- 开启或关闭自动提交
+```
+
+`START TRANSACTION`允许几个控制事务特性的修饰符：
+
+```sql
+START TRANSACTION 
+	{WITH CONSISTENT SNAPSHOT
+	| READ WRITE
+	| READ ONLY}
+```
+
+- WITH CONSISTENT SNAPSHOT：启动一致性读
+- READ WRITE：事务以读写模式运行，允许事务更改数据
+- READ ONLY：事务以只读模式运行，禁止事务改数据，只读事务优化：https://dev.mysql.com/doc/refman/8.0/en/innodb-performance-ro-txn.html
+
+`autocommit`是会话变量，每个会话是独立设置的，默认情况下客户端连接是以`autocommit=1`开始。
+
+[默认情况下，MySQL 在启用自动提交](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_autocommit)模式的情况下运行 。这意味着，当不在事务内时，每个语句都是原子的。若关闭自动提交，则SQL语句执行更改后不会立刻生效，需要提交事务或回滚事务。
+
+`START TRANSACTION`和`set autocommit=0`的区别在于：前者提交或回滚后，事务就结束了，需要再次调用START TRANSACTION开启事务；后者是一直开着事务，提交或回滚后自动生成新的事务。
+
+比如在Spring框架的事务管理中，service层的方法标注了@Transactional注解后，线程绑定的MySQL会话连接将被设置为`autocommit=0`，该方法执行完后，提交或回滚事务后再将其恢复为1。
 
 # MySQL应用程序
 
