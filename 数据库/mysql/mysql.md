@@ -393,15 +393,80 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
 
-# 函数与运算符
+# SQL与函数与运算符
 
-## 锁
+## 命名锁
 
-https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html
+文档：https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html
 
-操作用户级锁的函数。
+|函数|作用|
+|:-|:-|
+|`GET_LOCK(str,timeout)`|获取互斥命名锁，timeout表示获取锁的等待超时时间，负值表示永不超时，单位秒。<br/>返回1获取锁成功，返回0表示等锁超时，返回null表示出错了，如线程被杀了。|
+|`IS_FREE_LOCK(str)`|命名锁是否未锁定，1空闲，0被锁定，null发生错误|
+|`IS_USED_LOCK(str)`|命名锁是被锁住，若是则返回持有锁的客户端会话连接标识符，否则返回null|
+|`RELEASE_ALL_LOCKS()`|释放当前会话获取的所有命名锁，返回释放锁的数量|
+|`RELEASE_LOCK(str)`|释放命名锁，1表示释放成功，0表示锁不是此客户端线程创建，null表示锁不存在|
 
-- `GET_LOCK(str, timeout)`
+获取锁成功只有调用RELEASE_LOCK()函数或会话终止才能解锁。
+
+使用元数据锁定实现(MDL)子系统实现。
+获得的唯一命名锁 GET_LOCK()出现在性能模式metadata_locks 表中。列OBJECT_TYPE表示 USER LEVEL LOCK， OBJECT_NAME列表示锁名称。在为同一个名称获取多个锁的情况下 ，只有该名称的第一个锁会在表中注册一行 metadata_locks。名称的后续锁会增加锁中的计数器，但不会获取额外的元数据锁。metadata_locks当名称上的最后一个锁实例被释放时，锁所在的行被删除 。
+
+
+1个会话可以获取多个锁：
+
+```sql
+SELECT GET_LOCK('lock1',10);
+SELECT GET_LOCK('lock2',10);
+SELECT RELEASE_LOCK('lock2');
+SELECT RELEASE_LOCK('lock1');
+```
+
+发生死锁情况时，服务器会选择一个调用者并终止其锁定获取请求并报错 ER_USER_LOCK_DEADLOCK。此错误不会导致事务回滚，业务自己决定处理逻辑。
+
+锁定名称最大长度64字符，锁定名称在整个服务器范围内，多个客户端等待锁时，获取锁的顺序是不确定的。
+
+> 优点：相比于一致性读如`SELECT ...FOR UPDATE`的优势就是可以用`IS_FREE_LOCK()`提前判断锁是否空闲，而且`GET_LOCK()`函数可以指定等待时间，在分布式锁的实现上更加优雅。
+
+## 交并除
+
+SQL 标准定义了以下三个集合操作：
+
+- UNION：将来自两个查询块的所有结果组合成一个结果，省略任何重复项。
+
+- INTERSECT：仅合并两个查询块的结果共有的那些行，省略任何重复项。
+
+- EXCEPT：对于两个查询块 A和B ，返回A中所有不存在于中的B结果，省略任何重复项。
+
+3个运算符都支持DISTINCT和ALL关键字：
+- DISTINCT：默认，删除任一侧的重复行。
+- ALL：结果集将包含重复行。
+
+```sql
+query_block [set_op query_block] [set_op query_block] ...
+
+query_block:
+    SELECT | TABLE | VALUES
+
+set_op:
+    UNION | INTERSECT | EXCEPT
+```
+
+注意：INTERSECT和EXCEPT是MySQL8.0.31才支持的新特性。
+
+## REPLACE
+
+REPLACE是 SQL 标准的 MySQL 扩展。它要么插入，要么删除 并插入。
+REPLACE工作方式和INSERT完全相同，只是如果表中的旧行与插入的PRIMARY KEY或UNIQUE 索引的新行具有相同的值，则在插入新行之前删除旧行，并返回受影响的行数(删除和插入行数总和)。
+
+```sql
+REPLACE INTO table_name (col_names...) VALUES(...),(...)...
+```
+
+> 注意：如果表包含多个唯一索引，且新行重复不同唯一索引中不同旧行的值，则单个行可能会替换多个旧行。受影响行数可知其替换了几行。
+
+## 子查询
+
 
 
 
