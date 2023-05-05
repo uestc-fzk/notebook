@@ -92,51 +92,45 @@ Netty基于主从Reactor多线程模型：
 服务端EchoServer：
 
 ```java
-public final class EchoClient {
-    static final String HOST = System.getProperty("host", "127.0.0.1");
+public final class EchoServer {
+
     static final int PORT = Integer.parseInt(System.getProperty("port", "8007"));
-    static final int SIZE = Integer.parseInt(System.getProperty("size", "256"));
 
     public static void main(String[] args) throws Exception {
-        // 配置SSL
+        // Configure SSL.
         final SslContext sslCtx = ServerUtil.buildSslContext();
 
-        // Configure the client.
-        EventLoopGroup group = new NioEventLoopGroup();
+        // Configure the server.
+        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        final EchoServerHandler serverHandler = new EchoServerHandler();
         try {
-            // 创建Bootstrap客户端启动器
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-                    .channel(NioSocketChannel.class)    // 设置Channel类型
-                    .option(ChannelOption.TCP_NODELAY, true)    // 关闭TCP延迟
-                    .handler(new ChannelInitializer<SocketChannel>() {
-                        @Override
-                        public void initChannel(SocketChannel ch) throws Exception {
-                            ChannelPipeline p = ch.pipeline();
-                            if (sslCtx != null) {
-                                p.addLast(sslCtx.newHandler(ch.alloc(), HOST, PORT));
-                            }
-                            //p.addLast(new LoggingHandler(LogLevel.INFO));
-                            p.addLast(new EchoClientHandler());// 添加自定义处理器
-                        }
-                    });
+            ServerBootstrap b = new ServerBootstrap();
+            b.group(bossGroup, workerGroup)
+             .channel(NioServerSocketChannel.class)
+             .option(ChannelOption.SO_BACKLOG, 100)
+             .handler(new LoggingHandler(LogLevel.INFO))
+             .childHandler(new ChannelInitializer<SocketChannel>() {
+                 @Override
+                 public void initChannel(SocketChannel ch) throws Exception {
+                     ChannelPipeline p = ch.pipeline();
+                     if (sslCtx != null) {
+                         p.addLast(sslCtx.newHandler(ch.alloc()));
+                     }
+                     //p.addLast(new LoggingHandler(LogLevel.INFO));
+                     p.addLast(serverHandler);
+                 }
+             });
 
-            // 连接服务器并等待
-            ChannelFuture f = b.connect(HOST, PORT).sync();
+            // Start the server.
+            ChannelFuture f = b.bind(PORT).sync();
 
-            // 发心跳消息测试
-            Thread.sleep(100);
-            f.channel().writeAndFlush(Unpooled.copiedBuffer("ping", CharsetUtil.UTF_8));
-            for (int i = 0; i < 10; i++) {
-                Thread.sleep(100);
-                f.channel().writeAndFlush(Unpooled.copiedBuffer("ping" + i, CharsetUtil.UTF_8));
-            }
-            // Wait until the connection is closed.
-            f.channel().close().sync(); // 手动关闭通道并等待
-//            f.channel().closeFuture().sync(); // 等待直至通道关闭
+            // Wait until the server socket is closed.
+            f.channel().closeFuture().sync();
         } finally {
-            // Shut down the event loop to terminate all threads.
-            group.shutdownGracefully();
+            // Shut down all event loops to terminate all threads.
+            bossGroup.shutdownGracefully();
+            workerGroup.shutdownGracefully();
         }
     }
 }
@@ -4592,6 +4586,50 @@ public class ChannelTrafficShapingHandler extends AbstractTrafficShapingHandler 
 - `WriteTimeoutHandler`，当**写超时**，抛出WriteTimeoutException异常，并自动关闭Channel 。
   用户可自定义ChannelInboundHandler实现类并重写 `#exceptionCaught()` 方法，处理该异常。
 
+例子：当链路超过30秒没有发送数据时则发送心跳；当链路超过60秒没有读到数据时则关闭连接：
+
+```java
+// 创建Bootstrap客户端启动器
+Bootstrap b = new Bootstrap();
+b.group(workerGroup)
+    .channel(NioSocketChannel.class)    // 设置Channel类型
+    .option(ChannelOption.TCP_NODELAY, true)    // 关闭TCP延迟
+    .handler(new ChannelInitializer<SocketChannel>() {
+        @Override
+        public void initChannel(SocketChannel ch) throws Exception {
+            ChannelPipeline p = ch.pipeline();
+            // 链路空闲超时控制
+            p.addLast(new IdleStateHandler(60, 30, 0));
+            /*
+             * 消息帧最大100MB
+             * 长度字段偏移量为0，4B
+             * 无需长度修正，无需舍弃开头的长度字段
+             */
+            LengthFieldBasedFrameDecoder frameDecoder = new LengthFieldBasedFrameDecoder(
+                1024 * 1024 * 100, 0, 4, 0, 0);
+            p.addLast(frameDecoder);// TCP拆包解包
+            p.addLast(new ServerHandler());// 添加自定义处理器
+        }
+    });
+
+// Handler should handle the IdleStateEvent triggered by IdleStateHandler.
+public class MyHandler extends ChannelDuplexHandler {
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof IdleStateEvent) {
+            IdleStateEvent e = (IdleStateEvent) evt;
+            if (e.state() == IdleState.READER_IDLE) {
+                ctx.close();
+            } else if (e.state() == IdleState.WRITER_IDLE) {
+                ctx.writeAndFlush(new PingMessage());
+            }
+        }
+    }
+}
+```
+
+> 注意：超时检测Handler最好放在第一个，否则消息很可能不会传递到超时Handler，这将意外触发空闲超时。
+
 #### 链路空闲超时handler
 
 `IdleStateHandler`可用于：
@@ -6045,10 +6083,9 @@ Netty内存管理基于jemalloc4实现，结合以下关键类实现：
 
 1、Netty高性能设计：
 
-- NIO、**Reactor模型、局部无锁化**
-- TCP接收和发送缓冲区采用**直接内存**，减少内存拷贝。环形数组缓冲区减少channel写次数。文件传输采用DefaultFileRegion通过`FileChannel#transferTo()`实现**文件传输零拷贝**。
-- **ByteBuf切片**、Composite组合等方式减少内存拷贝。
-- 内存池、引用计数器、jemalloc算法等实现的**内存管理**减少了内存申请/释放和GC
+- NIO、**Reactor模型、局部无锁化**、事件驱动
+- 零拷贝：TCP接收和发送缓冲区采用**直接内存**，减少内存拷贝。环形数组缓冲区减少channel写次数。文件传输采用DefaultFileRegion通过`FileChannel#transferTo()`实现**文件传输零拷贝**。
+- 内存管理：内存池、引用计数器、jemalloc算法等实现的**内存管理**减少了内存申请/释放和GC；**ByteBuf切片**、Composite组合等方式减少内存拷贝。
 
 2、优化建议：
 

@@ -2433,35 +2433,41 @@ Innodb引擎**分区不支持外键**
 
 > **表上的每个唯一键都必须使用表的分区表达式中的每一列。**
 
-# 元信息表
-
-`INFORMATION_SCHEMA`提供对数据库元数据的访问，有关 MySQL 服务器的信息，例如数据库或表的名称、列的数据类型或访问权限。其他术语是 数据字典和 系统目录。
-
-INFORMATION_SCHEMA是一个内置数据库，存储有关MySQL服务器维护的其他数据库信息。
-
-该数据库实际仅包含几个只读表，其实都是视图，无基表，所以没有表空间文件，也不存在该数据库目录。
-
-库内所有表：https://dev.mysql.com/doc/refman/8.0/en/information-schema-table-reference.html
-
-
-
-
-
-
-
-
-
-
-
-
-
 # 单机运行多MySQL实例
 
 在某些情况下，可能需要在一台机器上跑多个MySQL实例。
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/multiple-servers.html
 
+默认情况下MySQL安装在linux的配置文件位于：/etc/my.cnf
 
+```ini
+[mysqld]
+# 数据目录
+datadir=/var/lib/mysql
+socket=/var/lib/mysql/mysql.sock
 
+log-error=/var/log/mysqld.log
+pid-file=/var/run/mysqld/mysqld.pid
+```
 
+以下几个是需要配置的：
+
+datadir：每个MySQL实例应该有自己单独的数据目录
+
+port
+
+socket
+
+pid-file
+
+若开启日志：
+
+general-log-file
+
+log-bin
+
+slow_query_log_file
+
+log-error
 

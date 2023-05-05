@@ -2062,7 +2062,7 @@ public CompletableFuture<PutMessageStatus> submitFlushRequest(AppendMessageResul
 
 在同步刷盘且需要返回ACK情况下，则发送者线程会等待消息落盘才能返回。其他情况都是可以直接返回PUT_OK了。
 
-### 同步刷盘
+### 同步刷盘(组提交)
 
 同步刷盘用的是`CommitLog.GroupCommitService`服务类：默认情况下，CommitLog服务启动不会启动这个线程，而是启动异步刷盘服务线程，如果刷盘策略配置为同步刷盘，才会启动这个线程服务。
 

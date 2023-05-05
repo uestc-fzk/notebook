@@ -5961,42 +5961,41 @@ public class AES {
  * @datetime 2023-02-11 01:34:33
  */
 public class MD5 {
-    public static String getMD5(byte[] bytes) {
+    public static String md5(byte[] bytes) {
         // 生成一个MD5加密计算摘要
         MessageDigest md = getMD5Digester();
         // 计算md5函数
         md.update(bytes);
-        // digest()最后确定返回md5 hash值，返回值为8位字符串。因为md5 hash值是16位的hex值，实际上就是8位的字符
-        // BigInteger函数则将8位的字符串转换成16位hex值，用字符串来表示；得到字符串形式的hash值
-        //一个byte是八位二进制，也就是2位十六进制字符（2的8次方等于16的2次方）
-        return new BigInteger(1, md.digest()).toString(16);
+        // digest()最后确定返回md5 hash值，返回值为32位字符串。因为md5 hash值是16进制的hex值，实际上就是16位的字符
+        // 将1个字节转换为2个16进制的字符, 0--e
+        return HexFormat.of().formatHex(md.digest());
     }
 
     /**
      * 解析文件的MD5值
      * 经过测试，在 i7 12700F, 32GB内存, windows11配置上，解析5.78GB文件运行大约12s
+     *
      * @param path 文件路劲
-     * @return md5
+     * @return md5 32个16进制字符, 0-e
      * @throws IOException 可能的文件错误，如文件不存在或权限不足
      */
     public static String getFileMD5(Path path) throws IOException {
         // 生成一个MD5加密计算摘要
         MessageDigest md = getMD5Digester();
         try (FileChannel file = FileChannel.open(path, StandardOpenOption.READ)) {
-            ByteBuffer buf = ByteBuffer.allocateDirect(1024);
+            ByteBuffer buf = ByteBuffer.allocateDirect(4096);
             while (file.read(buf) != -1) {
                 buf.flip();// 翻转读取
                 md.update(buf);
                 buf.clear();// 清空待写入
             }
-            // digest()最后确定返回md5 hash值，返回值为8位字符串。因为md5 hash值是16位的hex值，实际上就是8位的字符
-            // BigInteger函数则将8位的字符串转换成16位hex值，用字符串来表示；得到字符串形式的hash值
-            //一个byte是八位二进制，也就是2位十六进制字符（2的8次方等于16的2次方）
-            return new BigInteger(1, md.digest()).toString(16);
+            // digest()最后确定返回md5 hash值，返回值为32位字符串。因为md5 hash值是16进制的hex值，实际上就是16位的字符
+            // 将1个字节转换为2个16进制的字符, 0--e
+            return HexFormat.of().formatHex(md.digest());
         }
     }
 
-    public static MessageDigest getMD5Digester() {
+    private static MessageDigest getMD5Digester() {
         // 生成一个MD5加密计算摘要
         try {
             return MessageDigest.getInstance("MD5");
