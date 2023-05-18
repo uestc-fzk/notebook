@@ -1876,6 +1876,201 @@ func myStreamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.Strea
 
 从结果可用看出，这个流式拦截器只会执行一次，并不会每次发消息就执行
 
+# 单测
+
+单测有以下几种：
+
+- 基础测试，只使用一组参数和结果来测试一段代码
+- benchmark，测试程序性能
+- mock测试，模拟网络和数据库环境，在执行单测时，不该请求网络或 DB，因此请求网络和 DB 的代码，需要通过 Mock 来模拟
+
+使用 `testing` 标准库，Go需严格准守 **“约定大于配置”** 的规则，只有遵守约定，测试工具才会将其视为单元测试进行执行：
+
+1. 文件名必须以 `_test.go` 结尾
+2. 必须 `import "testing"`
+
+`testing` 标准库下，通过日志来表明单测成功、失败
+
+1. `t.Log` 系列为测试正常输出，若仅有 `t.Log` 输出，则表示测试通过
+
+2. `t.Error` 系列不会终止测试函数运行，但会在结果中显示为测试函数执行错误
+
+3. `t.Fatal` 系列会终止当前测试函数运行，进入下一个测试函数
+
+## 基础测试
+
+1. 测试用例函数入参必须为 `t *testing.T` ，并且无返回
+2. 测试用例函数必须以 `Test` 作为开头
+
+案例：single.go文件
+
+```go
+package singleTest
+
+import "fmt"
+
+func Hello(name string) string {
+	fmt.Printf("hello i am %s\n", name)
+	return name
+}
+```
+
+该文件的单测文件：single_test.go
+
+```go
+package singleTest
+
+import "testing"
+
+func TestHello(t *testing.T) {
+	// 1.定义测试用例
+	type Arg struct {
+		name string
+	}
+	type Case struct {
+		caseName string // 用例名
+		arg      *Arg   // 入参
+		expect   string // 期待结果
+	}
+	cases := []*Case{
+		{
+			"用例1",
+			&Arg{"fzk"},
+			"fzk",
+		}, {
+			"用例2",
+			&Arg{"wn"},
+			"wn",
+		},
+	}
+
+	// 2.执行每个用例
+	for _, c := range cases {
+		t.Run(c.caseName, func(tt *testing.T) {
+			if res := Hello(c.arg.name); res != c.expect {
+				t.Errorf("期待值: %s, 实际值: %s", c.expect, res)
+			}
+		})
+	}
+}
+```
+
+执行命令：
+
+```bash
+go test single_test.go single.go -v -cover -run=^TestHello$
+```
+
+### 执行命令详解
+
+`go test`命令可以指定执行某个`xxx_test.go`单测文件，也可以指定目录或package，从而执行其下所有单测文件：
+
+1、指定单测文件：`go test xxx_test.go`
+
+注意执行单个单测文件必须指定依赖函数位于的go文件，若不指定将报错，如下：
+
+```bash
+$-> go test single_test.go  
+# command-line-arguments [command-line-arguments.test]
+.\single_test.go:30:14: undefined: Hello
+FAIL    command-line-arguments [build failed]
+FAIL
+```
+
+正确命令：` go test single_test.go single.go`
+
+2、指定目录：
+
+```bash
+go test D:\developSoftWare\GoLand_workspace\KafkaDemo\singleTest # 绝对路径
+go test ./singleTest # 相对路径
+```
+
+3、指定package：
+
+```bash
+$-> go test singleTest
+package singleTest is not in GOROOT (D:\developLanguage\go\go1.18\src\singleTest)
+```
+
+从提示来看似乎这个package必须位于配置的`GOROOT`目录下才行。
+
+4、基础测试常见的参数有：
+
+- `-v`：verbose，展示执行详细细节，默认不指定此参数将仅展示 FAIL 的 case
+- `-run=regexp`：以正则表达式指定哪些单测函数需要执行，默认执行所有，如`-run=^TestHello$`
+
+- `-cover`：输出单测覆盖率
+
+## 基准测试
+
+测试函数名必须以`Benchmark`开头，入参必须为 `t *testing.B` ，并且无返回
+
+```go
+// 基准测试1
+func Benchmark1(b *testing.B) {
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		Hello("fzk1")
+	}
+}
+
+// 基准测试2
+func Benchmark2(b *testing.B) {
+	// 重置计时器，在 reset 前编写初始化代码，避免初始化代码对基准测试的干扰
+	b.ResetTimer()
+
+	// b.N 由基准测试框架提供，无法再设置，设置会造成基准测试执行超时
+	for i := 0; i < b.N; i++ {
+		Hello("fzk2")
+	}
+}
+```
+
+执行如下命令：
+
+```bash
+go test single_test.go single.go -bench=^Bench -benchtime=1s -benchmem -run=^$
+```
+
+参数详解：
+
+- `-bench=regexp`：指定哪些测试函数执行基准测试，执行所有为`-bench=.`
+- `-benchtime=1s`：指定每个基准测试执行时间，默认1s。还可以指定执行次数，如`-benchtime=100x`表示执行100次
+- `-count=n`：表示每个测试函数执行次数，默认1次
+- `-cpu=n`：指定用多少核心数跑基准测试，默认为`GOMAXPROCS`
+- `-benchmem`：展示内存消耗
+- `-run=regexp`：指定要跑的基础测试，一般跑基准测试时，会排除跑单元测试，会设置为`-run=^$`
+
+- `-parallel=4`：指定并发度
+- `timeout=120s`：指定超时事件，若测试超时则退出
+
+执行结果如下：
+
+```bash
+$-> go test single_test.go single.go -bench=^Bench -benchtime=1s -benchmem -run=^$
+goos: windows
+goarch: amd64
+cpu: 12th Gen Intel(R) Core(TM) i7-12700F
+Benchmark1-20           17605839                68.45 ns/op           32 B/op          2 allocs/op
+Benchmark2-20           17156312                68.57 ns/op           32 B/op          2 allocs/op
+PASS
+ok      command-line-arguments  5.750s
+```
+
+第一列：Benchmark1-20，前面为基准测试函数名，后面的20为测试用的CPU核心数量。
+
+第二列：表示在基准测试周期内 `for` 循环的次数。命令指定了 `-benchtime=1s`, 基准测试执行周期为 1s，执行了 1700w+ 次 for 循环
+
+第三列：单位 ns/op 表示每条指令消耗的纳秒数
+
+第四列：B/op 表示每条指令消耗的内存
+
+第五列：allocs/op 表示每条执行分配内存次数
+
+
+
 
 
 # other
