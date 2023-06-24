@@ -54,9 +54,16 @@ java的jar包可以通过`java -jar xx.jar`执行，如果要手动指定启动�
         <plugin>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-maven-plugin</artifactId>
+            <version>2.5.0</version>
             <configuration>
-                <!-- 指定启动类 -->
+                <!-- springboot 的main 启动类 方法的入口 -->
                 <mainClass>com.fzk.Main</mainClass>
+                <excludes>
+                    <exclude>
+                        <groupId>org.projectlombok</groupId>
+                        <artifactId>lombok</artifactId>
+                    </exclude>
+                </excludes>
             </configuration>
             <executions>
                 <execution>
@@ -5507,7 +5514,8 @@ public class LogRecord {
     public final String msg;
     public final LocalDateTime time;
     public final StackTraceElement caller;
-
+	public boolean pureMsg = false;// 纯消息，不打印时间/caller等信息
+    
     public LogRecord(LogLevel level, String msg, LocalDateTime time, int callDepth) {
         this.level = level;
         this.msg = msg;
@@ -5694,18 +5702,28 @@ public class Logger {
         addMsg(LogLevel.FINE, msg);
     }
 
+    public static void println(String fmt) {
+        LogRecord record = new LogRecord(globalLevel, fmt, LocalDateTime.now(), 4);
+        record.pureMsg = true;// 纯消息日志
+        addMsg(record);
+    }
+
     private static void addMsg(LogLevel level, String msg) {
         // 低于全局日志级别的日志忽略
         if (level.lower(globalLevel)) return;
         LogRecord logRecord = new LogRecord(level, msg, LocalDateTime.now(), 4);
+        addMsg(logRecord);
+    }
+
+    private static void addMsg(LogRecord record) {
         try {
             lock.lockInterruptibly();
             try {
                 // 写满了，等待, 必须用while，会有很多情况下会唤醒
-                while (queueWrite.size() >= defaultLogConf.getLogQueueSize()) {
+                while (queueWrite.size() >= globalLogConf.getLogQueueSize()) {
                     emptyCond.await();
                 }
-                queueWrite.add(logRecord);
+                queueWrite.add(record);
                 flushTread.wakeUp();// 唤醒刷新线程
             } finally {
                 lock.unlock();
@@ -5715,7 +5733,7 @@ public class Logger {
         }
     }
 
-    private static final LogConf defaultLogConf;
+    private static final LogConf globalLogConf;
     private static final LogLevel globalLevel;// 当前设置的日志级别，低于此级别的不会打印
     private static volatile ArrayList<LogRecord> queueWrite;// 各个日志写入此队列
     private static volatile ArrayList<LogRecord> queueRead;// flush线程从此队列处理日志
@@ -5726,19 +5744,21 @@ public class Logger {
 
     static {
         try {
-            // 1.日志配置探测
-            defaultLogConf = LogConf.detectLogConf();
+            System.out.println("日志初始化开始...");
+            // 1.初始化日志配置
+            globalLogConf = LogConf.detectLogConf();
             // 2.创建或切割日志
-            Path logPath = Path.of(defaultLogConf.getLogPath());
+            Path logPath = Path.of(globalLogConf.getLogPath());
             createLogFile(logPath);
 
             // 3.队列初始化
-            queueWrite = new ArrayList<>(defaultLogConf.getLogQueueSize());
-            queueRead = new ArrayList<>(defaultLogConf.getLogQueueSize());
+            queueWrite = new ArrayList<>(globalLogConf.getLogQueueSize());
+            queueRead = new ArrayList<>(globalLogConf.getLogQueueSize());
             // 4.日志level设置
-            globalLevel = LogLevel.getLevel(defaultLogConf.getLogLevel());
-        } catch (Exception e) {// 静态初始化最好拦截Exception，避免RuntimeException拦截不到
+            globalLevel = LogLevel.getLevel(globalLogConf.getLogLevel());
+        } catch (Exception e) {
             e.printStackTrace();
+            System.err.println("日志初始化失败: " + e);
             throw new RuntimeException(e);
         }
         // 5.日志刷新线程启动
@@ -5766,6 +5786,7 @@ public class Logger {
 
         public void wakeUp() {
             if (!isAwake) {// 避免冗余唤醒
+                isAwake = true;// 标记唤醒，避免冗余唤醒
                 LockSupport.unpark(flushTread);
                 //System.out.println("唤醒");
             }
@@ -5785,6 +5806,7 @@ public class Logger {
                     }
 
                     if (queueRead.size() > 0) {
+                        // 这里处理完成后不是立刻休眠，而是进入下一个循环继续轮转队列，因为很可能另一个队列现在有日志
                         handleRead();
                     } else {
                         isAwake = false;
@@ -5807,7 +5829,12 @@ public class Logger {
             for (LogRecord record : queueRead) {
                 // level time caller msg
                 // warning长度为7
-                String content = String.format("%-7s %s %s %s\n", record.level, format.format(record.time), record.caller, record.msg);
+                String content;
+                if (!record.pureMsg) {
+                    content = String.format("%-7s %s %s %s\n", record.level, format.format(record.time), record.caller, record.msg);
+                } else {
+                    content = record.msg + "\n";
+                }
                 file.write(ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8)));
                 // 控制台染色
                 if (record.level.higher(LogLevel.INFO))
@@ -5818,7 +5845,7 @@ public class Logger {
             // 2.落盘
             file.force(true);
             // 3.切割日志
-            if (file.size() >= defaultLogConf.getLogFileSize()) {
+            if (file.size() >= globalLogConf.getLogFileSize()) {
                 splitLogFile();
             }
         }
@@ -5832,7 +5859,7 @@ public class Logger {
             file.close();
         }
         // 2.文件替换：以写入文件第一行的时间命名，因为不知道为啥以创建时间有bug?
-        Path origin = Path.of(defaultLogConf.getLogPath());
+        Path origin = Path.of(globalLogConf.getLogPath());
         Path target = null;
         // 注意要关闭资源
         try (BufferedReader bufferedReader = new BufferedReader(new FileReader(origin.toFile()));) {
@@ -5842,7 +5869,7 @@ public class Logger {
             long second = Long.parseLong(splits[0]);
             int nano = Integer.parseInt(splits[1]);
             LocalDateTime createTime = LocalDateTime.ofInstant(Instant.ofEpochSecond(second, nano), ZoneId.systemDefault());
-            target = Path.of(String.format("%s_%04d%02d%02d_%02d%02d%02d.%09d", defaultLogConf.getLogPath(),
+            target = Path.of(String.format("%s_%04d%02d%02d_%02d%02d%02d.%09d", globalLogConf.getLogPath(),
                     createTime.getYear(), createTime.getMonth().getValue(), createTime.getDayOfMonth(),
                     createTime.getHour(), createTime.getMinute(), createTime.getSecond(), createTime.getNano()));
         }
@@ -6178,7 +6205,6 @@ public class MyDateTimeUtil {
  */
 @SuppressWarnings("unused")
 public class MyFileUtil {
-
     /**
      * 复制文件目录
      *
@@ -7162,6 +7188,2552 @@ public class MyRandomUtil {
         for (int i = 0; i < length; i++)
             builder.append(charCache[localRandom.nextInt(10, 36)]);
         return builder.toString();
+    }
+}
+```
+
+## lru
+
+```java
+/**
+ * LRU实现
+ * 维护了2个链表，插入时插入链表2的头部，相当于插入整个lru的中间，
+ * 从而将老化时间缩短到一半，避免偶然访问的冷数据在lru中停留过长时间。
+ * 已在链表中的数据再次访问时将其移到链表1的头部。
+ *
+ * @author fzk
+ * @datetime 2023-05-11 22:28:10
+ */
+public abstract class LruList<K, V> {
+    public final int capacity;
+    private final NodeList<K, V> list1;
+    private final NodeList<K, V> list2;
+
+    public LruList(int capacity) {
+        if (capacity < 4 || capacity > 1024 * 1024 || (capacity & 1) != 0) {
+            throw new RuntimeException(String.format("capacity: %d, 必须为偶数, 且>=4, 且<=1024*1024", capacity));
+        }
+        this.capacity = capacity;
+        list1 = new NodeList<>();
+        list2 = new NodeList<>();
+    }
+
+    public synchronized V get(K key) {
+        V val;
+        if ((val = list1.get(key)) != null) {
+            list1.moveToHead(key);
+        } else if ((val = list2.get(key)) != null) {
+            // 从list2移除并放入list1头部
+            list2.remove(key);
+            if (isFull(list1)) {
+                // 如果list1已经满了，就移除list1末尾并放入list2头部
+                Node<K, V> l1LastNode = list1.removeLast();
+                list2.putHead(l1LastNode.key, l1LastNode.val);// 此时list2必然未满
+            }
+            // 放入list1头部
+            list1.putHead(key, val);
+        }
+        maintain();// 维护链表长度
+        return val;
+    }
+
+    public synchronized V put(K key, V val) {
+        V old = null;
+        if (list1.containsKey(key)) {
+            old = list1.replace(key, val);
+            moveToHead(key);// 移到lru队头
+        } else if (list2.containsKey(key)) {
+            old = list2.replace(key, val);
+            moveToHead(key);// 移到lru队头
+        } else {
+            // list2满了则必然则整个链表都满了
+            if (isFull(list2)) {
+                removeLast();
+            }
+            // 插入整个lru链表的中间，即list2的头部
+            list2.putHead(key, val);
+        }
+        maintain();// 维护链表长度
+        if (old != null) {// 释放资源回调
+            removeCallback(key, old);
+        }
+        // 插入回调
+        putCallback(key, val);
+        return old;
+    }
+
+    public synchronized V remove(K key) {
+        V old = null;
+        if (list1.containsKey(key)) {
+            old = list1.remove(key);
+        } else if (list2.containsKey(key)) {
+            old = list2.remove(key);
+        }
+
+        maintain();// 维护链表长度
+        if (old != null) {// 释放资源回调
+            removeCallback(key, old);
+        }
+        return old;
+    }
+
+    private void moveToHead(K key) {
+        if (list1.containsKey(key)) {
+            list1.moveToHead(key);
+        } else if (list2.containsKey(key)) {
+            // 从list2移除，放入list1头部
+            V remove = list2.remove(key);
+            if (isFull(list1)) {// list1满了则将其末尾的放入list2头部
+                Node<K, V> l1Last = list1.removeLast();
+                list2.putHead(l1Last.key, l1Last.val);
+            }
+            list1.putHead(key, remove);// 放入list1头部
+        }
+    }
+
+    private Node<K, V> removeLast() {
+        Node<K, V> last = null;
+        if (list2.size() > 0) {
+            last = list2.removeLast();
+        } else if (list1.size() > 0) {
+            last = list1.removeLast();
+        }
+        maintain();// 维护lru两个队列
+        if (last != null)// 释放资源回调
+            removeCallback(last.key, last.val);
+        return last;
+    }
+
+    /**
+     * 插入lru缓存队列成功时的回调
+     */
+    protected abstract void putCallback(K key, V val);
+
+    /**
+     * 当移除队尾时，回调此方法
+     * 可在此释放资源
+     */
+    protected abstract void removeCallback(K key, V val);
+
+    public synchronized boolean containsKey(K key) {
+        return list1.containsKey(key) || list2.containsKey(key);
+    }
+
+    // 维护list1等于list2或 list1.size()=list2.size()+1
+    private void maintain() {
+        if (list1.size() == list2.size()) {
+            return;
+        }
+        // 维护两个链表尽可能的长度相等
+        // l1比l2长超过1个，则将l1的尾部结点移到l2的头部
+        while (list1.size() - 1 > list2.size()) {
+            Node<K, V> l1Last = list1.removeLast();
+            list2.putHead(l1Last.key, l1Last.val);
+        }
+        // l2比l1长，则将l2头部结点移到l1的尾部
+        while (list2.size() > list1.size()) {
+            Node<K, V> l2Head = list2.removeHead();
+            list1.putTail(l2Head.key, l2Head.val);
+        }
+    }
+
+    public synchronized int size() {
+        return list1.size() + list2.size();
+    }
+
+    // 瞬间快照
+    public synchronized Map<K, V> kvMap() {
+        HashMap<K, V> map = new HashMap<>(list1.size() + list2.size());
+        list1.toArray().forEach((kvNode -> map.put(kvNode.key, kvNode.val)));
+        list2.toArray().forEach((kvNode -> map.put(kvNode.key, kvNode.val)));
+        return map;
+    }
+
+    public synchronized String toString() {
+        return String.format("list1: %s, list2: %s", list1.toString(), list2.toString());
+    }
+
+    private boolean isFull(NodeList<K, V> list) {
+        return list.size() >= capacity / 2;
+    }
+
+    // 清空缓存队列
+    public synchronized void clear() {
+        ArrayList<Node<K, V>> arr = new ArrayList<>(size());
+        arr.addAll(list1.toArray());
+        arr.addAll(list2.toArray());
+        list1.clear();
+        list2.clear();
+        // 移除回调
+        for (Node<K, V> node : arr) {
+            removeCallback(node.key, node.val);
+        }
+    }
+
+    public void check() {
+        if (list1.size() == list2.size() || list1.size() == list2.size() + 1) {
+            list1.checkList();
+            list2.checkList();
+        } else {
+            throw new RuntimeException(String.format("非法, list1.size: %d, list2.size: %d", list1.size(), list2.size()));
+        }
+    }
+
+    public static void main(String[] args) {
+        // 测试
+        LruList<String, Integer> lru = new LruList<>(8) {
+            @Override
+            protected void putCallback(String key, Integer val) {
+                System.out.println("入队列: " + key);
+            }
+
+            @Override
+            protected void removeCallback(String key, Integer val) {
+                System.out.println("出队列: " + key);
+            }
+        };
+        ArrayList<String> arr = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            String key = String.format("%03d", i);
+            arr.add(key);
+            lru.put(key, i);
+            lru.check();
+
+            Integer get = lru.get(String.format("%03d", ThreadLocalRandom.current().nextInt(0, arr.size())));
+            if (get != null) {
+                System.out.println("get: " + get);
+                lru.check();
+            }
+            Integer remove = lru.remove(String.format("%03d", ThreadLocalRandom.current().nextInt(0, arr.size())));
+            if (remove != null) {
+                System.out.println("remove: " + remove);
+                lru.check();
+            }
+            System.out.println(lru);
+        }
+    }
+}
+```
+
+该LRU基于两个双向链表实现，双向链表实现如下：
+
+```java
+/**
+ * 双向链表
+ *
+ * @author fzk
+ * @datetime 2023-05-11 22:01:31
+ */
+public class NodeList<K, V> {
+    private final Node<K, V> head;
+    private final Node<K, V> tail;
+    private final HashMap<K, Node<K, V>> map;
+
+    public NodeList() {
+        head = new Node<>(null, null, null, null);
+        tail = new Node<>(null, null, null, null);
+        head.next = tail;
+        tail.pre = head;
+        map = new HashMap<>();
+    }
+
+    public boolean containsKey(K key) {
+        return map.containsKey(key);
+    }
+
+    public V get(K key) {
+        Node<K, V> node = map.get(key);
+        if (node != null) {
+            return node.val;
+        }
+        return null;
+    }
+
+    /**
+     * 若存在，则更新val且移动到队头，否则新建结点移到队头
+     *
+     * @return 可能存在的旧值，不存在为null
+     */
+    public V putHead(K key, V val) {
+        V old = null;
+        if (map.containsKey(key)) {
+            // 更新并移到队头
+            old = replace(key, val);
+            moveToHead(key);
+        } else {
+            Node<K, V> node = new Node<>(head, head.next, key, val);
+            // 放入map
+            map.put(key, node);
+            // 插入队首
+            head.next.pre = node;
+            head.next = node;
+        }
+        return old;
+    }
+
+    /**
+     * 若存在，则更新val且移动到队尾，否则新建结点移到队尾
+     *
+     * @return 可能存在的旧值，不存在为null
+     */
+    public V putTail(K key, V val) {
+        V old = null;
+        if (map.containsKey(key)) {
+            // 更新并移到队尾
+            old = replace(key, val);
+            moveToTail(key);
+        } else {
+            Node<K, V> node = new Node<>(tail.pre, tail, key, val);
+            // 放入map
+            map.put(key, node);
+            // 插入队尾
+            tail.pre.next = node;
+            tail.pre = node;
+        }
+        return old;
+    }
+
+    public V replace(K key, V val) {
+        V old = null;
+        Node<K, V> node = map.get(key);
+        if (node != null) {
+            old = node.val;
+            node.val = val;
+        }
+        return old;
+    }
+
+    public void moveToHead(K key) {
+        Node<K, V> node = map.get(key);
+        if (node != null) {
+            // 不在队头才移动，否则会引用循环
+            if (head.next != node) {
+                // 先将node从原来位置移除，再重新加入
+                removeNode(node);
+
+                node.pre = head;
+                node.next = head.next;
+                head.next.pre = node;
+                head.next = node;
+            }
+        }
+    }
+
+    public void moveToTail(K key) {
+        Node<K, V> node = map.get(key);
+        if (node != null) {
+            // 不在队尾才移动，否则会引用循环
+            if (tail.pre != node) {
+                // 先将node从原本位置移除，再重新加入
+                removeNode(node);
+                node.pre = tail.pre;
+                node.next = tail;
+                tail.pre.next = node;
+                tail.pre = node;
+            }
+        }
+    }
+
+    public Node<K, V> removeHead() {
+        if (size() == 0) {
+            return null;
+        }
+        Node<K, V> node = head.next;
+        // 从map移除
+        map.remove(node.key);
+        // 从链表移除
+        removeNode(node);
+        return node;
+    }
+
+    public Node<K, V> removeLast() {
+        if (map.size() == 0) {
+            return null;
+        }
+        Node<K, V> node = tail.pre;
+        // 从map移除
+        map.remove(node.key);
+        // 从链表移除
+        removeNode(node);
+        return node;
+    }
+
+    public V remove(K key) {
+        // 从map移除
+        Node<K, V> node = map.remove(key);
+        if (node != null) {
+            // 从链表移除
+            removeNode(node);
+            return node.val;
+        }
+        return null;
+    }
+
+    // 从链表中删除该节点
+    private void removeNode(Node<K, V> node) {
+        node.pre.next = node.next;
+        node.next.pre = node.pre;
+        node.pre = null;
+        node.next = null;
+    }
+
+    public int size() {
+        return map.size();
+    }
+
+    // 瞬间快照
+    public ArrayList<Node<K, V>> toArray() {
+        ArrayList<Node<K, V>> result = new ArrayList<>(map.size());
+        if (map.size() == 0) {
+            return new ArrayList<>();
+        }
+        Node<K, V> cur = head;
+        while (cur != tail) {
+            result.add(new Node<>(null, null, cur.key, cur.val));
+            cur = cur.next;
+        }
+        return result;
+    }
+
+    public void clear() {
+        map.clear();
+        head.next = tail;
+        tail.pre = head;
+    }
+
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append('{');
+        Node<K, V> node = head.next;
+        while (node != tail) {
+            sb.append(node.key).append(": ").append(node.val).append(", ");
+            node = node.next;
+        }
+        if (sb.length() > 2) {
+            sb.delete(sb.length() - 2, sb.length());
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    public void checkList() {
+        HashSet<Node<K, V>> set = new HashSet<>();
+        ArrayList<Node<K, V>> list = new ArrayList<>();
+        Node<K, V> node = head.next;
+        // 从头部到尾巴检查
+        while (node != tail) {
+            list.add(node);
+            boolean add = set.add(node);
+            if (!add) {
+                throw new RuntimeException("非法");
+            }
+            node = node.next;
+        }
+        if (list.size() != map.size()) {
+            throw new RuntimeException("非法");
+        }
+        // 从尾部到头部检查
+        node = tail.pre;
+        int index = list.size() - 1;
+        while (node != head) {
+            if (!set.contains(node)) {
+                throw new RuntimeException("非法");
+            }
+            if (node != list.get(index)) {
+                throw new RuntimeException("非法");
+            }
+            node = node.pre;
+            index--;
+        }
+    }
+
+    public static class Node<K, V> {
+        public Node<K, V> pre;
+        public Node<K, V> next;
+        public K key;
+        public V val;
+
+        public Node(Node<K, V> pre, Node<K, V> next, K key, V val) {
+            this.pre = pre;
+            this.next = next;
+            this.key = key;
+            this.val = val;
+        }
+    }
+}
+```
+
+## 文件btree
+
+基于文件实现的B+树，目前读写操作使用读写锁隔离，考虑如何优化为页锁？
+
+![image-20230618234134860](C:\Users\76771\Desktop\vscode_workspace\notebook\Java\JavaSE\JavaSE.assets\image-20230618234134860.png)
+
+![btree索引页缓存](C:\Users\76771\Desktop\vscode_workspace\notebook\Java\JavaSE\JavaSE.assets\btree索引页缓存.png)
+
+### PageCache
+
+首先基于上诉的lru实现，简单实现页面缓存链表：PageCache.java
+
+```java
+/**
+ * 基于LRU实现的页缓存机制
+ *
+ * @author zhike.feng
+ * @datetime 2023-06-15 22:00:01
+ */
+public abstract class PageCache extends LruList<Integer, Page> {
+    public PageCache(int capacity) {
+        super(capacity);
+    }
+
+    /**
+     * 插入lru缓存队列成功时的回调
+     */
+    @Override
+    protected void putCallback(Integer pageIdx, Page page) {
+        page.isInCache = true;
+        Logger.debug(String.format("页面放入缓存, pageIdx: %d", pageIdx));
+    }
+
+    /**
+     * 当移除队尾时，回调此方法
+     * 可在此释放资源
+     */
+    @Override
+    protected void removeCallback(Integer pageIdx, Page page) {
+        page.isInCache = false;
+        if (page.deleted) {
+            // 删除的页面无需资源释放，即落盘
+            Logger.debug(String.format("已经删除的页面pageIdx: %d从缓存移除", pageIdx));
+            return;
+        }
+        Logger.debug(String.format("页面移除缓存, pageIdx: %d", pageIdx));
+        // 页面未删除，需要释放资源，即将其落盘
+        release(pageIdx, page);
+    }
+
+    /**
+     * 资源释放回调，当缓存中的页面移除缓存时，且页面未删除将调用此方法落盘
+     */
+    protected abstract void release(Integer pageIdx, Page page);
+}
+```
+
+该页缓存继承LRU，再其将缓存页面移除时，调用release()方法释放资源，其释放实现细节交由BTreeFile.java实现。
+
+### Page
+
+每一页由Page.java实现，每页默认4KB大小，分为页头和kv数据区。页面可以分为索引页和叶子页，索引页的kv对中key为孩子页的minKey，val为孩子页id即pageIdx。叶子页的kv对中的val为key对应的数据。
+
+pageIdx：页面id，页的下标，从1开始，因为已将0作为非法值。
+
+pageType：页类型：索引页、叶子页（数据页）。索引页和叶子页都维护了双向链表。
+
+pageUsedSize：记录页面已使用空间 = 页头长度+kv数据长度。
+
+```java
+/**
+ * 基于文件的B+树，实现了LRU缓存控制
+ *
+ * @author fzk
+ * @datetime 2023-05-12 23:24:26
+ */
+public class Page {
+    private static final int BinarySearchThreshold = 8;// 二分查找阈值，数组较小时遍历平均情况下会比较次数更少
+    // 将0作为非法页下标，这是因为文件中默认值都是0，如果pageIdx从0开始，会造成含义不清
+    public static final int Invalid_PageIdx = 0;// 非法页下标, 注意缓存页的页下标为0
+    public static final int Index_Page_Type = 1;// 索引页
+    public static final int Leaf_Page_Type = 2;// 叶子页
+    @SuppressWarnings("unused")
+    public static final int Tmp_Page_Type = 3;// 缓存页，暂时未用
+
+    public static final int Page_Size = 4 * 1024;// 默认一页4KB
+    // 一页内包含的key数量有2个限制：
+    // pageUsedSize<=Page_size 且 keyCount<=Key_Max_Num
+    public static final int Key_Max_Num = 8;// 页内最多包含key数量
+
+    // ----------------------page header----------------
+    public int pageType;// 页类型: 1为索引页, 2为叶子页
+    /**
+     * 页id
+     * 本页下标，从1开始使用，0是非法值，
+     * 这是因为文件中默认值都是0，如果pageIdx从0开始，会造成含义不清
+     */
+    public int pageIdx;
+    public int parentPageIdx;// 父页面下标
+
+    public static void directWriteParentPageIdx(FileChannel fileChannel, long pagePos, int parentPageIdx) throws IOException {
+        absWritePageHeader(fileChannel, pagePos, parentPageIdx, 4 * 2);
+    }
+
+    public int keyCount;// key的数量
+    public int prePageIdx = Invalid_PageIdx;// 索引页面和页子页面都维护双向链表
+
+    public static void directWritePrePageIdx(FileChannel fileChannel, long pagePos, int prePageIdx) throws IOException {
+        absWritePageHeader(fileChannel, pagePos, prePageIdx, 4 * 4);
+    }
+
+    public int nextPageIdx = Invalid_PageIdx;// 索引页面和页子页面都维护双向链表
+
+    public static void directWriteNextPageIdx(FileChannel fileChannel, long pagePos, int nextPageIdx) throws IOException {
+        absWritePageHeader(fileChannel, pagePos, nextPageIdx, 4 * 5);
+    }
+
+    public int pageUsedSize = Page_Header_Meta_Size;// 页面已用字节数
+
+    /**
+     * 直接在文件中更新此页的某个页头
+     * 注意：如果此页已经被读取到内存，缓存中的页无法感知文件里的内容已变化，这个问题需要注意
+     * 因此这个方法只能在缓存中不存在此页时才可以使用, 目的在于避免读取页到缓存中
+     */
+    private static void absWritePageHeader(FileChannel fileChannel, long pagePos, int val, int valOff) throws IOException {
+        ByteBuffer buf = ByteBuffer.allocate(4);
+        buf.putInt(val);
+        buf.flip();// 翻转待读
+        fileChannel.write(buf, pagePos + valOff);
+    }
+
+    public static final int Page_Header_Meta_Size = 4 * 7;// 页头大小，页元信息
+    // ----------------------page header----------------
+
+    public BEntry[] entries;
+    public volatile boolean modified = false;// 标记此页面是否发生修改
+    public volatile boolean isInCache = false;// 标记是否位于lru缓存中
+    public volatile boolean deleted = false;// 是否已经从B+树中删除了
+
+    public Page(int pageType, int pageIdx, int parentPageIdx) {
+        this.pageType = pageType;
+        this.pageIdx = pageIdx;
+        this.parentPageIdx = parentPageIdx;
+        this.keyCount = 0;
+        this.entries = new BEntry[Key_Max_Num];
+    }
+
+    /**
+     * 查找key的索引, 如果不存在则返回其应该插入的索引
+     *
+     * @return 返回存在时的索引或不存在时应该插入的索引
+     */
+    public SearchResult searchKeyIndex(String key) {
+        if (keyCount <= 0) return new SearchResult(false, 0);
+        // 二分查找阈值，数组较小时遍历平均情况下会比较次数更少
+        if (keyCount >= BinarySearchThreshold) {
+            int left = 0, right = keyCount - 1;
+            while (left <= right) {
+                int mid = (left + right) >> 1;
+                int cmp = key.compareTo(entries[mid].key);
+                if (cmp < 0) right = mid - 1;
+                else if (cmp == 0) return new SearchResult(true, mid);
+                else left = mid + 1;
+            }
+            return new SearchResult(false, left);
+        } else {
+            // 遍历
+            for (int i = 0; i < keyCount; i++) {
+                int cmp = key.compareTo(entries[i].key);
+                if (cmp == 0) {
+                    return new SearchResult(true, i);
+                } else if (cmp < 0) {// 找到了第一个比key大的作为插入索引
+                    return new SearchResult(false, i);
+                }
+            }
+            // 都比key小，则最右边为插入索引
+            return new SearchResult(false, keyCount);
+        }
+    }
+
+    // 不存在返回null
+    public Long get(String key) {
+        SearchResult result = searchKeyIndex(key);
+        if (result.exists) {
+            return entries[result.index].val;
+        }
+        return null;
+    }
+
+    /**
+     * 添加到页内, 存在相同key时覆盖
+     *
+     * @param key 插入的key
+     * @param val 子页面页下标或文件存储元信息offset
+     * @return 存在旧值返回，否则null
+     */
+    public Long put(String key, long val, BTreeFile btree) throws IOException {
+        // 1.找到插入的索引位置
+        SearchResult result = searchKeyIndex(key);
+        Long old = null;
+        boolean updateMinKeyFlag = false;
+        if (result.exists) {
+            // 存在旧值，直接更新
+            old = this.entries[result.index].val;
+            this.entries[result.index].val = val;
+            this.modified = true;// 标记页面已经修改
+            Logger.debug(String.format("更新key: %s, oldVal: %d, newVal: %d", key, old, val));
+        } else {
+            // 新key，插入
+            byte[] data = key.getBytes(StandardCharsets.UTF_8);
+            int keyLen = data.length;
+            int index = result.index;// 待插入索引
+            // 2.检查
+            if (!canInsert(key)) {
+                throw new RuntimeException(String.format(
+                        "向page插入key时检查错误, key槽写满了或页面空间不足, keyCount: %d, pageUsedSize: %d, key数据长度: %d",
+                        keyCount, pageUsedSize, keyLen));
+            }
+
+            // 若minKey更新需要维护父节点指向此节点的key,
+            // 若keyCount为0说明是空白页, 此时父子结点关系还未建立，父节点指向子结点的key不在这里维护
+            if (index == 0 && keyCount > 0) {
+                updateMinKeyFlag = true;
+            }
+
+            // 移动并插入新key
+            BEntry entry = new BEntry(key, val);
+            System.arraycopy(entries, index, entries, index + 1, keyCount - index);
+            entries[index] = entry;
+
+            // 更新页头的key数量和已使用空间
+            keyCount++;
+            increasePageUsedSize(data);
+            this.modified = true;// 标记页面已经修改
+        }
+
+        // 更新minKey
+        if (updateMinKeyFlag) {
+            String oldMinKey = entries[1].key;
+            btree.minKeyUpdated(this, oldMinKey, key);
+        }
+        return old;
+    }
+
+    /**
+     * 替换页面的key, 一般用于minKey更新
+     * 若替换的key为minKey则返回0可用于递归操作minKey更新
+     *
+     * @param oldKey 旧key，必须存在否则报错
+     * @param newKey 替换的新key
+     * @return 替换的oldKey在数组的索引
+     */
+    public int replaceKey(String oldKey, String newKey) {
+        SearchResult result = searchKeyIndex(oldKey);
+        if (!result.exists) {
+            throw new RuntimeException(String.format("非法替换key, oldKey: %s, newKey: %s, page: %s", oldKey, newKey, this));
+        }
+        // 需要保证该key替换后不影响顺序
+        if (result.index > 0 && newKey.compareTo(entries[result.index - 1].key) <= 0) {
+            throw new RuntimeException(String.format("非法替换key, oldKey: %s, newKey: %s, 新key替换后比前继key小, page: %s",
+                    oldKey, newKey, this.toString()));
+        }
+        if (result.index < (keyCount - 1) && newKey.compareTo(entries[result.index + 1].key) >= 0) {
+            throw new RuntimeException(String.format("非法替换key, oldKey: %s, newKey: %s, 新key替换后比后继key大, page: %s",
+                    oldKey, newKey, this.toString()));
+        }
+
+        entries[result.index].key = newKey;// 换key
+        // 更新页头已使用空间
+        decreasePageUsedSize(oldKey);
+        increasePageUsedSize(newKey);
+        this.modified = true;// 标记页面发生了修改
+
+        // 若替换的key为索引0, 递归触发minKey更改
+        return result.index;
+    }
+
+    public boolean canInsert(String key) {
+        // key槽未写满且页面空间充足
+        return this.keyCount < Key_Max_Num && canWriteKey(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public boolean canWriteKey(byte[] key) {
+        // 页面空间充足
+        return this.pageUsedSize + 4 + key.length + 8 <= Page_Size;
+    }
+
+    public boolean isIndexPage() {
+        return pageType == Index_Page_Type;
+    }
+
+    public boolean isLeafPage() {
+        return pageType == Leaf_Page_Type;
+    }
+
+    public String minKey() {
+        if (keyCount <= 0) {
+            throw new ArrayIndexOutOfBoundsException(String.format("当前页面keyCount为0, pageIdx: %d", pageIdx));
+        }
+        return entries[0].key;
+    }
+
+    public String maxKey() {
+        if (keyCount <= 0) {
+            throw new ArrayIndexOutOfBoundsException(String.format("当前页面keyCount为0, pageIdx: %d", pageIdx));
+        }
+        return entries[keyCount - 1].key;
+    }
+
+    public boolean hasPrePage() {
+        return prePageIdx > Page.Invalid_PageIdx;
+    }
+
+    public boolean hasNextPage() {
+        return nextPageIdx > Page.Invalid_PageIdx;
+    }
+
+    public void increasePageUsedSize(String key) {
+        increasePageUsedSize(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public void increasePageUsedSize(byte[] key) {
+        pageUsedSize += (4 + key.length + 8);
+    }
+
+    public void decreasePageUsedSize(String key) {
+        decreasePageUsedSize(key.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public void decreasePageUsedSize(byte[] key) {
+        pageUsedSize -= (4 + key.length + 8);
+    }
+
+    public ByteBuffer serialize() {
+        ByteBuffer buffer = ByteBuffer.allocate(Page_Size);
+        // 1.写页头
+        buffer.putInt(pageType);
+        buffer.putInt(pageIdx);
+        buffer.putInt(parentPageIdx);
+        buffer.putInt(keyCount);
+        buffer.putInt(prePageIdx);
+        buffer.putInt(nextPageIdx);
+        buffer.putInt(pageUsedSize);
+
+        // 2.写key和val
+        for (int i = 0; i < keyCount; i++) {
+            BEntry entry = entries[i];
+            byte[] bytes = entry.key.getBytes(StandardCharsets.UTF_8);
+
+            buffer.putInt(bytes.length);// key的长度
+            buffer.put(bytes);
+            buffer.putLong(entry.val);
+        }
+        if (buffer.position() != pageUsedSize) {
+            throw new RuntimeException(String.format("pageIdx: %d的页面的pageUsedSize: %d 不等于序列化后的字节数: %d", pageIdx, pageUsedSize, buffer.position()));
+        }
+        // 3.填充空白字节
+        if (pageUsedSize < Page_Size) {
+            byte[] padding = new byte[Page_Size - pageUsedSize];
+            buffer.put(padding);
+        }
+        buffer.flip();// 翻转待读
+        return buffer;
+    }
+
+    public static Page deserialize(ByteBuffer buffer) {
+        myAssert(buffer.remaining() == Page_Size, String.format("反序列化时buffer的可读字节: %d 不是页面大小: %d", buffer.remaining(), Page_Size));
+        int startPos = buffer.position();
+        // 1.读页头
+        int pageType = buffer.getInt();
+        int pageIdx = buffer.getInt();
+        int parentPageIdx = buffer.getInt();
+        int keyCount = buffer.getInt();
+        int prePageIdx = buffer.getInt();
+        int nextPageIdx = buffer.getInt();
+        int pageUsedSize = buffer.getInt();
+
+        BEntry[] entries = new BEntry[Key_Max_Num];
+        // 2.读key和val
+        for (int i = 0; i < keyCount; i++) {
+            int keyLen = buffer.getInt();// 读key长度
+            if (keyLen <= 0) {
+                throw new RuntimeException(String.format("pageIdx: %d即将反序列化, i: %d, 非法keyLen: %d", pageIdx, i, keyLen));
+            }
+            byte[] bytes = new byte[keyLen];
+            buffer.get(bytes, 0, keyLen);
+            String key = new String(bytes, StandardCharsets.UTF_8);
+            long val = buffer.getLong();
+            entries[i] = new BEntry(key, val);
+        }
+        int endPos = buffer.position();
+
+        myAssert(endPos - startPos == pageUsedSize, String.format("反序列后，buffer使用的字节数: %d 必须和页使用字节数: %d 一致, startPos: %d, endPos: %d",
+                endPos - startPos, pageUsedSize, startPos, endPos));
+
+        Page page = new Page(pageType, pageIdx, parentPageIdx);
+        page.keyCount = keyCount;
+        page.prePageIdx = prePageIdx;
+        page.nextPageIdx = nextPageIdx;
+        page.pageUsedSize = pageUsedSize;
+        page.entries = entries;
+        return page;
+    }
+
+    @Data
+    public static class BEntry {
+        public String key;
+        public long val;// 可能是pageIdx或是offset
+
+        public BEntry(String key, long val) {
+            this.key = key;
+            this.val = val;
+        }
+    }
+
+    public static class SearchResult {
+        public boolean exists;
+        public int index;// key存在时为其索引，不存在时，index为key可能插入的位置
+
+        public SearchResult(boolean exists, int index) {
+            this.exists = exists;
+            this.index = index;
+        }
+    }
+
+    public String getPageHeaderString() {
+        return "{pageIdx=" + pageIdx +
+                ", pageType=" + pageType +
+                ", parentPageIdx=" + parentPageIdx +
+                ", keyCount=" + keyCount +
+                ", prePageIdx=" + prePageIdx +
+                ", nextPageIdx=" + nextPageIdx +
+                ", pageUsedSize=" + pageUsedSize +
+                '}';
+    }
+
+    public String getKeysString() {
+        if (keyCount <= 0) {
+            return "{}";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append('{');
+        for (int i = 0; i < keyCount; i++) {
+            sb.append(entries[i].key).append(',').append(' ');
+        }
+        sb.delete(sb.length() - 2, sb.length());
+        sb.append('}');
+        return sb.toString();
+    }
+
+    public String getKeyValsString() {
+        if (keyCount <= 0) {
+            return "{}";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append('{');
+        for (int i = 0; i < keyCount; i++) {
+            sb.append('{').append(entries[i].key).append(':').append(entries[i].val).append('}').append(", ");
+        }
+        sb.delete(sb.length() - 2, sb.length());
+        sb.append('}');
+        return sb.toString();
+    }
+
+    @Override
+    public String toString() {
+        return "page{" +
+                "header=" + getPageHeaderString() +
+                ", keys=" + getKeyValsString() +
+                "}";
+    }
+
+    public void checkPage() {
+        // 检查页面是否合法
+        // 检查顺序排列: k1<k2
+        for (int i = 1; i < keyCount; i++) {
+            if (entries[i - 1].key.compareTo(entries[i].key) >= 0) {
+                throw new RuntimeException(String.format("页内key顺序错误, pageIdx: %d, %d_key: %s, %d_key: %s", pageIdx, i - 1, entries[i - 1].key, i, entries[i].key));
+            }
+        }
+        // 剩余的key槽都必须为null
+        for (int i = keyCount; i < Key_Max_Num; i++) {
+            if (entries[i] != null) {
+                throw new RuntimeException(String.format("存在某个key槽不为空, pageIdx: %d, keyCount: %d, i: %d, key: %s", pageIdx, keyCount, i, entries[i].key));
+            }
+        }
+
+        // 检查页头
+        myAssert(pageType == Page.Index_Page_Type || pageType == Page.Leaf_Page_Type, String.format("非法pageType: %d", pageType));
+        myAssert(pageUsedSize >= Page_Header_Meta_Size, String.format("非法pageUsedSize: %d", pageUsedSize));
+    }
+
+    public static void myAssert(boolean flag, String msg) {
+        if (!flag) throw new RuntimeException(msg);
+    }
+}
+```
+
+### BTree
+
+整个文件B+树由BTreeFile.java实现，它分为文件头和页数据区，页头中的位图表明那些页在使用。
+
+一缓：就是lru缓存，暂存热点页。
+
+二缓：存放更新操作过程中从lru缓存丢弃的页，必须暂存因为它们很可能还在被其它引用使用。在更新操作中，可能会有部分页面从一缓中移除，若此时直接将这些页面落盘，这些页面很可能在后续还在被更新，因此最好将其先暂存到二缓，在更新操作结束后再统一落盘。**二缓只对于更新操作可见**。
+
+flushState和落盘线程：
+
+- flushState记录刷盘任务是否提交以及刷盘状态
+- 落盘线程执行刷盘延时任务
+- 更新操作结束后，可以同步落盘，这里采用更新结束1s异步刷盘，提交刷盘任务1s后执行，这1s内若发生多次更新操作，都只会提交1个刷盘任务，有点**类似组提交**吧
+
+```java
+/**
+ * 基于文件的B+树，实现了LRU缓存控制
+ * TODO 改为维护最大key
+ *
+ * @author fzk
+ * @datetime 2023-05-12 23:24:00
+ */
+public class BTreeFile implements AutoCloseable {
+    private final Path path;
+    private FileChannel fileChannel;
+    private final FileHeader fileHeader;
+    private final PageCache cache;// 1缓
+    private final ReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final ScheduledThreadPoolExecutor scheduledExecutor = new ScheduledThreadPoolExecutor(1);// 落盘线程
+    private final AtomicBoolean updateState = new AtomicBoolean(false);// 当前BTree是否处于更新状态
+    // 常态: 0
+    // 1 --> 提交落盘任务
+    // 2 --> 落盘任务执行中
+    private final AtomicInteger flushState = new AtomicInteger(0);
+    private final ConcurrentHashMap<Integer, Page> updateMap = new ConcurrentHashMap<>();// 2缓, 存放更新操作过程中从lru缓存丢弃的页，必须暂存因为它们很可能还在被其它引用使用
+
+    private class FileHeader {
+        private static final int Page_Max_Num = 1 + Page.Key_Max_Num + Page.Key_Max_Num * Page.Key_Max_Num + Page.Key_Max_Num * Page.Key_Max_Num * Page.Key_Max_Num;// 限制4层高B+树
+        public static final int BitSetLen = (Page_Max_Num + 1 + 7) / 8;// 位图的长度(字节数)，+1是因为第0页不使用非法
+        public static final int File_Header_Size = BitSetLen + 4 + 4 + 4;// 文件头长度
+        private BitSet bitSet;// 页面使用标记位图
+        private int rootPageIdx;// 根结点页下标
+        private int headPageIdx;// 叶子双向链表头页下标
+        private int pageCount = 0;// 已使用页数量
+
+        public ByteBuffer serialize() {
+            ByteBuffer buffer = ByteBuffer.allocate(File_Header_Size);
+            byte[] bitBytes = bitSet.toByteArray();
+            buffer.put(bitBytes);
+            if (bitBytes.length < BitSetLen) {
+                byte[] padding = new byte[BitSetLen - bitBytes.length];
+                buffer.put(padding);
+            }
+            buffer.putInt(rootPageIdx);
+            buffer.putInt(headPageIdx);
+            buffer.putInt(pageCount);
+            buffer.flip();// 翻转待读
+            return buffer;
+        }
+
+        public void clear() {
+            this.bitSet.clear();
+            this.rootPageIdx = Page.Invalid_PageIdx;
+            this.headPageIdx = Page.Invalid_PageIdx;
+            this.pageCount = 0;
+        }
+
+        public void flushHeader() {
+            ByteBuffer headerBuf = serialize();
+            long pos = 0L;
+            while (headerBuf.hasRemaining()) {
+                try {
+                    pos += fileChannel.write(headerBuf, pos);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "FileHeader{" +
+                    "bitSet=" + bitSet +
+                    ", rootPageIdx=" + rootPageIdx +
+                    ", headPageIdx=" + headPageIdx +
+                    ", pageCount=" + pageCount +
+                    '}';
+        }
+    }
+
+    public BTreeFile(Path path, int cachePageCount) throws IOException {
+        this.path = path;
+        MyFileUtil.ensureDirsAndFile(path);
+        this.fileChannel = FileChannel.open(path, Set.of(StandardOpenOption.READ, StandardOpenOption.WRITE));
+        this.cache = new PageCache(cachePageCount) {
+            @Override
+            protected void release(Integer key, Page page) {
+                // 如果出现并发会非常的危险，比如正在序列化，其它线程修改了已经序列化的属性字段，那将忽略，会出现数据不一致
+                if (updateState.get()) {
+                    updateMap.putIfAbsent(key, page);
+                } else {
+                    if (page.modified) {
+                        flushPage(page);
+                    }
+                }
+            }
+        };
+        this.fileHeader = new FileHeader();
+        if (fileChannel.size() == 0) {
+            // 初始化文件头
+            this.fileHeader.bitSet = new BitSet();
+            this.fileHeader.rootPageIdx = Page.Invalid_PageIdx;
+            this.fileHeader.headPageIdx = Page.Invalid_PageIdx;
+            this.fileHeader.pageCount = 0;// 已使用页数量
+        } else {
+            // 从文件初始化文件头
+            ByteBuffer buffer = ByteBuffer.allocate(FileHeader.File_Header_Size);
+            do {
+                int readLen = fileChannel.read(buffer, buffer.position());
+                if (readLen == -1) {
+                    throw new RuntimeException(String.format("超出文件范围了? fileSize: %d", fileChannel.size()));
+                }
+            } while (buffer.hasRemaining());
+
+            buffer.flip();// 翻转待读
+            // 读取位图
+            byte[] bitBytes = new byte[FileHeader.BitSetLen];
+            buffer.get(bitBytes);
+            this.fileHeader.bitSet = BitSet.valueOf(bitBytes);
+            this.fileHeader.rootPageIdx = buffer.getInt();
+            this.fileHeader.headPageIdx = buffer.getInt();
+            this.fileHeader.pageCount = buffer.getInt();
+        }
+    }
+
+    /**
+     * @param key 查询的key，不能为空
+     * @return 有则返回，没有则为null
+     */
+    public Long get(String key) throws IOException {
+        if (key == null || key.length() == 0) {
+            throw new IllegalArgumentException("key不能为空");
+        }
+        rwLock.readLock().lock();
+        try {
+            // 如果还未初始化
+            if (fileHeader.rootPageIdx <= Page.Invalid_PageIdx) {
+                myAssert(fileHeader.headPageIdx <= Page.Invalid_PageIdx && fileHeader.pageCount == 0, String.format("rootPageIdx为0，但是headerPageIdx为: %s, pageCount: %d", fileHeader.headPageIdx, fileHeader.pageCount));
+                return null;
+            }
+            Page root = getPage(fileHeader.rootPageIdx);
+            Page leafPage = findLeafPageByKey(root, key);
+            return leafPage.get(key);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * 获取此前缀匹配的总数量
+     * TODO 优化: 从索引页开始匹配
+     *
+     * @param prefix 前缀, 这个不要在写成`abc*`的形式，要个`*`去掉
+     * @return 匹配数量
+     */
+    public int prefixSearchCount(String prefix) {
+        if (prefix == null || prefix.length() == 0) {
+            throw new IllegalArgumentException("前缀模糊查询前缀不能为空");
+        }
+        rwLock.readLock().lock();
+        try {
+            int count = 0;
+            // 1.找到开始搜索的叶子节点
+            // 如果还未初始化
+            if (fileHeader.rootPageIdx <= Page.Invalid_PageIdx) {
+                myAssert(fileHeader.headPageIdx <= Page.Invalid_PageIdx && fileHeader.pageCount == 0, String.format("rootPageIdx为0，但是headerPageIdx为: %s, pageCount: %d", fileHeader.headPageIdx, fileHeader.pageCount));
+                return count;
+            }
+            Page root = getPage(fileHeader.rootPageIdx);
+            Page curPage = findLeafPageByKey(root, prefix);
+            // 获取prefix在此叶子页存在时的槽索引或不存在时应该插入的槽索引, 总之从其开始都是满足的
+            int curIndex = curPage.searchKeyIndex(prefix).index;
+            // 先根据下一页的minKey来判断是否当前页都是匹配的
+            while (curPage.hasNextPage()) {
+                Page nextPage = getPage(curPage.nextPageIdx);
+                if (nextPage.minKey().startsWith(prefix)) {
+                    count += (curPage.keyCount - curIndex);// 这一页剩下的key都匹配
+                    curIndex = 0;
+                    curPage = nextPage;
+                } else {
+                    break;
+                }
+            }
+            // 计算最后匹配的这页有多少个key匹配
+            while (curIndex < curPage.keyCount) {
+                if (curPage.entries[curIndex].key.startsWith(prefix)) {
+                    count++;
+                } else break;
+                curIndex++;
+            }
+            return count;
+        } catch (IOException e) {
+            Logger.error(String.format("b+树出现了io出错，前缀搜索出错, prefix: %s, io err: %s", prefix, e));
+            throw new RuntimeException(e);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+
+    }
+
+    /**
+     * 前缀模糊查找
+     *
+     * @param prefix 前缀, 这个不要在写成`abc*`的形式，要个`*`去掉
+     * @param offset 偏移量
+     * @param limit  查询最多条数
+     * @return 没有则为空集合, 不会返回null
+     */
+    public ArrayList<Page.BEntry> prefixSearch(String prefix, int offset, int limit) {
+        if (prefix == null || prefix.length() == 0) {
+            throw new IllegalArgumentException("前缀模糊查询前缀不能为空");
+        }
+        if (offset < 0 || limit <= 0) {
+            throw new IllegalArgumentException(String.format("前缀prefix: %s 模糊查询参数错误, offset: %d, limit: %d", prefix, offset, limit));
+        }
+        rwLock.readLock().lock();
+        try {
+            ArrayList<Page.BEntry> result = new ArrayList<>();
+            // TODO 计算total，提前比较
+            // 1.找到开始搜索的叶子节点
+            // 如果还未初始化
+            if (fileHeader.rootPageIdx <= Page.Invalid_PageIdx) {
+                myAssert(fileHeader.headPageIdx <= Page.Invalid_PageIdx && fileHeader.pageCount == 0, String.format("rootPageIdx为0，但是headerPageIdx为: %s, pageCount: %d", fileHeader.headPageIdx, fileHeader.pageCount));
+                return result;
+            }
+            Page root = getPage(fileHeader.rootPageIdx);
+            Page curPage = findLeafPageByKey(root, prefix);
+            // 获取prefix在此叶子页存在时的槽索引或不存在时应该插入的槽索引, 总之从其开始都是满足的
+            int curIndex = curPage.searchKeyIndex(prefix).index;
+            // 2.先跳过offset个
+            if (offset > 0) {
+                int needSkipped = offset;
+                while (needSkipped > 0) {
+                    // 就在这一页
+                    if (curIndex + needSkipped < curPage.keyCount) {
+                        curIndex += needSkipped;
+                        needSkipped = 0;
+                    } else {
+                        // 跳过这页剩下的key
+                        needSkipped -= (curPage.keyCount - curIndex);
+                        if (!curPage.hasNextPage()) {// 没有下一页则直接返回
+                            return result;
+                        }
+                        curIndex = 0;// 下一页第一个key
+                        curPage = getPage(curPage.nextPageIdx);// 下一页
+                    }
+                }
+            }
+            // 3.匹配key
+            for (int i = 0; i < limit; i++) {
+                if (curIndex >= curPage.keyCount) {
+                    //  这页匹配完了，下一页
+                    if (!curPage.hasNextPage()) {
+                        return result;// 没有下一页直接返回
+                    }
+                    curIndex = 0;// 下一页第一个key
+                    curPage = getPage(curPage.nextPageIdx);// 下一页
+                }
+                String key = curPage.entries[curIndex].key;
+                if (!key.startsWith(prefix)) {
+                    // key不匹配说明已经没有可以匹配的key了则直接返回
+                    return result;
+                }
+                long val = curPage.entries[curIndex].val;
+                result.add(new Page.BEntry(key, val));
+                curIndex++;
+            }
+            return result;
+        } catch (IOException e) {
+            Logger.error(String.format("b+树出现了io出错，前缀搜索出错, prefix: %s, offset: %d, limit: %d, io err: %s", prefix, offset, limit, e));
+            throw new RuntimeException(e);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * 添加key到文件B+树内, 存在相同key时覆盖
+     *
+     * @param key 插入的key，不能为空
+     * @param val 子页面页下标或文件存储元信息offset
+     * @return 返回可能存在的旧值或null
+     */
+    public Long put(String key, long val) throws IOException {
+        if (key == null || key.length() == 0) {
+            throw new IllegalArgumentException("key不能为空");
+        }
+        rwLock.writeLock().lock();
+        updateState.set(true);// 进入更新状态
+        try {
+            Page root;
+            // 需要初始化根节点页面
+            if (fileHeader.rootPageIdx <= Page.Invalid_PageIdx) {
+                myAssert(fileHeader.headPageIdx <= Page.Invalid_PageIdx && fileHeader.pageCount == 0, String.format("rootPageIdx为0，但是headerPageIdx为: %s, pageCount: %d", fileHeader.headPageIdx, fileHeader.pageCount));
+                root = newEmptyPage(Page.Leaf_Page_Type, Page.Invalid_PageIdx);
+            } else {
+                root = getPage(fileHeader.rootPageIdx);
+            }
+            // 1.找到待插入的叶子页
+            Page leafPage = findLeafPageByKey(root, key);
+            // 2.插入
+            Long old;
+            if (leafPage.canInsert(key)) {// 直接插入
+                old = leafPage.put(key, val, this);
+            } else {
+                // 页分裂
+                Page rightPage = splitPage(leafPage);
+                // 判断插入哪一页
+                old = key.compareTo(rightPage.minKey()) >= 0 ?
+                        rightPage.put(key, val, this) :
+                        leafPage.put(key, val, this);
+            }
+            return old;
+        } finally {
+            flushUpdateMap();// 必须立刻落盘更新2缓的脏页，避免其它线程后续的读操作看不见更新的问题
+            updateState.set(false);// 退出更新状态
+            rwLock.writeLock().unlock();
+            // 提交刷盘任务
+            submitFlushTask();
+        }
+    }
+
+    /**
+     * 从树中删除key并返回其值
+     *
+     * @param key 删除key
+     * @return 如果存在则返回值，否则null
+     */
+    public Long remove(String key) throws IOException {
+        if (key == null || key.length() == 0) {
+            throw new IllegalArgumentException("key不能为空");
+        }
+        rwLock.writeLock().lock();
+        updateState.set(true);// 进入更新态
+        try {
+            Page root;
+            // 需要初始化跟节点页面
+            if (fileHeader.rootPageIdx <= Page.Invalid_PageIdx) {// 树为空直接返回
+                myAssert(fileHeader.headPageIdx <= Page.Invalid_PageIdx && fileHeader.pageCount == 0, String.format("rootPageIdx为0，但是headerPageIdx为: %s, pageCount: %d", fileHeader.headPageIdx, fileHeader.pageCount));
+                return null;
+            } else {
+                root = getPage(fileHeader.rootPageIdx);
+                // 比最小key都小则直接返回
+                if (key.compareTo(root.minKey()) < 0) {
+                    return null;
+                }
+            }
+            // 找到需要删除key所在的叶子页
+            Page leafPage = findLeafPageByKey(root, key);
+            return deleteKeyFromPage(leafPage, key);
+        } finally {
+            flushUpdateMap();// 必须立刻落盘更新2缓的脏页，避免其它线程后续的读操作看不见更新的问题
+            updateState.set(false);// 退出更新态
+            rwLock.writeLock().unlock();
+            // 提交刷盘任务
+            submitFlushTask();
+        }
+    }
+
+    // 从页面中删除某个key
+    private Long deleteKeyFromPage(Page page, String key) throws IOException {
+        // 1.找到key在页面的下标索引
+        Page.SearchResult result = page.searchKeyIndex(key);
+        if (!result.exists) {// 树中不存在key
+            return null;
+        }
+        long val = page.entries[result.index].val;
+        // 2.删除后页面为空，把页面也删了
+        if (page.keyCount == 1) {
+            // 2.0 先删除页面自己并从缓存中移除页面
+            deletePage(page);
+            // 2.1 如果该节点是root，则直接清空b+树
+            if (page.pageIdx == fileHeader.rootPageIdx) {
+                this.clear();// 清空B+树
+                return val;
+            }
+            // 2.2 维护双向链表
+            if (page.prePageIdx > Page.Invalid_PageIdx) {
+                setNextPageIdx(page.prePageIdx, page.nextPageIdx);
+            }
+            if (page.nextPageIdx > Page.Invalid_PageIdx) {
+                setPrePageIdx(page.nextPageIdx, page.prePageIdx);
+            }
+            // 如果头节点页面被删除，则改为其后继节点页
+            if (fileHeader.headPageIdx == page.pageIdx) {
+                fileHeader.headPageIdx = page.nextPageIdx;
+            }
+
+            // 2.3 从父页面中删除指向此页面的key
+            Page parentPage = getPage(page.parentPageIdx);
+            deleteKeyFromPage(parentPage, key);
+            return val;
+        }
+        // 3.从页面中删除key
+        System.arraycopy(page.entries, result.index + 1, page.entries, result.index, page.keyCount - result.index - 1);
+        page.entries[--page.keyCount] = null;// 置空避免内存泄漏
+        page.decreasePageUsedSize(key);// 减少页面已使用空间
+        page.modified = true;// 标记页面修改了
+
+        // 4.如果删除的key为页面的minKey，需要循环修改祖先结点指向此节点的key
+        if (result.index == 0) {
+            String newMinKey = page.minKey();
+            minKeyUpdated(page, key, newMinKey);
+        }
+
+        // 5.页面的key数量减少，尝试合并页面
+        tryMergePage(page);
+        return val;
+    }
+
+    /**
+     * 叶子结点需要合并的情况：
+     * |509 906|
+     * |509|  |906|
+     * |509|  |906|
+     * |509|  |906|
+     * 索引结点需要合并的情况：
+     * |427 944|
+     * |427|  |944|
+     * |427|  |944|
+     * |427 509 625 906|  |944 945 946|
+     * <p>
+     * 合并叶子节点页面：尽量都向左合并，这样可以不修改Head结点，且不修改minKey
+     *
+     * @param page 叶子结点和旁边的合并，索引结点怎么合并呢？
+     */
+    private void tryMergePage(Page page) throws IOException {
+        if (page.keyCount >= Page.Key_Max_Num / 2) return;
+        Page prePage = page.prePageIdx > Page.Invalid_PageIdx ? getPage(page.prePageIdx) : null;
+        if (prePage != null && (prePage.keyCount + page.keyCount) <= Page.Key_Max_Num) {
+            // 优先将page合入左页面
+            doMergePage(prePage, page);
+            return;
+        }
+        Page nextPage = page.nextPageIdx > Page.Invalid_PageIdx ? getPage(page.nextPageIdx) : null;
+        if (nextPage != null && (nextPage.keyCount + page.keyCount) <= Page.Key_Max_Num) {
+            // 再考虑将右结点合入leaf
+            doMergePage(page, nextPage);
+            return;
+        }
+
+        // 此节点页没有兄弟节点，只能是root节点页
+        if (page.prePageIdx <= Page.Invalid_PageIdx && page.nextPageIdx <= Page.Invalid_PageIdx) {
+            myAssert(page.pageIdx == fileHeader.rootPageIdx, String.format("pageIdx: %d没有兄弟节点居然不是root页: %d", page.pageIdx, fileHeader.rootPageIdx));
+            // 如果root节点页key数量为1，是索引页时，则循环向下降低层高，即删除没必要的索引页
+            Page root = page;
+            while (root.keyCount == 1 && root.isIndexPage()) {
+                Page childPage = getPage((int) root.entries[0].val);
+                childPage.parentPageIdx = Page.Invalid_PageIdx;// root页没有父节点
+                childPage.modified = true;// 标记页面发生了修改
+                deletePage(root);
+                root = childPage;
+                fileHeader.rootPageIdx = root.pageIdx;
+            }
+        }
+    }
+
+    /**
+     * 将right页面合入left页面，从右向左合并可以减少key的移动次数，且减少minKey的修改，且避免了头节点修改
+     * 但是可能right页的key数量更多时，虽然减少了移动次数，但是维护父子关系的开销大的多
+     */
+    private void doMergePage(Page left, Page right) throws IOException {
+        Logger.debug(String.format("即将发生页合并, 页:%s 将合并到页: %s", right, left));
+        // 1.将右边的key拷贝到左边，如果是索引页将维护父子关系，父-->子
+        System.arraycopy(right.entries, 0, left.entries, left.keyCount, right.keyCount);
+        left.keyCount += right.keyCount;
+        left.pageUsedSize += (right.pageUsedSize - Page.Page_Header_Meta_Size);
+        left.modified = true;// 标记页面已经修改
+
+        // 如果是索引页，需要维护父子关系，子-->父
+        if (right.isIndexPage()) {
+            for (int i = 0; i < right.keyCount; i++) {
+                int childPageIdx = (int) right.entries[i].val;
+                setParentPageIdx(childPageIdx, left.pageIdx);
+            }
+        }
+
+        // 2.维护双向链表
+        left.nextPageIdx = right.nextPageIdx;
+        if (right.nextPageIdx > Page.Invalid_PageIdx) {
+            setPrePageIdx(right.nextPageIdx, left.pageIdx);
+        }
+
+        // 3.删除right页面：此时必有父页面
+        deletePage(right);
+        Page parentPage = getPage(right.parentPageIdx);
+        deleteKeyFromPage(parentPage, right.minKey());
+    }
+
+    private void setParentPageIdx(int pageIdx, int parentPageIdx) throws IOException {
+        Page page = tryGetPage(pageIdx);
+        if (page != null) {// 位于缓存中
+            page.parentPageIdx = parentPageIdx;
+            page.modified = true;// 标记修改了
+        } else {// 不在缓冲中就直接修改文件
+            Page.directWriteParentPageIdx(fileChannel, calculatePagePos(pageIdx), parentPageIdx);
+        }
+    }
+
+    private void setPrePageIdx(int pageIdx, int prePageIdx) throws IOException {
+        Page page = tryGetPage(pageIdx);
+        if (page != null) {// 位于缓存中
+            page.prePageIdx = prePageIdx;
+            page.modified = true;// 标记修改了
+        } else {// 不在缓冲中就直接修改文件
+            Page.directWritePrePageIdx(fileChannel, calculatePagePos(pageIdx), prePageIdx);
+        }
+    }
+
+    private void setNextPageIdx(int pageIdx, int nextPageIdx) throws IOException {
+        Page page = tryGetPage(pageIdx);
+        if (page != null) {// 位于缓存中
+            page.nextPageIdx = nextPageIdx;
+            page.modified = true;// 标记修改了
+        } else {// 不在缓冲中就直接修改文件
+            Page.directWriteNextPageIdx(fileChannel, calculatePagePos(pageIdx), nextPageIdx);
+        }
+    }
+
+    private Page splitPage(Page leftPage) throws IOException {
+        if (leftPage.keyCount <= 2) {
+            throw new RuntimeException(String.format("页面pageIdx:%d的keyCount:%d不足以页分裂", leftPage.pageIdx, leftPage.keyCount));
+        }
+        Logger.debug(String.format("即将页分裂, pageIdx: %d, keyCount: %d", leftPage.pageIdx, leftPage.keyCount));
+        // 1.创建一个相同页类型/父页的空白页
+        Page rightPage = newEmptyPage(leftPage.pageType, leftPage.parentPageIdx);
+        // 2.将页面的一半数据拷贝到新的空白页中
+        int from = leftPage.keyCount >> 1;
+        int copyLen = leftPage.keyCount - from;
+        System.arraycopy(leftPage.entries, from, rightPage.entries, 0, copyLen);
+        // 将旧页面的置null，避免内存泄露
+        Arrays.fill(leftPage.entries, from, leftPage.keyCount, null);
+
+        // 3.维护两个页面页头
+        leftPage.keyCount = from;
+        rightPage.keyCount = copyLen;
+        // 维护页面使用空间
+        for (int i = 0; i < copyLen; i++) {
+            byte[] bytes = rightPage.entries[i].key.getBytes(StandardCharsets.UTF_8);
+            leftPage.decreasePageUsedSize(bytes);
+            rightPage.increasePageUsedSize(bytes);
+        }
+        // 标记两个页面都发生了修改
+        leftPage.modified = true;
+        rightPage.modified = true;
+
+        // 4.如果是索引页, 需要维护其子页面的父页面
+        if (leftPage.isIndexPage()) {
+            for (int i = 0; i < rightPage.keyCount; i++) {
+                int childPageIdx = (int) rightPage.entries[i].val;
+                setParentPageIdx(childPageIdx, rightPage.pageIdx);// 维护 子 --> 父
+            }
+        }
+
+        // 5.维护双向链表
+        int nextPageIdx = leftPage.nextPageIdx;
+        leftPage.nextPageIdx = rightPage.pageIdx;
+
+        rightPage.prePageIdx = leftPage.pageIdx;
+        rightPage.nextPageIdx = nextPageIdx;
+
+        // 有效的下一页则必须维护
+        if (nextPageIdx > Page.Invalid_PageIdx) {
+            setPrePageIdx(nextPageIdx, rightPage.pageIdx);
+        }
+
+        // 6.将新页面插入到父页面中
+        Page parentPage;
+        if (leftPage.parentPageIdx <= Page.Invalid_PageIdx) {// 分裂页为root页, 其父页面必须新建
+            myAssert(leftPage.pageIdx == fileHeader.rootPageIdx, String.format("页父页下标<=0，必须为root页, pageIdx: %d, rootPageIdx: %d", leftPage.pageIdx, fileHeader.rootPageIdx));
+            // 创建新root页
+            parentPage = newEmptyPage(Page.Index_Page_Type, Page.Invalid_PageIdx);
+            fileHeader.rootPageIdx = parentPage.pageIdx;
+            // 这里需将旧的root页插入新root页
+            doPutPage(parentPage, leftPage);
+        } else {
+            parentPage = getPage(leftPage.parentPageIdx);
+        }
+        doPutPage(parentPage, rightPage);
+        return rightPage;
+    }
+
+    private void doPutPage(Page parentPage, Page page) throws IOException {
+        String minKey = page.minKey();
+        Long old;
+        if (parentPage.canInsert(minKey)) {
+            old = parentPage.put(minKey, page.pageIdx, this);// 维护父-->子
+            page.parentPageIdx = parentPage.pageIdx;// 维护子-->父
+        } else {
+            // 分裂父页面
+            Page rightParentPage = splitPage(parentPage);
+            // 判断插入哪一页
+            if (minKey.compareTo(rightParentPage.minKey()) >= 0) {
+                old = rightParentPage.put(minKey, page.pageIdx, this);// 维护父-->子
+                page.parentPageIdx = rightParentPage.pageIdx;// 维护子-->父
+            } else {
+                old = parentPage.put(minKey, page.pageIdx, this);// 维护父-->子
+                page.parentPageIdx = parentPage.pageIdx;// 维护子-->父
+            }
+        }
+        page.modified = true;
+        if (old != null) {
+            Logger.error(String.format("将页面插入父页面时，怎么会出现key已经存在于父节点呢? parentPage: %s, page: %s", parentPage.toString(), page.toString()));
+            throw new RuntimeException("将页面插入父页面时，怎么会出现key已经存在于父节点呢?");
+        }
+    }
+
+    /**
+     * 从给定的页面开始向下查询，直至查到key所在或应该插入的叶子节点页面
+     *
+     * @param from 开始查询的页面
+     * @param key  查询的key
+     * @return key所在的叶子页面、或应该插入的叶子页
+     * @throws IOException I/O错误
+     */
+    private Page findLeafPageByKey(Page from, String key) throws IOException {
+        if (from.isLeafPage()) {
+            return from;
+        }
+        if (from.keyCount < 1) {
+            throw new RuntimeException(String.format("pageIdx: %d的页面明明已经没有key了为何还存在?", from.pageIdx));
+        }
+
+        Page curPage = from;
+        while (curPage.isIndexPage()) {
+            // 查找下一页
+            Page.SearchResult result = curPage.searchKeyIndex(key);
+            int slotIdx;
+            if (result.exists) {
+                slotIdx = result.index;
+            } else if (result.index == 0) {
+                // 说明key比此索引页最小key都小，则走第一个子页
+                slotIdx = 0;
+            } else {// 默认是key待插入索引的前一页
+                slotIdx = result.index - 1;
+            }
+            // 获取下一页
+            int nextPageIdx = (int) curPage.entries[slotIdx].val;
+            curPage = getPage(nextPageIdx);
+        }
+        return curPage;
+    }
+
+    // 当页面的minKey改变时必须级联更新其父节点中指向此节点的key
+    void minKeyUpdated(Page page, String oldMinKey, String newMinKey) throws IOException {
+        Logger.debug(String.format("第%d页更新minKey, oldMinKey: %s, newMinKey: %s", page.pageIdx, oldMinKey, newMinKey));
+        // 没有父节点则不用更新
+        if (page.parentPageIdx <= Page.Invalid_PageIdx) {
+            return;
+        }
+
+        // 更新父节点指向此页面的key
+        Page parentPage = getPage(page.parentPageIdx);
+        if (parentPage.replaceKey(oldMinKey, newMinKey) == 0) {
+            minKeyUpdated(parentPage, oldMinKey, newMinKey);
+        }
+    }
+
+    private Page tryGetPage(int pageIdx) {
+        // 先从1缓获取
+        Page page = cache.get(pageIdx);
+        // 更新操作可以从2缓获取
+        if (page == null && updateState.get()) {
+            page = updateMap.get(pageIdx);
+        }
+        return page;
+    }
+
+    // 获取页面，不在缓存时从文件读取到缓存
+    private Page getPage(int pageIdx) throws IOException {
+        if (pageIdx <= Page.Invalid_PageIdx) {
+            throw new RuntimeException(String.format("pageIdx: %d非法", pageIdx));
+        }
+        if (!fileHeader.bitSet.get(pageIdx)) {
+            throw new RuntimeException(String.format("位图中该页未使用, pageIdx: %d", pageIdx));
+        }
+        // 1.从缓存读取
+        Page page = tryGetPage(pageIdx);
+        if (page == null) {
+            synchronized (this) { // double check
+                page = tryGetPage(pageIdx);
+                if (page == null) {
+                    // 2.没有则从文件读取
+                    Logger.debug(String.format("将从文件读取页面pageIdx: %d", pageIdx));
+                    page = readPage(pageIdx);
+                    // 3.再放入缓存
+                    Page old = cache.put(pageIdx, page);
+                    if (old != null) {
+                        throw new RuntimeException(String.format("本来缓存中不存在pageIdx: %d, 但是为什么又存在了呢?", pageIdx));
+                    }
+                }
+            }
+
+        }
+        return page;
+    }
+
+    private Page readPage(int pageIdx) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(Page.Page_Size);
+        long pagePos = calculatePagePos(pageIdx);
+        do {
+            int readLen = fileChannel.read(buffer, pagePos + buffer.position());
+            if (readLen == -1) {
+                throw new RuntimeException(String.format("超出文件范围了? pos: %d, count: %d, readLen: %d, pageIdx: %d", pagePos, buffer.position(), readLen, pageIdx));
+            }
+        } while (buffer.hasRemaining());
+
+        buffer.flip();// 翻转待使用
+        Page page = Page.deserialize(buffer);
+        myAssert(page.pageIdx == pageIdx, String.format("准备读取的pageIdx: %d, 但从文件中读到的pageIdx: %d，并发操作了?还是没落盘呢?", pageIdx, page.pageIdx));
+        return page;
+    }
+
+    private Page newEmptyPage(int pageType, int parentPageIdx) {
+        if (fileHeader.pageCount >= FileHeader.Page_Max_Num) {
+            throw new RuntimeException(String.format("无法创建更多页面, pageCount: %d已经超过最大页面数: %d", fileHeader.pageCount, FileHeader.Page_Max_Num));
+        }
+        // 找到第一个为0的bit，必须从第1位开始找，因为第0页非法
+        int pageIdx = fileHeader.bitSet.nextClearBit(1);
+        Logger.debug(String.format("创建空白页, pageIdx: %d, pageType:%d, parentPageIdx: %d", pageIdx, pageType, parentPageIdx));
+        if (fileHeader.pageCount == 0) {
+            // 创建根节点页
+            myAssert(pageType == Page.Leaf_Page_Type && parentPageIdx <= Page.Invalid_PageIdx, String.format("根节点页面创建参数非法, pageType: %d 必须是叶子页:%d, parentPageIdx:%d必须是非法页下标:%d", pageType, Page.Leaf_Page_Type, parentPageIdx, Page.Invalid_PageIdx));
+            if (fileHeader.rootPageIdx > Page.Invalid_PageIdx || fileHeader.headPageIdx > Page.Invalid_PageIdx) {
+                throw new RuntimeException(String.format("无页面时rootPageIdx:%d或headPageIdx:%d非法", fileHeader.rootPageIdx, fileHeader.headPageIdx));
+            }
+            fileHeader.rootPageIdx = pageIdx;
+            fileHeader.headPageIdx = pageIdx;
+        }
+        Page page = new Page(pageType, pageIdx, parentPageIdx);
+        fileHeader.pageCount++;
+        fileHeader.bitSet.set(pageIdx, true);// 标记使用该页
+
+        page.modified = true;// 标记页为脏，未落盘
+
+        Page old = cache.put(pageIdx, page);// 放入缓存中
+        if (old != null) {
+            throw new RuntimeException(String.format("本来缓存中不存在pageIdx: %d, 但是为什么又存在了呢?", pageIdx));
+        }
+        return page;
+    }
+
+    private void deletePage(Page page) {
+        page.deleted = true;
+        fileHeader.bitSet.set(page.pageIdx, false);// 从位图标记删除
+        fileHeader.pageCount--;// 页数-1
+        cache.remove(page.pageIdx);
+        updateMap.remove(page.pageIdx);
+    }
+
+    private long calculatePagePos(int pageIdx) {
+        return FileHeader.File_Header_Size// 文件头
+                + (long) pageIdx * Page.Page_Size;
+    }
+
+    private void flushPage(Page page) {
+        if (page.deleted) return;// 页面已经删除了不用管
+        Logger.debug(String.format("脏页落盘, pageIdx: %d", page.pageIdx));
+        // 写入文件
+        ByteBuffer buffer = page.serialize();
+        long pos = calculatePagePos(page.pageIdx);
+        try {
+            while (buffer.hasRemaining()) {
+                pos += fileChannel.write(buffer, pos);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        // 写完文件后标记未发生修改，因为该页面很可能还在被其它对象引用并使用，标记其修改已经落盘
+        page.modified = false;
+    }
+
+    private void flushUpdateMap() {
+        updateMap.forEach((k, page) -> {
+            if (page.modified) {
+                flushPage(page);
+            }
+        });
+        updateMap.clear();
+    }
+
+    private class FLushTask implements Runnable {
+        @Override
+        public void run() {
+            try {
+                // 获取读锁，避免其它线程获取写锁并修改数据
+                // 这样整个落盘期间数据是不会更改的
+                rwLock.readLock().lockInterruptibly();
+                // 设置flushState为2表示正在刷盘
+                int expect_1 = flushState.get();
+                if (expect_1 != 1) {
+                    throw new RuntimeException(String.format("什么情况? 当前的flushState:%d 不为1?", flushState.get()));
+                }
+                if (!flushState.compareAndSet(expect_1, 2)) {
+                    throw new RuntimeException(String.format("什么情况? 其它线程修改了flushState:%d???", flushState.get()));
+                }
+                Logger.debug("purge线程落盘开始");
+                try {
+                    // 1.落盘缓存中的脏页
+                    Map<Integer, Page> snapshot = cache.kvMap();
+                    for (Map.Entry<Integer, Page> entry : snapshot.entrySet()) {
+                        Page page = entry.getValue();
+                        if (page.modified) {
+                            flushPage(page);
+                        }
+                    }
+                    // 2.落盘map的脏页
+                    for (Map.Entry<Integer, Page> entry : updateMap.entrySet()) {
+                        Page page = entry.getValue();
+                        if (page.modified) {
+                            flushPage(page);
+                        }
+                    }
+                    updateMap.clear();
+                    // 3.落盘文件头
+                    fileHeader.flushHeader();
+                } finally {
+                    // 重置刷盘状态
+                    if (!flushState.compareAndSet(2, 0)) {
+                        Logger.error(String.format("重置刷盘状态时flushState:%d不为2?", flushState.get()));
+                        flushState.set(0);// 强行重置
+                    }
+                    rwLock.readLock().unlock();
+                    Logger.debug("purge线程落盘结束");
+                }
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    // 注意：落盘和更新操作是互斥的
+    private void submitFlushTask() {// 目的在于组提交，合并多个刷盘请求
+        if (flushState.compareAndSet(0, 1)) {
+            // 等待1s再落盘
+            scheduledExecutor.schedule(new FLushTask(), 1, TimeUnit.SECONDS);
+        }
+    }
+
+    // 清空b+树，删除所有key和页面
+    public void clear() {
+        rwLock.writeLock().lock();// 写锁
+        try {
+            /*
+             * 两种调用：
+             * 1.外部直接调用
+             * 2.删除key后整个BTree树为空
+             * */
+            // 保证处于更新态
+            boolean allReadyUpdateState = !updateState.compareAndSet(false, true);
+            try {
+                fileHeader.clear();
+                //fileHeader.flushHeader();
+            /*
+             这里必须清空缓存，且updateState必须为true，它会将缓存的页面放入updateMap中
+             然后直接清空updateMap即可，这样可避免冗余落盘
+            */
+                cache.clear();
+                updateMap.clear();
+                // 重置存储文件，因为文件在使用过程将越来越大，将其删除再新建得到小文件
+                resetFile();
+            } finally {
+                if (!allReadyUpdateState) {
+                    // 如果调用此方法之前不处于更新态，则应该是外部直接调用了clear方法
+                    // 将更新态重置
+                    updateState.set(false);
+                }
+            }
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * 重置存储文件，因为文件在使用过程将越来越大，将其删除再新建得到小文件
+     */
+    private void resetFile() {
+        rwLock.writeLock().lock();
+        try {
+            if (fileChannel != null) {
+                Logger.debug("重置B+树存储文件，当前文件大小: " + fileChannel.size());
+                fileChannel.close();
+                Files.deleteIfExists(path);
+                MyFileUtil.ensureDirsAndFile(path);
+                fileChannel = FileChannel.open(path, Set.of(StandardOpenOption.READ, StandardOpenOption.WRITE));
+                Logger.debug(String.format("重置B+树文件完成，新文件大小: %d, path: %s", fileChannel.size(), path));
+            }
+        } catch (IOException e) {
+            Logger.error(String.format("重置文件失败, path: %s, i/o err: %s", path, e));
+            throw new RuntimeException(e);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void close() {
+        scheduledExecutor.shutdownNow();// 立刻关闭落盘线程
+        cache.clear();
+        fileHeader.flushHeader();
+        updateMap.forEach((key, page) -> {
+            if (page.modified) {
+                flushPage(page);
+            }
+        });
+        updateMap.clear();
+        try {
+            fileChannel.force(true);
+            fileChannel.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "BTreeFile{" +
+//                "fileChannel=" + fileChannel +
+                "fileHeader=" + fileHeader +
+//                ", cache=" + cache +
+//                ", rwLock=" + rwLock +
+//                ", scheduledExecutor=" + scheduledExecutor +
+//                ", updateState=" + updateState +
+//                ", flushState=" + flushState +
+//                ", updateMap=" + updateMap +
+                '}';
+    }
+
+
+    public void printSelf() throws IOException {
+        if (fileHeader.pageCount <= 0) {
+            Logger.println("空树!!!");
+            return;
+        }
+        Logger.println("=============================================================================================");
+        Logger.println(this.toString());
+        Queue<Page> queue = new LinkedList<>();
+        Page rootPage = getPage(fileHeader.rootPageIdx);
+        Logger.println(rootPage.getKeysString());// 跟节点页
+        queue.add(rootPage);
+        outer:
+        while (queue.size() > 0) {
+            int len = queue.size();// 此层节点数
+            StringBuilder sb = new StringBuilder();
+            while (len-- > 0) {
+                Page remove = queue.remove();
+                if (remove.pageType != Page.Index_Page_Type) {
+                    break outer;
+                }
+                for (int i = 0; i < remove.keyCount; i++) {
+                    int childPageIdx = (int) remove.entries[i].val;
+                    Page childPage = getPage(childPageIdx);
+                    queue.add(childPage);
+                    sb.append(childPage.getKeysString()).append(';').append(' ');
+                }
+            }
+            Logger.println(sb.toString());
+        }
+        Logger.println("=============================================================================================");
+    }
+
+    public void checkTree() {
+        rwLock.readLock().lock();
+        Logger.println("开始检查");
+        try {
+            // 检查文件头
+            myAssert(fileHeader.bitSet.cardinality() == fileHeader.pageCount, String.format("位图中使用页数为%d, 但是文件头的pageCount-1:%d", fileHeader.bitSet.cardinality(), fileHeader.pageCount - 1));
+            if (fileHeader.pageCount == 0) {
+                myAssert(fileHeader.rootPageIdx <= Page.Invalid_PageIdx && fileHeader.headPageIdx <= Page.Invalid_PageIdx, String.format(
+                        "树为空, 文件头非法, rootPageIdx: %d, headPageIdx: %d", fileHeader.rootPageIdx, fileHeader.headPageIdx));
+                return;
+            }
+            if (fileHeader.pageCount == 1) {
+                myAssert(fileHeader.rootPageIdx == fileHeader.headPageIdx, String.format("只有1页则rootPageIdx: %d 和 headPageIdx: %d必须想等", fileHeader.rootPageIdx, fileHeader.headPageIdx));
+            }
+
+            // 检查页
+            Page rootPage = getPage(fileHeader.rootPageIdx);
+            if (fileHeader.pageCount > 1 && rootPage.isLeafPage()) {
+                throw new RuntimeException(String.format("根节点页应该是索引页，但此时为叶子页, pageIdx: %d", rootPage.pageIdx));
+            }
+            Queue<Page> queue = new LinkedList<>();
+            ArrayList<Page> pages = new ArrayList<>(fileHeader.pageCount);
+            ArrayList<Page> leafPages = new ArrayList<>();
+            queue.add(rootPage);
+            pages.add(rootPage);
+            if (rootPage.isLeafPage()) {
+                leafPages.add(rootPage);
+            }
+            int curLeafIndex = 0;
+            while (queue.size() > 0) {
+                int len = queue.size();// 此层个数
+                while (len-- > 0) {
+                    Page page = queue.remove();
+                    // 页内自检
+                    page.checkPage();
+                    // 索引页
+                    // 检查此节点的key指向的是子结点min key
+                    // 检查此节点和子结点的父子关系是否正常
+                    if (page.isIndexPage()) {
+                        for (int i = 0; i < page.keyCount; i++) {
+                            int childPageIdx = (int) page.entries[i].val;
+                            Page childPage = getPage(childPageIdx);
+                            myAssert(page.entries[i].key.equals(childPage.minKey()), String.format("pageIdx: %d的key: %s不是指向子节点的minKey: %s", page.pageIdx, page.entries[i].key, childPage.minKey()));
+                            myAssert(childPage.parentPageIdx == page.pageIdx, String.format("父节点指向错误, pageIdx: %d", childPageIdx));
+                            pages.add(childPage);
+                            queue.add(childPage);
+                            if (childPage.isLeafPage()) {
+                                leafPages.add(childPage);
+                            }
+                        }
+                    }
+
+                    // 叶子页: 检查双向链表是否正常
+                    if (page.isLeafPage()) {
+                        Page prePage = null, nextPage = null;
+                        if (curLeafIndex > 0) {
+                            prePage = getPage(page.prePageIdx);
+                        }
+                        if (curLeafIndex < leafPages.size() - 1) {
+                            nextPage = getPage(page.nextPageIdx);
+                        }
+                        // 检验头节点页
+                        if (prePage == null) {
+                            myAssert(page.pageIdx == fileHeader.headPageIdx && curLeafIndex == 0, String.format("前继节点为空的页子页必不是头节点页, pageIdx: %d, curLeafIndex: %d", page.pageIdx, curLeafIndex));
+                        }
+                        // 此页的最大key必须比下一页的minKey小
+                        if (nextPage != null) {
+                            myAssert(page.maxKey().compareTo(nextPage.minKey()) < 0, String.format("此页maxKey: %s大于下一页minKey: %s", page.maxKey(), nextPage.minKey()));
+                        }
+
+                        // 检查索引树指向的叶子结点和叶子结点链表顺序一致
+                        if (prePage != null) {
+                            myAssert(leafPages.get(curLeafIndex - 1).pageIdx == prePage.pageIdx, String.format("索引树指向的叶子结点和叶子结点链表顺序不一致,pageIdx: %d", page.pageIdx));
+                            myAssert(prePage.nextPageIdx == page.pageIdx, String.format("前一页指向的下一页是%d而不是%d", prePage.nextPageIdx, page.pageIdx));
+                        }
+                        if (nextPage != null) {
+                            myAssert(nextPage.pageIdx == leafPages.get(curLeafIndex + 1).pageIdx, "非法");
+                            myAssert(nextPage.prePageIdx == page.pageIdx, String.format("下一页指向的前一页非法, page: %s, nextPage: %s", page, nextPage));
+                        }
+                        curLeafIndex++;
+                    }
+                }
+            }
+            // 检查文件头
+            myAssert(fileHeader.pageCount == pages.size(), String.format("页面数量不符合, pageCount: %d, 读取的页数量: %d", fileHeader.pageCount, pages.size()));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        } finally {
+            Logger.println("结束检查");
+            rwLock.readLock().unlock();
+        }
+    }
+
+    public static void myAssert(boolean flag, String msg) {
+        if (!flag) throw new RuntimeException(msg);
+    }
+}
+```
+
+## 文件哈希索引
+
+基于文件实现的哈希索引：
+
+![image-20230618235231377](C:\Users\76771\Desktop\vscode_workspace\notebook\Java\JavaSE\JavaSE.assets\image-20230618235231377.png)
+
+### 元信息存储文件
+
+在文件哈希索引中，哈希槽内只能存储定长字节数据，对于变长的字符串，可以通过将其存在另一个文件中，以其储存指针指代该字符串。
+
+元信息存储文件的目的：将不定长的文件名映射到定长的8字节整数的offset、方便hash/B+索引构建
+
+```java
+/**
+ * meta文件：存储所有文件元信息，顺序写，1GB
+ * todo 1GB固定文件，超过时新建文件
+ *
+ * @author fzk
+ * @datetime 2023-03-17 16:41:40
+ */
+public class FileMetaStore implements AutoCloseable {
+    private final FileChannel fileChannel;// 文件元信息存储文件通道
+    private final MappedByteBuffer fileMap;// 通道映射
+    public volatile long writeIndex;// 写索引
+    private final DataConf dataConf;
+    private final FileCheckPoint checkPoint;
+
+    public FileMetaStore(DataConf dataConf) throws IOException {
+        this.dataConf = dataConf;
+
+        // 1.初始化checkpoint
+        this.checkPoint = new FileCheckPoint(Path.of(dataConf.getDataDir(), dataConf.getCheckPoint()));
+
+        // 2.初始化元信息存储文件
+        Path path = Path.of(dataConf.getDataDir(), dataConf.getMetaFileName());
+        MyFileUtil.ensureDirsAndFile(path);// 确保文件已创建
+        fileChannel = FileChannel.open(path, Set.of(StandardOpenOption.WRITE, StandardOpenOption.READ));
+        // 3.初始化writeIndex
+        writeIndex = this.checkPoint.getMetaCheckPoint();
+        // 4.映射直接内存
+        fileMap = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, dataConf.getMetaFileSize());
+        Logger.info(String.format("元信息储存文件 %s 初始化成功, writeIndex = %d", path.getFileName(), writeIndex));
+
+    }
+
+    /**
+     * 写入文件元信息到末尾，并返回其offset
+     *
+     * @param meta 文件元信息
+     * @return 该元信息存储的起始offset
+     */
+    public synchronized long writeMeta(FileMeta meta) throws IOException {
+        long offset = writeIndex;
+        // 1.序列化元信息
+        byte[] bytes = JSON.toJSONString(meta).getBytes(StandardCharsets.UTF_8);
+        int len = bytes.length;// 元信息长度，不包含自身
+        ByteBuf buf = PooledByteBufAllocator.DEFAULT.directBuffer(len + 4, len + 4);
+        try {
+            buf.writeInt(len).writeBytes(bytes);
+            // 2.写入元信息储存文件
+            writeIndex = doWrite(writeIndex, buf);
+            // 3.刷新checkpoint
+            checkPoint.updateMetaCheckPoint(writeIndex);
+            Logger.info(String.format("文件 %s 成功写入元信息储存文件: %s, offset: %d, writeIndex: %d", meta.getFilename(), dataConf.getMetaFileName(), offset, writeIndex));
+            return offset;
+        } catch (IOException e) {
+            Logger.error(String.format("文件 %s 写入元信息储存文件: %s, 出错, writeIndex: %d, exception: %s", meta.getFilename(), dataConf.getMetaFileName(), writeIndex, e));
+            e.printStackTrace();
+            throw e;
+        } finally {
+            buf.release();// 及时释放
+        }
+    }
+
+    /**
+     * 更新元信息
+     * 主要用于分片上传最后分片上传成功时调整元信息文件中存储的md5值
+     * 警告：必须保证meta修改前后长度是不变的，否则会造成严重后果
+     *
+     * @param offset    元信息存储位移
+     * @param meta      必须保证meta修改前后字节数一致，否则会造成严重后果
+     * @param metaBytes 元信息字节数组
+     */
+    public synchronized void updateMeta(long offset, FileMeta meta, byte[] metaBytes) {
+        if (offset + metaBytes.length >= writeIndex) {
+            Logger.error(String.format("更新元信息失败，给出的(offset: %d + metaByteLen: %d) 大于 writeIndex: %d, meta: %s", offset, metaBytes.length, writeIndex, meta));
+            return;
+        }
+        // 判断元信息修改前后是否长度一致
+        int len = fileMap.getInt((int) offset);// 元信息长度，不包含自身
+        if (len != metaBytes.length) {
+            Logger.error(String.format("更新元信息失败，前后字节数不一致，offset: %d, oldMetaLen: %d, newMetaLen: %d", offset, len, metaBytes.length));
+            return;
+        }
+        ByteBuf buf = PooledByteBufAllocator.DEFAULT.directBuffer(4 + len, 4 + len);
+        try {
+            buf.writeInt(len).writeBytes(metaBytes);
+            doWrite(offset, buf);
+        } catch (Exception e) {
+            Logger.error(String.format("文件 %s 更新元信息时出错, offset: %d, meta: %s, exception: %s", meta.getFilename(), offset, meta, e));
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        } finally {
+            ReferenceCountUtil.release(buf);// 必须及时释放资源
+        }
+    }
+
+    /**
+     * 将数据写入内存映射缓冲区
+     * TODO 落盘策略问题: 同步(累计脏页再统一提交)? 异步?
+     *
+     * @param position 写入位置
+     * @param buf      写入数据
+     * @return 返回写入后的指针, position+ buf.readableBytes()
+     */
+    private long doWrite(long position, ByteBuf buf) {
+        MappedByteBuffer mappedByteBuffer = fileMap.slice();// 必须切片以保证指针独立
+        mappedByteBuffer.position((int) position);
+        for (ByteBuffer buffer : buf.nioBuffers()) {
+            position += buffer.remaining();
+            mappedByteBuffer.put(buffer);
+        }
+        mappedByteBuffer.force();// 同步落盘
+        return position;
+    }
+
+    /**
+     * 从指定偏移量读取文件元信息
+     *
+     * @param offset 偏移量
+     * @return 文件元信息，不会返回null
+     */
+    public FileMetaWrapper readMeta(long offset) {
+        // 1.检查
+        if (offset >= writeIndex) {
+            String err = String.format("从%s读取文件元信息出错，offset=%d 大于此时 writeIndex=%d", dataConf.getMetaFileName(), offset, writeIndex);
+            Logger.error(err);
+            throw new RuntimeException(err);
+        }
+        // 2.读取内容
+        // 2.1 读取元信息长度
+        int len = fileMap.getInt((int) offset);
+        if (len <= 0) {
+            Logger.error(String.format("读取元信息储存文件offset=%d 的长度非法为%d", offset, len));
+            throw new RuntimeException(String.format("读取元信息储存文件offset=%d 的长度非法为%d", offset, len));
+        }
+        // 2.2 读取元信息
+        byte[] dest = new byte[len];
+        fileMap.get((int) offset + 4, dest, 0, len);
+        String jsonStr = new String(dest, StandardCharsets.UTF_8);
+
+        // 3.反序列化
+        FileMeta meta = JSON.parseObject(jsonStr, FileMeta.class);
+        return new FileMetaWrapper(offset, len, meta);
+    }
+
+    @AllArgsConstructor
+    public static class FileMetaWrapper {
+        public long offset;
+        public int metaLen;
+        public FileMeta meta;
+    }
+
+    @Override
+    public void close() throws IOException {
+        this.fileChannel.close();
+        this.checkPoint.close();
+    }
+}
+```
+
+文件元信息：
+
+```java
+/**
+ * 文件元信息
+ *
+ * @author fzk
+ * @datetime 2023-03-17 16:46:30
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class FileMeta {
+    public static final byte Uploading = 0;// 上传中
+    public static final byte UploadSuccess = 1;// 上传成功
+    public static final byte UploadFailed = 2;// 上传失败
+
+    private String key;// 唯一键
+    private String filename;// 文件名
+
+    private long size;// 文件大小, 8
+    private long uploadTimeStamp;// 上传时间戳, 8
+    private String md5;// 文件md5摘要值, 32
+
+    private String bucket;// 文件存储bucket,?
+    private String relativePath;// 相对数据目录的存储路径,?
+    /*
+    是否上传完成, 用于分片上传, 0表示上传进行中，1表示上传成功，2表示上传失败
+    注意不能用boolean类型，因为true和false的字符串长度不一致，修改元信息时会有问题
+     */
+    private byte uploadStatus;
+    private byte deleted;// 删除标记，0未删除，1已删除
+}
+```
+
+### 哈希索引文件
+
+目前有个问题：删除是逻辑删除，依旧占据空间，在删除key较多时最好还是重构一下整个索引文件。
+
+```java
+/**
+ * FileIndex文件：存储文件名-->offset，哈希索引，链表法解决冲突
+ * TODO 单个哈希文件写满了，创建新的文件
+ *
+ * @author fzk
+ * @datetime 2023-03-17 16:42
+ */
+public class FileIndex implements AutoCloseable {
+    private static final int Hash_Slot_Size = 4;// 哈希槽大小
+    private static final int Index_Size = 20;// 索引条目大小
+    /**
+     * 非法index，必须将0设为非法index，因为哈希槽数组默认初始值都是0
+     */
+    private static final int InvalidIndex = 0;
+    private final int maxIndexNum;// 索引数组长度
+    private final String indexFileName;// 索引文件名
+    private final FileChannel fileChannel;// index文件通道
+    private final MappedByteBuffer fileMap;// index文件的内存映射缓冲区
+
+
+    //------------------------------ 文件头 -------------------------------
+    private final int hashSlotNum;// 哈希槽总数量
+    private final int hashSlotNum_Pos = 0;
+
+    private void writeSlotNum() {
+        fileMap.putInt(hashSlotNum_Pos, this.hashSlotNum);
+    }
+
+    private int readSlotNum() {
+        return fileMap.getInt(hashSlotNum_Pos);
+    }
+
+    private int hashSlotCount;// 索引文件中已使用哈希槽数量
+    private final int hashSlotCount_Pos = 4;
+
+    private void incHashSlotCount() {
+        this.hashSlotCount++;
+        writeHashSlotCount(this.hashSlotCount);
+    }
+
+    private void writeHashSlotCount(int count) {
+        this.hashSlotCount = count;
+        fileMap.putInt(hashSlotCount_Pos, count);
+    }
+
+    private int readHashSlotCount() {
+        return fileMap.getInt(hashSlotCount_Pos);
+    }
+
+    /**
+     * 索引文件已使用的索引条数
+     * 注意：这里必须为1, 原因很简单, 我将0作为非法索引值, 因此0号索引被废弃
+     * 哈希槽默认初始值为0, 因此0必须是非法索引值
+     * 有效索引数量为indexCount-1
+     */
+    private int indexCount;
+    private final int indexCount_Pos = 4 + 4;
+
+    private void incIndexCount() {
+        this.indexCount++;
+        writeIndexCount(this.indexCount);
+    }
+
+    private void writeIndexCount(int count) {
+        this.indexCount = count;
+        fileMap.putInt(indexCount_Pos, count);
+    }
+
+    private int readIndexCount() {
+        return fileMap.getInt(indexCount_Pos);
+    }
+
+    private static final int Index_Header_Size = 4 + 4 + 4;// 文件头长度
+    //------------------------------ 文件头 -------------------------------
+
+
+    public FileIndex(DataConf dataConf) throws IOException {
+        this.maxIndexNum = dataConf.getMaxIndexNum();
+        this.indexFileName = dataConf.getIndexFileName();
+        // 初始化索引文件
+        Path path = Path.of(dataConf.getDataDir(), this.indexFileName);
+        boolean exists = Files.exists(path);// 是否存在
+        MyFileUtil.ensureDirsAndFile(path);// 确保创建
+        fileChannel = FileChannel.open(path, Set.of(StandardOpenOption.WRITE, StandardOpenOption.READ));
+        // 文件映射: 映射整个文件
+        // 存在则校验文件头
+        if (exists) {
+            fileMap = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0L, fileChannel.size());
+            // 读取文件头并校验
+            hashSlotNum = readSlotNum();
+            hashSlotCount = readHashSlotCount();
+            indexCount = readIndexCount();
+            if (hashSlotNum != dataConf.getHashSlotNum()) {
+                throw new RuntimeException(String.format("已存在的索引文件%s检测到文件头中的slotNum为%d，配置文件却给定为%d，两者必须相等", indexFileName, hashSlotNum, dataConf.getHashSlotNum()));
+            }
+            if (hashSlotCount < 0 || hashSlotCount >= hashSlotNum) {
+                throw new RuntimeException(String.format("已存在的索引文件 %s 检测的 hashSlotCount: %d 不合法", indexFileName, hashSlotCount));
+            }
+            if (indexCount <= InvalidIndex || indexCount >= maxIndexNum) {
+                throw new RuntimeException(String.format("已存在的索引文件 %s 检测的 indexCount: %d 不合法", indexFileName, indexCount));
+            }
+            long fileSize = Index_Header_Size + (long) Hash_Slot_Size * dataConf.getHashSlotNum() + (long) Index_Size * maxIndexNum;
+            // 再校验文件大小
+            if (fileSize != fileChannel.size()) {
+                throw new RuntimeException(String.format("已存在的索引文件 %s 检测失败, 从配置计算理论size: %d, 但实际size: %d", indexFileName, fileSize, fileChannel.size()));
+            }
+        } else {
+            fileMap = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0L, Index_Header_Size + (long) Hash_Slot_Size * dataConf.getHashSlotNum() + (long) Index_Size * maxIndexNum);
+            // 不存在则初始化文件头
+            hashSlotNum = dataConf.getHashSlotNum();
+            writeSlotNum();
+            hashSlotCount = 0;
+            writeHashSlotCount(0);
+            indexCount = 1;// 注意：这里必须为1, 原因很简单, 我将0作为非法索引值, 因此0号索引被废弃
+            writeIndexCount(indexCount);
+        }
+        Logger.info(String.format("索引文件 %s 初始化完成, slotNum: %d, maxIndexNum: %d, hashSlotCount: %d, indexCount: %d", indexFileName, hashSlotNum, maxIndexNum, hashSlotCount, indexCount));
+    }
+
+    /**
+     * 将meta.key插入索引文件
+     * todo key唯一性校验
+     *
+     * @param meta   元信息
+     * @param offset 元信息存储偏移量
+     */
+    public synchronized void putIndex(FileMeta meta, long offset) {
+        if (indexCount >= maxIndexNum) {
+            throw new RuntimeException(String.format("当前indexCount: %d 超过了maxIndexNum: %d, 无法继续插入哈希索引文件: %s", indexCount, maxIndexNum, indexFileName));
+        }
+        // 1.计算hash和哈希槽
+        int hash = MyHash.hash(meta.getKey());
+        int slotIdx = hash % hashSlotNum;
+        int absoluteSlotPos = Index_Header_Size + slotIdx * Hash_Slot_Size;// 哈希槽的绝对位置
+
+        // 2.哈希槽旧值
+        int oldSlotVal = fileMap.getInt(absoluteSlotPos);
+        // 如果小于等于0或大于最大索引数，则说明此哈希槽没有被使用
+        if (oldSlotVal <= InvalidIndex || oldSlotVal >= indexCount) {
+            oldSlotVal = InvalidIndex;
+        }
+
+        // 3.计算index存入的绝对位置
+        int absoluteIndexPos = Index_Header_Size + Hash_Slot_Size * hashSlotNum + Index_Size * indexCount;
+        // 4.写入index
+        Index index = new Index(hash, offset, 0, oldSlotVal);
+        doWriteIndex(index, absoluteIndexPos);
+
+        // 5.更新哈希槽
+        fileMap.putInt(absoluteSlotPos, indexCount);// 注意这里存的不是absoluteIndexPos而是indexCount
+
+        // 6.更新文件头
+        // 6.1 使用了新的哈希槽
+        if (oldSlotVal == InvalidIndex) {
+            incHashSlotCount();
+        }
+        // 6.2 更新索引使用条数
+        incIndexCount();
+        Logger.info(String.format("文件 key: %s 已经插入索引文件, index: %s, 插入slotIdx: %d, 插入后 hashSlotCount: %d, indexCount: %d", meta.getKey(), index, slotIdx, hashSlotCount, indexCount));
+    }
+
+    private void doWriteIndex(Index index, int absoluteIndexPos) {
+        MappedByteBuffer slice = fileMap.slice();
+        slice.position(absoluteIndexPos);
+        slice.put(index.serialize());
+    }
+
+    /**
+     * 逻辑删除
+     * @param key 唯一键
+     * @param metaStore 元信息储存服务
+     * @return 不存在返回null
+     */
+    public synchronized IndexWrapper deleteIndex(String key, FileMetaStore metaStore) {
+        IndexWrapper wrapper = getIndex(key, metaStore);
+        if (wrapper != null) {
+            // 删除并写入文件
+            wrapper.index.deleted = 1;
+            doWriteIndex(wrapper.index, wrapper.absoluteIndexPos);
+        }
+        return wrapper;
+    }
+
+    /**
+     * 以key查offset
+     *
+     * @param key       文件唯一键
+     * @param metaStore 元信息存储文件
+     * @return 文件元信息存储偏移量, 没找到为null
+     */
+    public IndexWrapper getIndex(String key, FileMetaStore metaStore) {
+        // 1.计算hash和哈希槽
+        int hash = MyHash.hash(key);
+        int slotIdx = hash % hashSlotNum;
+        int absoluteSlotPos = Index_Header_Size + slotIdx * Hash_Slot_Size;// 哈希槽的绝对位置
+
+        // 2.哈希槽值
+        int slotVal = fileMap.getInt(absoluteSlotPos);
+        // 哈希槽未使用
+        if (slotVal <= InvalidIndex || slotVal >= indexCount) {
+            return null;// 没找到
+        }
+
+        // 3.链表查找
+        int curIdx = slotVal;// 当前索引的下标
+        while (true) {
+            int curAbsPos = Index_Header_Size + Hash_Slot_Size * hashSlotNum + Index_Size * curIdx;// 当前索引存储的绝对位置
+            Index cur = doReadIndex(curAbsPos);// 当前索引数据
+            // 先比较hash
+            if (cur.deleted == 0 && cur.hash == hash) {
+                // 再比较key
+                FileMeta meta = metaStore.readMeta(cur.offset).meta;
+                if (key.equals(meta.getKey())) {
+                    // 找到了直接返回
+                    return new IndexWrapper(curIdx, curAbsPos, cur);
+                }
+            }
+            // 发生冲突, 存在下一个索引则继续循环
+            if (cur.next > InvalidIndex && cur.next < indexCount) {
+                curIdx = cur.next;
+            } else {// 不存在退出循环
+                break;
+            }
+        }
+        return null;// 没找到
+    }
+
+    private Index doReadIndex(int absoluteIndexPos) {
+        byte[] dest = new byte[Index_Size];
+        fileMap.get(absoluteIndexPos, dest);
+        ByteBuffer buf = ByteBuffer.wrap(dest);
+        return Index.deserialize(buf);
+    }
+
+    @Override
+    public void close() throws Exception {
+        fileMap.force();
+        fileChannel.close();
+    }
+
+    // 索引条目
+    public static class Index {
+        public int hash;
+        public long offset;
+        public int deleted;// 0未删除，1已删除
+        public int next;
+
+        public Index(int hash, long offset, int deleted, int next) {
+            this.hash = hash;
+            this.offset = offset;
+            this.deleted = deleted;
+            this.next = next;
+        }
+
+        public ByteBuffer serialize() {
+            ByteBuffer buffer = ByteBuffer.allocate(Index_Size);
+            buffer.putInt(hash);
+            buffer.putLong(offset);
+            buffer.putInt(deleted);
+            buffer.putInt(next);// 将哈希槽旧值写入索引条目的next，以形成链表解决哈希冲突
+            buffer.flip();// 翻转待读
+            return buffer;
+        }
+
+        public static Index deserialize(ByteBuffer buffer) {
+            if (buffer.remaining() != Index_Size) {
+                throw new RuntimeException(String.format("非法反序列化，需要字节数为%d，提供的buf字节数为%d", Index_Size, buffer.remaining()));
+            }
+            int hash = buffer.getInt();
+            long offset = buffer.getLong();
+            int deleted = buffer.getInt();
+            int next = buffer.getInt();
+            return new Index(hash, offset, deleted, next);
+        }
+
+        @Override
+        public String toString() {
+            return "Index{" +
+                    "hash=" + hash +
+                    ", offset=" + offset +
+                    ", deleted=" + deleted +
+                    ", next=" + next +
+                    '}';
+        }
+    }
+
+    @Data
+    @AllArgsConstructor
+    public static class IndexWrapper {
+        public int indexIdx;// 当前索引的下标
+        public int absoluteIndexPos;// 索引存储在文件的绝对位置
+        public Index index;// 索引数据
     }
 }
 ```

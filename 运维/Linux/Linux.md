@@ -1987,7 +1987,7 @@ echo "两数之和为 : $val"
 | :----- | :------------------------------------------- | :------------------------- |
 | =      | 检测两个字符串是否相等，相等返回 true。      | `[ $a = $b ]` 返回 false。 |
 | !=     | 检测两个字符串是否不相等，不相等返回 true。  | `[ $a != $b ]` 返回 true。 |
-| -z     | 检测字符串长度是否为0，为0返回 true。        | `[ -z $a ]` 返回 false。   |
+| -z     | 检测字符串长度是否为0，为0返回 true。        | `[ -z "$a" ]` 返回 false。 |
 | -n     | 检测字符串长度是否不为 0，不为 0 返回 true。 | `[ -n "$a" ]` 返回 true。  |
 | $      | 检测字符串是否为空，不为空返回 true。        | `[ $a ]` 返回 true。       |
 
@@ -2479,6 +2479,49 @@ addEnvArg $JAVA_HOME/bin $MAVEN_HOME/bin $GRADLE_HOME/bin
 ```
 
 这样多次调用`source /etc/profile`时也不会冗余添加变量了。
+
+### 启动/关闭/重启服务
+
+```shell
+#!/bin/bash
+jarfile="target/distribute_file_service-1.0-SNAPSHOT.jar"
+pid=`ps -ef | grep "${jarfile}" | grep -v grep| awk '{print $2}'` # 现存服务的pid
+
+if [ $1 = "start" ]
+then
+    echo "即将启动服务: ${jarfile}"
+    if [ -n "${pid}" ] # 检查字符串是否不为空
+    then
+        echo "服务已经启动，请勿重复操作, pid: ${pid}"
+        exit
+    fi
+    echo "nohup java -jar ${jarfile} &"
+    nohup java -jar ${jarfile} &
+    ps -ef | grep ${jarfile} | grep -v "grep"
+elif [ $1 = "stop" ]
+then
+    echo "即将关闭服务: ${jarfile}"
+    if [ -z "${pid}" ] # 检查字符串是否为空
+    then 
+        echo "服务不存在: ${jarfile}"
+        exit
+    fi
+    echo "kill ${pid}"
+    kill ${pid}
+    echo "成功关闭, pid: ${pid}"
+elif [ $1 = "restart" ]
+then 
+    echo "即将重启服务: ${jarfile}"
+    if [ -n "${pid}" ] # 检查字符串是否不为空
+    then
+        echo "关闭服务: ${jarfile}, pid: ${pid}"
+        kill ${pid}
+    fi
+    sleep 5s
+    echo "nohup java -jar ${jarfile} &"
+    nohup java -jar ${jarfile} &
+fi 	# 这个fi必须得有
+```
 
 # Linux下安装MySQL8
 
