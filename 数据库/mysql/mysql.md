@@ -390,8 +390,11 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 - JSON-SET()
 - JSON-EXTRACT()
 - JSON-REMOVE
+- JSON-SEARCH()
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
+
+JSON函数文档：https://dev.mysql.com/doc/refman/8.0/en/json-search-functions.html
 
 # SQL与函数与运算符
 
