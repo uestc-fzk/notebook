@@ -1,11 +1,5 @@
 # JDBC核心技术
 
-讲师：宋红康
-
-微博：尚硅谷-宋红康
-
-***
-
 ## 第1章：JDBC概述
 
 ### 1.1 数据的持久化
@@ -14,7 +8,7 @@
 
 - 持久化的主要应用是将内存中的数据存储在关系型数据库中，当然也可以存储在磁盘文件、XML数据文件中。
 
-  ![1566741430592](尚硅谷_宋红康_JDBC.assets/1566741430592.png) 
+  ![1566741430592](jdbc.assets/1566741430592.png) 
 
 ### 1.2 Java中的数据存储技术
 
@@ -33,20 +27,20 @@
 - JDBC的目标是使Java程序员使用JDBC可以连接任何**提供了JDBC驱动程序**的数据库系统，这样就使得程序员无需对特定的数据库系统的特点有过多的了解，从而大大简化和加快了开发过程。
 - 如果没有JDBC，那么Java程序访问数据库时是这样的：
 
-![1555575760234](尚硅谷_宋红康_JDBC.assets/1555575760234.png)
+![1555575760234](jdbc.assets/1555575760234.png)
 
 ***
 
 - 有了JDBC，Java程序访问数据库时是这样的：
 
 
-![1555575981203](尚硅谷_宋红康_JDBC.assets/1555575981203.png)
+![1555575981203](jdbc.assets/1555575981203.png)
 
 ***
 
 - 总结如下：
 
-![1566741692804](尚硅谷_宋红康_JDBC.assets/1566741692804.png)
+![1566741692804](jdbc.assets/1566741692804.png)
 
 ### 1.4 JDBC体系结构
 
@@ -60,15 +54,13 @@
 
 ### 1.5 JDBC程序编写步骤
 
-![1565969323908](尚硅谷_宋红康_JDBC.assets/1565969323908.png)
+![1565969323908](jdbc.assets/1565969323908.png)
 
 > 补充：ODBC(**Open Database Connectivity**，开放式数据库连接)，是微软在Windows平台下推出的。使用者在程序中只需要调用ODBC API，由 ODBC 驱动程序将调用转换成为对特定的数据库的调用请求。
 
 ## 第2章：获取数据库连接
 
-### 2.1 要素一：Driver接口实现类
-
-#### 2.1.1 Driver接口介绍
+### 2.1 Driver接口实现类
 
 - java.sql.Driver 接口是所有 JDBC 驱动程序需要实现的接口。这个接口是提供给数据库厂商使用的，不同数据库厂商提供不同的实现。
 
@@ -76,23 +68,7 @@
   - Oracle的驱动：**oracle.jdbc.driver.OracleDriver**
   - mySql的驱动： **com.mysql.jdbc.Driver**
 
-![1555576157618](尚硅谷_宋红康_JDBC.assets/1555576157618.png)
-
-![1555576170074](尚硅谷_宋红康_JDBC.assets/1555576170074.png)
-
-- 将上述jar包拷贝到Java工程的一个目录中，习惯上新建一个lib文件夹。
-
- ![1566134718955](尚硅谷_宋红康_JDBC.assets/1566134718955.png)
-
-在驱动jar上右键-->Build Path-->Add to Build Path
-
- ![1566134781682](尚硅谷_宋红康_JDBC.assets/1566134781682.png)
-
 注意：如果是Dynamic Web Project（动态的web项目）话，则是把驱动jar放到WebContent（有的开发工具叫WebRoot）目录中的WEB-INF目录中的lib目录下即可
-
- ![1566135290460](尚硅谷_宋红康_JDBC.assets/1566135290460.png)
-
-#### 2.1.2 加载与注册JDBC驱动
 
 - 加载驱动：加载 JDBC 驱动需调用 Class 类的静态方法 forName()，向其传递要加载的 JDBC 驱动的类名
 
@@ -103,9 +79,9 @@
 
   - 通常不用显式调用 DriverManager 类的 registerDriver() 方法来注册驱动程序类的实例，因为 Driver 接口的驱动程序类**都**包含了静态代码块，在这个静态代码块中，会调用 DriverManager.registerDriver() 方法来注册自身的一个实例。下图是MySQL的Driver实现类的源码：
 
-    ![1566136831283](尚硅谷_宋红康_JDBC.assets/1566136831283.png)
+    ![1566136831283](jdbc.assets/1566136831283.png)
 
-### 2.2 要素二：URL
+### 2.2 URL
 
 - JDBC URL 用于标识一个被注册的驱动程序，驱动程序管理器通过这个 URL 选择正确的驱动程序，从而建立到数据库的连接。
 
@@ -117,7 +93,7 @@
 
 - 举例：
 
-  ![1555576477107](尚硅谷_宋红康_JDBC.assets/1555576477107.png)
+  ![1555576477107](jdbc.assets/1555576477107.png)
 
 - **几种常用数据库的 JDBC URL**
 
@@ -138,11 +114,6 @@
     - jdbc:sqlserver://主机名称:sqlserver服务端口号:DatabaseName=数据库名称
 
     - jdbc:sqlserver://localhost:1433:DatabaseName=atguigu
-
-### 2.3 要素三：用户名和密码
-
-- user,password可以用“属性名=属性值”方式告诉数据库
-- 可以调用 DriverManager 类的 getConnection() 方法建立到数据库的连接
 
 ### 2.4 数据库连接方式举例
 
@@ -174,66 +145,6 @@
 ```
 
 > 说明：上述代码中显式出现了第三方数据库的API
-
-#### 2.4.2 连接方式二
-
-```java
-	@Test
-    public void testConnection2() {
-        try {
-            //1.实例化Driver
-            String className = "com.mysql.jdbc.Driver";
-            Class clazz = Class.forName(className);
-            Driver driver = (Driver) clazz.newInstance();
-
-            //2.提供url，指明具体操作的数据
-            String url = "jdbc:mysql://localhost:3306/test";
-
-            //3.提供Properties的对象，指明用户名和密码
-            Properties info = new Properties();
-            info.setProperty("user", "root");
-            info.setProperty("password", "abc123");
-
-            //4.调用driver的connect()，获取连接
-            Connection conn = driver.connect(url, info);
-            System.out.println(conn);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-```
-
-> 说明：相较于方式一，这里使用反射实例化Driver，不在代码中体现第三方数据库的API。体现了面向接口编程思想。
-
-#### 2.4.3 连接方式三
-
-```java
-	@Test
-    public void testConnection3() {
-        try {
-            //1.数据库连接的4个基本要素：
-            String url = "jdbc:mysql://localhost:3306/test";
-            String user = "root";
-            String password = "abc123";
-            String driverName = "com.mysql.jdbc.Driver";
-
-            //2.实例化Driver
-            Class clazz = Class.forName(driverName);
-            Driver driver = (Driver) clazz.newInstance();
-            //3.注册驱动
-            DriverManager.registerDriver(driver);
-            //4.获取连接
-            Connection conn = DriverManager.getConnection(url, user, password);
-            System.out.println(conn);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-    }
-```
-
-> 说明：使用DriverManager实现数据库的连接。体会获取连接必要的4个基本要素。
 
 #### 2.4.4 连接方式四
 
@@ -279,7 +190,7 @@
 
 > 说明：不必显式的注册驱动了。因为在DriverManager的源码中已经存在静态代码块，实现了驱动的注册。
 
-#### 2.4.5 连接方式五(最终版)
+#### 2.4.5 配置文件
 
 ```java
 	@Test
@@ -314,13 +225,6 @@ url=jdbc:mysql://localhost:3306/test
 driverClass=com.mysql.jdbc.Driver
 ```
 
-> 说明：使用配置文件的方式保存配置信息，在代码中加载配置文件
->
-> **使用配置文件的好处：**
->
-> ①实现了代码和数据的分离，如果需要修改配置信息，直接在配置文件中修改，不需要深入代码
-> ②如果修改了配置信息，省去重新编译的过程。
-
 ## 第3章：使用PreparedStatement实现CRUD操作
 
 ### 3.1 操作和访问数据库
@@ -332,7 +236,7 @@ driverClass=com.mysql.jdbc.Driver
   - PrepatedStatement：SQL 语句被预编译并存储在此对象中，可以使用此对象多次高效地执行该语句。
   - CallableStatement：用于执行 SQL 存储过程
 
-  ![1566573842140](尚硅谷_宋红康_JDBC.assets/1566573842140.png)
+  ![1566573842140](jdbc.assets/1566573842140.png)
 
 ### 3.2 使用Statement操作数据表的弊端
 
@@ -471,7 +375,7 @@ public class StatementTest {
 
 综上：
 
-![1566569819744](尚硅谷_宋红康_JDBC.assets/1566569819744.png)
+![1566569819744](jdbc.assets/1566569819744.png)
 
 ### 3.3 PreparedStatement的使用
 
@@ -626,7 +530,7 @@ public class StatementTest {
   - getString()
   - …
 
-  ![1555580152530](尚硅谷_宋红康_JDBC.assets/1555580152530.png)
+  ![1555580152530](jdbc.assets/1555580152530.png)
 
 #### 3.4.2 ResultSetMetaData
 
@@ -643,7 +547,7 @@ public class StatementTest {
 
   -  isAutoIncrement(int column)：指示是否自动为指定列进行编号，这样这些列仍然是只读的。 
 
-![1555579494691](尚硅谷_宋红康_JDBC.assets/1555579494691.png)
+![1555579494691](jdbc.assets/1555579494691.png)
 
 **问题1：得到结果集后, 如何知道该结果集中有哪些列 ？ 列名是什么？**
 
@@ -655,7 +559,7 @@ public class StatementTest {
 2. **获取 ResultSet 中有多少列**：调用 ResultSetMetaData 的 getColumnCount() 方法
 3. **获取 ResultSet 每一列的列的别名是什么**：调用 ResultSetMetaData 的getColumnLabel() 方法
 
-![1555579816884](尚硅谷_宋红康_JDBC.assets/1555579816884.png)
+![1555579816884](jdbc.assets/1555579816884.png)
 
 ### 3.5 资源的释放
 
@@ -691,17 +595,17 @@ public class StatementTest {
 
 **练习题1：从控制台向数据库的表customers中插入一条数据，表结构如下：**
 
-![1555580275036](尚硅谷_宋红康_JDBC.assets/1555580275036.png)
+![1555580275036](jdbc.assets/1555580275036.png)
 
 
 
 **练习题2：创立数据库表 examstudent，表结构如下：**
 
-![1555580735377](尚硅谷_宋红康_JDBC.assets/1555580735377.png)
+![1555580735377](jdbc.assets/1555580735377.png)
 
 向数据表中添加如下数据：
 
-![1555580763636](尚硅谷_宋红康_JDBC.assets/1555580763636.png)
+![1555580763636](jdbc.assets/1555580763636.png)
 
 **代码实现1：插入一个新的student 信息**
 
@@ -718,11 +622,11 @@ Grade:
 
 **代码实现2：在 eclipse中建立 java 程序：输入身份证号或准考证号可以查询到学生的基本信息。结果如下：**
 
-![1555580937490](尚硅谷_宋红康_JDBC.assets/1555580937490.png)
+![1555580937490](jdbc.assets/1555580937490.png)
 
 **代码实现3：完成学生信息的删除功能**
 
-![1555580965019](尚硅谷_宋红康_JDBC.assets/1555580965019.png)
+![1555580965019](jdbc.assets/1555580965019.png)
 
 ***
 
@@ -737,7 +641,7 @@ Grade:
 
 - MySQL的四种BLOB类型(除了在存储的最大信息量上不同外，他们是等同的)
 
-![1555581069798](尚硅谷_宋红康_JDBC.assets/1555581069798.png)
+![1555581069798](jdbc.assets/1555581069798.png)
 
 - 实际使用中根据需要存入的数据大小定义不同的BLOB类型。
 - 需要注意的是：如果存储的文件过大，数据库的性能会下降。
@@ -1103,7 +1007,7 @@ public void update(Connection conn ,String sql, Object... args) {
 
 - 数据库提供的4种事务隔离级别：
 
-  ![1555586275271](尚硅谷_宋红康_JDBC.assets/1555586275271.png)
+  ![1555586275271](jdbc.assets/1555586275271.png)
 
 - Oracle 支持的 2 种事务隔离级别：**READ COMMITED**, SERIALIZABLE。 Oracle 默认的事务隔离级别为: **READ COMMITED** 。
 
@@ -1160,11 +1064,11 @@ public void update(Connection conn ,String sql, Object... args) {
 - 作用：为了实现功能的模块化，更有利于代码的维护和升级。
 - 下面是尚硅谷JavaWeb阶段书城项目中DAO使用的体现：
 
-![1566726681515](尚硅谷_宋红康_JDBC.assets/1566726681515.png)
+![1566726681515](jdbc.assets/1566726681515.png)
 
 - 层次结构：
 
-![1566745811244](尚硅谷_宋红康_JDBC.assets/1566745811244.png)
+![1566745811244](jdbc.assets/1566745811244.png)
 
 ### 【BaseDAO.java】
 
@@ -1614,11 +1518,11 @@ public class User {
 - **数据库连接池**负责分配、管理和释放数据库连接，它**允许应用程序重复使用一个现有的数据库连接，而不是重新建立一个**。
 - 数据库连接池在初始化时将创建一定数量的数据库连接放到连接池中，这些数据库连接的数量是由**最小数据库连接数来设定**的。无论这些数据库连接是否被使用，连接池都将一直保证至少拥有这么多的连接数量。连接池的**最大数据库连接数量**限定了这个连接池能占有的最大连接数，当应用程序向连接池请求的连接数超过最大连接数量时，这些请求将被加入到等待队列中。
 
-![1555593464033](尚硅谷_宋红康_JDBC.assets/1555593464033.png)
+![1555593464033](jdbc.assets/1555593464033.png)
 
 - **工作原理：**
 
-![1555593598606](尚硅谷_宋红康_JDBC.assets/1555593598606.png)
+![1555593598606](jdbc.assets/1555593598606.png)
 
 - **数据库连接池技术的优点**
 
@@ -1884,9 +1788,9 @@ filters=wall
   - 工具类：org.apache.commons.dbutils.DbUtils   
 - API包说明：
 
-![1555595163263](尚硅谷_宋红康_JDBC.assets/1555595163263.png)
+![1555595163263](jdbc.assets/1555595163263.png)
 
-![1555595198644](尚硅谷_宋红康_JDBC.assets/1555595198644.png)
+![1555595198644](jdbc.assets/1555595198644.png)
 
 
 
