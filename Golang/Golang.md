@@ -854,87 +854,129 @@ func (m *Mutex) lockSlow() {
 }
 ```
 
-
-
-
-
-
-
 # 数据访问
 
-目前数据访问部分将使用XORM框架进行数据库MySQL以及Postgresql的连接访问。
+## 内置sql包
 
-## 连接Postgresql
+go内置的database/sql包功能很强大，**实现了连接池功能**，比如Java的jdbc就没有维护连接池，需要额外引入如Druid数据源来维护连接池。
 
-1、依赖
+### 加载驱动
 
 ```go
-go get xorm.io/xorm
-go get github.com/lib/pq
+sql.Register("mysql", &mysql.MySQLDriver{})
 ```
 
-第二个依赖就是连接Postgresql的相关接口实现
-
-2、main函数
-
-> 注意：需要将github.com/lib/pq引入主函数，从而调用其内部的init函数
-> `import _ "github.com/lib/pq"`
-
-主函数如下：
+在Mysql或postgresql的驱动包中都通过包init函数自动加载了驱动，不要手动再调用加载驱动函数，否则会报错。所以只需要引入在main函数所在文件引入驱动包即可：
 
 ```go
+import _ "github.com/go-sql-driver/mysql" // mysql
+//import _ "github.com/lib/pq" // postgresql
+```
+
+如mysql驱动包的init函数如下：
+```go
+func init() {
+	sql.Register("mysql", &MySQLDriver{})
+}
+```
+
+### crud
+
+以下案例使用Mysql测试，需要先引入Mysql的驱动包。
+
+下面是使用内置sql包进行的简单增删改查，可以发现如果仅仅是插入、更新、删除操作直接使用sql包就可以啦，但是查询需要进行结构体解析转换，还是需要引入其它orm库进行映射才能方便操作。
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	_ "github.com/go-sql-driver/mysql"
+)
+
 func main() {
-	engine, err := xorm.NewEngine("postgres", "host=localhost port=5432"+
-		" user=postgres password=fzk010326"+
-		" dbname=mydatabase sslmode=disable")
+	ctx := context.Background()
+	db := getDb(ctx)
+	defer db.Close()
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		log.Fatalln(err)
+		panic(err)
 	}
-	defer engine.Close()
-	engine.ShowSQL(true)
-	engine.SetMapper(names.SnakeMapper{}) // 名称映射规则
-    
-    // ... 这里写调用dao层
+	defer conn.Close()
+	// query(ctx, conn)
+	// update(ctx, conn)
+	// insert(ctx, conn)
+}
+
+func getDb(ctx context.Context) *sql.DB {
+	db, err := sql.Open("mysql", "user:password@tcp(ip:port)/dbname?charset=utf8")
+	if err != nil {
+		panic(err)
+	}
+	return db
+}
+
+func query(ctx context.Context, conn *sql.Conn) {
+	stmt, err := conn.PrepareContext(ctx, "SELECT id,json_col FROM t2 WHERE id=?")
+	if err != nil {
+		panic(err)
+	}
+	rows, err := stmt.Query(7)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close() // 这里必须关闭
+	columns, err := rows.Columns()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%+v\n", columns)
+	rows.Next()
+	id := 0
+	jsonCol := ""
+	if err := rows.Scan(&id, &jsonCol); err != nil {
+		panic(err)
+	}
+	fmt.Printf("id: %+v\njson_col: %+v\n", id, jsonCol)
+}
+
+func update(ctx context.Context, conn *sql.Conn) {
+	prep, err := conn.PrepareContext(ctx, "update t2 set json_col=? where id=?")
+	if err != nil {
+		panic(err)
+	}
+	exec, err := prep.Exec("{\"name\":\"fzk\"}", 1)
+	if err != nil {
+		panic(err)
+	}
+	affected, err := exec.RowsAffected()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(affected)
+}
+
+func insert(ctx context.Context, conn *sql.Conn) {
+	stmt, err := conn.PrepareContext(ctx, "insert into t2(json_col) VALUES(?)")
+	if err != nil {
+		panic(err)
+	}
+	exec, err := stmt.Exec(fmt.Sprintf("{\"%s\":\"%s\"}", "name", "fzk"))
+	if err != nil {
+		panic(err)
+	}
+	id, err := exec.LastInsertId()
+	if err != nil {
+		panic(err)
+	}
+	println(id)
 }
 ```
 
-3、dao层
-
-```go
-type User struct {
-	Id       int `xorm:"pk autoincr"`
-	Username string
-	Birthday time.Time
-	Balance  string
-	Location string
-}
-
-// GetUserById 根据id查询
-func GetUserById(engine *xorm.Engine, id int) (*User, error) {
-	var user *User = new(User)
-	_, err := engine.ID(id).Get(user)
-	if err != nil {
-		return nil, err
-	}
-	return user, nil
-}
-
-// GetUsers 查询所有
-func GetUsers(engine *xorm.Engine) (*[]*User, error) {
-	var sql = "SELECT * FROM public.user"
-	var users = make([]*User, 0, 10)
-
-	err := engine.SQL(sql).Find(&users)
-	if err != nil {
-		return nil, err
-	}
-	return &users, nil
-}
-```
-
-> 注意：Postgresql和MySQL不同的是，在查询表的时候，需要在限定其schema，默认是public，比如查询所有就是`SELECT * FROM public.user`，在Postgresql中用双引号默认使用public的schema，如`SELECT * FROM "user"`也是可以的，在打开XORM的SQL输出的时候，看到的SQL就是这样用双引号来查询的
-
-## 事务管理
+### 事务
 
 事务管理一般都是在service层实现。go中并没有Spring那么强大的框架，没有AOP实现事务的声明式管理，但是总不能在每个service层方法中都去创建事务、提交事务或回滚事务吧。
 
@@ -942,116 +984,134 @@ func GetUsers(engine *xorm.Engine) (*[]*User, error) {
 
 在go中基础的对象是函数，那么可以对这个函数进行一层静态代理，在go中又称为闭包。
 
-下面以xorm框架为例子：
+以下是实现的一个事务包装器，通过闭包方式，将事务会话传递给用户函数，从而使得用户业务函数不再关注事务的开启、提交、回滚等操作。
 
 ```go
-// transactionWrapper 事务包装器
-// 要是有泛型的话这里会更方便，而且 Go 1.18 已经支持泛型了
-// 注意：确保正确情况下返回结果必不为nil，否则返回nil,err
-func transactionWrapper(serviceFunc func(sess *xorm.Session) (interface{}, error)) func() (interface{}, error) {
-	return func() (interface{}, error) {
-		// 1.开事务
-		sess := postgresql.Engine.NewSession()
-		if err := sess.Begin(); err != nil {
-			log.BizLogger.Errorf("新建session事务失败: %s", err.Error())
-			return nil, err
-		}
-		defer func() {
-			sess.Close()
-		}()
+const (
+	TxUnComplete int64 = 0 // 事务未完成
+	TxCommitted  int64 = 1 // 事务已提交
+	TxRollback   int64 = 2 // 事务已回滚
+)
 
-		// 2.调用service方法
-		result, err := serviceFunc(sess)
-		if err != nil {
-			return nil, err
-		}
-
-		// 3.提交事务
-		if err := sess.Commit(); err != nil {
-			log.BizLogger.Errorf("用户组操作事务提交失败: %+v, %+v", err, result)
-			return nil, err
-		}
-		// 4.返回结果
-		return result, nil
-	}
+type Tx struct {
+	*sql.Tx       // 继承其所有方法
+	state   int64 // 当前事务状态
 }
-```
 
-那么如何用这个包装器呢？
-
-从下面的代码可以看出，将service层方法中的事务管理抽离出去了，service层几乎只关心业务逻辑，看着非常舒服。
-
-```go
-// UpdateUserGroup 修改用户组
-func UpdateUserGroup(opts *userGroupEntity.UpdateUserGroupOptions) (*userGroupEntity.UserGroup, *userGroupEntity.UserGroup, error) {
-	wrapper := transactionWrapper(func(sess *xorm.Session) (interface{}, error) {
-		// 1.检查id是否存在
-		oldUserGroup, err := userGroupRepo.GetUserGroupById(opts.Id, sess)
-		if err != nil {
-			return nil, err
-		}
-		if oldUserGroup == nil {
-			return nil, errors.New(fmt.Sprintf("id=%d的userGroup不存在", opts.Id))
-		}
-		// 2.检查username是否重复
-		exits, err := userGroupRepo.CheckGroupNameExits(opts.GroupName, opts.Id, sess)
-		if err != nil {
-			return nil, err
-		}
-		if exits {
-			return nil, errors.New(fmt.Sprintf("groupName=%s的用户组已经存在", opts.GroupName))
-		}
-		// 3.更新操作
-		newUserGroup := &userGroupEntity.UserGroup{
-			Id:        oldUserGroup.Id,
-			GroupName: opts.GroupName,
-			Director:  opts.Director,
-
-			Deleted:    oldUserGroup.Deleted,
-			CreateTime: oldUserGroup.CreateTime,
-			CreateBy:   oldUserGroup.CreateBy,
-			ModifyTime: time.Now(),
-			ModifyBy:   opts.OperatedBy,
-		}
-		if err := userGroupRepo.UpdateUserGroup(newUserGroup, sess); err != nil {
-			return nil, err
-		}
-
-		return []*userGroupEntity.UserGroup{oldUserGroup, newUserGroup}, nil
-	})
-	result, err := wrapper()
-	if err != nil {
-		return nil, nil, err
-	}
-	userGroups := result.([]*userGroupEntity.UserGroup)
-	return userGroups[0], userGroups[1], nil
-}
-```
-
-关于事务的session的处理？在Spring管理的事务中，session会话被保存到线程缓存ThreadLocal中，dao层直接获取该session对象即可，因此可以只关注于SQL的逻辑。
-
-而xorm框架的话，可以在dao层的每个方法都加上一个session的参数，将service层的session传入即可。如下：
-
-```go
-// GetUserGroupById 通过id查询userGroup，不存在返回nil
-func GetUserGroupById(id int64, sess *xorm.Session) (*userGroupEntity.UserGroup, error) {
-	if sess == nil {
-		sess = postgresql.Engine.NewSession()
-		defer sess.Close()
-	}
-	userGroup := &userGroupEntity.UserGroup{}
-	exits, err := sess.ID(id).Where("deleted=0").Get(userGroup)
+func NewTx(ctx context.Context, db *sql.DB, readOnly bool) (*Tx, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault, ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
-	if exits {
-		return userGroup, nil
+	return &Tx{tx, TxUnComplete}, nil
+}
+
+// CommitOnce 事务提交
+// 通过cas保证事务只提交1次
+func (t *Tx) CommitOnce() error {
+	if atomic.CompareAndSwapInt64(&t.state, TxUnComplete, TxCommitted) {
+		return t.Commit()
+	} else {
+		val := atomic.LoadInt64(&t.state)
+		if val == TxCommitted {
+			return errors.New("事务已经提交，请勿重复提交")
+		} else if val == TxRollback {
+			return errors.New("事务已经回滚，无法提交")
+		} else {
+			return fmt.Errorf("未知的事务状态: %d", val)
+		}
 	}
-	return nil, nil
+}
+
+// RollbackIfNotComplete 回滚未完成的事务
+// 通过cas保证事务只回滚1次
+// 可以直接放在defer回滚, 确保安全调用1次
+func (t *Tx) RollbackIfNotComplete() error {
+	if atomic.CompareAndSwapInt64(&t.state, TxUnComplete, TxRollback) {
+		return t.Rollback()
+	}
+	return nil
+}
+
+// TransactionWrapper 事务包装器
+func TransactionWrapper(ctx context.Context, db *sql.DB, readOnly bool, f func(*Tx) error) error {
+	tx, err := NewTx(ctx, db, readOnly)
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackIfNotComplete()
+	err = f(tx)
+	if err == nil {
+		return tx.Commit()
+	}
+	return err
 }
 ```
 
-没有三元运算符确实有点sb。
+单测文件tx_text.go代码如下：使用事务包装器案例如下
+
+```go
+func TestTransactionWrapper(t *testing.T) {
+	// 1.定义测试用例
+	type Case struct {
+		caseName string // 用例名
+		ctx      context.Context
+		readOnly bool
+		f        func(*Tx) error
+	}
+	cases := []*Case{{"用例1", context.Background(), true, test1},
+		{"用例2", context.Background(), false, test2}}
+	db := getDb(context.Background())
+	defer db.Close()
+	// 2.执行每个用例
+	for _, c := range cases {
+		t.Run(c.caseName, func(tt *testing.T) {
+			if err := TransactionWrapper(c.ctx, db, c.readOnly, c.f); err != nil {
+				t.Errorf("err: %+v", err)
+			}
+		})
+	}
+}
+func test1(tx *Tx) error {
+	// 模拟crud
+	return nil
+}
+func test2(tx *Tx) error {
+	// 模拟crud
+	return errors.New("mock err")
+}
+```
+
+执行测试：`go test tx_test.go tx.go main.go -v -cover -run=^TestTransactionWrapper$`
+
+### 源码分析
+
+以mysql驱动为例子，获取单个mysql连接的代码如下：
+
+```go
+// 1.获取mysql的连接器
+connector, err := mysql.NewConnector(&mysql.Config{
+	User:   "user",
+	Passwd: "password",
+	Net:    "tcp",
+	Addr:   "124.223.192.8:3306",
+	DBName: "test",
+})
+if err != nil {
+	panic(err)
+}
+// 2.建立单个tcp长连接
+mysqlConn, err := connector.Connect(ctx)
+if err != nil {
+	panic(err)
+}
+```
+
+为了提高数据库访问的并发能力，一般会建立多个TCP长连接并维护一个连接池，比如Java中的Druid数据源就是一个具有监控功能的数据库连接池。在go的database/sql包已经实现了功能简单的连接池。
+
+其实go的`sql.DB`维护的连接池实现较简单，维护了空闲连接列表，获取连接时先从空闲连接获取，没有则新建连接，若达到最大连接数，则等待空闲连接。同时有一个协程定时检查空闲连接是否达到最大空闲时间，将空闲超时连接关闭。
+源码比较简单，直接看即可。
+
 
 ## xorm时间类型转换失败
 
