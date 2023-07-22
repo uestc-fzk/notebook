@@ -1,8 +1,6 @@
-# JDBC核心技术
+# JDBC概述
 
-## 第1章：JDBC概述
-
-### 1.1 数据的持久化
+## 数据的持久化
 
 - 持久化(persistence)：**把数据保存到可掉电式存储设备中以供之后使用**。大多数情况下，特别是企业级应用，**数据持久化意味着将内存中的数据保存到硬盘**上加以”固化”**，而持久化的实现过程大多通过各种关系数据库来完成**。
 
@@ -10,17 +8,15 @@
 
   ![1566741430592](jdbc.assets/1566741430592.png) 
 
-### 1.2 Java中的数据存储技术
-
 - 在Java中，数据库存取技术可分为如下几类：
-  - **JDBC**直接访问数据库
+  - JDBC直接访问数据库
   - JDO (Java Data Object )技术
 
-  - **第三方O/R工具**，如Hibernate, Mybatis 等
+  - 第三方O/R工具，如Hibernate, Mybatis 等
 
 - JDBC是java访问数据库的基石，JDO、Hibernate、MyBatis等只是更好的封装了JDBC。
 
-### 1.3 JDBC介绍
+## JDBC介绍
 
 - JDBC(Java Database Connectivity)是一个**独立于特定数据库管理系统、通用的SQL数据库存取和操作的公共接口**（一组API），定义了用来访问数据库的标准Java类库，（**java.sql,javax.sql**）使用这些类库可以以一种**标准**的方法、方便地访问数据库资源。
 - JDBC为访问不同的数据库提供了一种**统一的途径**，为开发者屏蔽了一些细节问题。
@@ -42,8 +38,6 @@
 
 ![1566741692804](jdbc.assets/1566741692804.png)
 
-### 1.4 JDBC体系结构
-
 - JDBC接口（API）包括两个层次：
   - **面向应用的API**：Java API，抽象接口，供应用程序开发人员使用（连接数据库，执行SQL语句，获得结果）。
   -  **面向数据库的API**：Java Driver API，供开发商开发数据库驱动程序用。
@@ -52,36 +46,26 @@
 >
 > **不同的数据库厂商，需要针对这套接口，提供不同实现。不同的实现的集合，即为不同数据库的驱动。																————面向接口编程**
 
-### 1.5 JDBC程序编写步骤
+# 获取数据库连接
 
-![1565969323908](jdbc.assets/1565969323908.png)
+## Driver接口实现类
 
-> 补充：ODBC(**Open Database Connectivity**，开放式数据库连接)，是微软在Windows平台下推出的。使用者在程序中只需要调用ODBC API，由 ODBC 驱动程序将调用转换成为对特定的数据库的调用请求。
+- `java.sql.Driver` 接口是所有 JDBC 驱动程序需要实现的接口，不同数据库厂商提供不同的实现
 
-## 第2章：获取数据库连接
-
-### 2.1 Driver接口实现类
-
-- java.sql.Driver 接口是所有 JDBC 驱动程序需要实现的接口。这个接口是提供给数据库厂商使用的，不同数据库厂商提供不同的实现。
-
-- 在程序中不需要直接去访问实现了 Driver 接口的类，而是由驱动程序管理器类(java.sql.DriverManager)去调用这些Driver实现。
-  - Oracle的驱动：**oracle.jdbc.driver.OracleDriver**
-  - mySql的驱动： **com.mysql.jdbc.Driver**
-
-注意：如果是Dynamic Web Project（动态的web项目）话，则是把驱动jar放到WebContent（有的开发工具叫WebRoot）目录中的WEB-INF目录中的lib目录下即可
+- 编程时不用直接访问Driver的具体实现类，而是通过驱动程序管理器类(java.sql.DriverManager)去调用这些Driver实现
 
 - 加载驱动：加载 JDBC 驱动需调用 Class 类的静态方法 forName()，向其传递要加载的 JDBC 驱动的类名
 
-  - **Class.forName(“com.mysql.jdbc.Driver”);**
+  - **Class.forName("com.mysql.jdbc.Driver")**
 
 - 注册驱动：DriverManager 类是驱动程序管理器类，负责管理驱动程序
   - **使用DriverManager.registerDriver(com.mysql.jdbc.Driver)来注册驱动**
 
-  - 通常不用显式调用 DriverManager 类的 registerDriver() 方法来注册驱动程序类的实例，因为 Driver 接口的驱动程序类**都**包含了静态代码块，在这个静态代码块中，会调用 DriverManager.registerDriver() 方法来注册自身的一个实例。下图是MySQL的Driver实现类的源码：
+  - 通常不用显式调用 DriverManager 类的 registerDriver() 方法来注册驱动程序类的实例，因为一般驱动实现库的 Driver驱动程序类往往包含了静态代码块，在这个静态代码块中，会调用 DriverManager.registerDriver() 方法来注册自身的一个实例。下图是MySQL的Driver实现类的静态代码块：
 
     ![1566136831283](jdbc.assets/1566136831283.png)
 
-### 2.2 URL
+## URL
 
 - JDBC URL 用于标识一个被注册的驱动程序，驱动程序管理器通过这个 URL 选择正确的驱动程序，从而建立到数据库的连接。
 
@@ -115,539 +99,206 @@
 
     - jdbc:sqlserver://localhost:1433:DatabaseName=atguigu
 
-### 2.4 数据库连接方式举例
+## 获取单个连接
 
-#### 2.4.1 连接方式一
+在resources目录下的配置文件jdbc.properties如下：
 
-```java
-	@Test
-    public void testConnection1() {
-        try {
-            //1.提供java.sql.Driver接口实现类的对象
-            Driver driver = null;
-            driver = new com.mysql.jdbc.Driver();
-
-            //2.提供url，指明具体操作的数据
-            String url = "jdbc:mysql://localhost:3306/test";
-
-            //3.提供Properties的对象，指明用户名和密码
-            Properties info = new Properties();
-            info.setProperty("user", "root");
-            info.setProperty("password", "abc123");
-
-            //4.调用driver的connect()，获取连接
-            Connection conn = driver.connect(url, info);
-            System.out.println(conn);
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
+```properties
+url=jdbc:mysql://localhost:3306/test?charset=utf8
+user=root
+password=123456
+# Mysql8的驱动
+driver=com.mysql.cj.jdbc.Driver
+# Mysql5的驱动
+#driver=com.mysql.jdbc.Driver
 ```
 
-> 说明：上述代码中显式出现了第三方数据库的API
-
-#### 2.4.4 连接方式四
+有两种方式可以获取连接：
 
 ```java
-	@Test
-    public void testConnection4() {
-        try {
-            //1.数据库连接的4个基本要素：
-            String url = "jdbc:mysql://localhost:3306/test";
-            String user = "root";
-            String password = "abc123";
-            String driverName = "com.mysql.jdbc.Driver";
-
-            //2.加载驱动 （①实例化Driver ②注册驱动）
-            Class.forName(driverName);
-
-
-            //Driver driver = (Driver) clazz.newInstance();
-            //3.注册驱动
-            //DriverManager.registerDriver(driver);
-            /*
-            可以注释掉上述代码的原因，是因为在mysql的Driver类中声明有：
-            static {
-                try {
-                    DriverManager.registerDriver(new Driver());
-                } catch (SQLException var1) {
-                    throw new RuntimeException("Can't register driver!");
-                }
-            }
-
-             */
-
-
-            //3.获取连接
-            Connection conn = DriverManager.getConnection(url, user, password);
-            System.out.println(conn);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
+// 从配置文件jdbc.properties中加载连接数据库的配置信息
+// 必须有url/driver/user/password这四个配置
+public Properties getConnInfo() throws Exception {
+    Properties p = new Properties();
+    try (InputStream in = this.getClass().getClassLoader().getResourceAsStream("jdbc.properties")) {
+        p.load(in);
     }
+    return p;
+}
+
+public Connection getConn1() throws Exception {
+    Properties p = getConnInfo();
+    // 1.加载驱动
+    Driver driver = new com.mysql.cj.jdbc.Driver();
+    //// 2.注册驱动
+    //DriverManager.registerDriver(driver);
+    // 3.建立连接
+    return driver.connect(p.getProperty("url"), p);
+}
+
+public Connection getConn2() throws Exception {
+    Properties p = getConnInfo();
+    // 1.加载驱动
+    Class clazz = Class.forName(p.getProperty("driver"));
+    //// 2.注册驱动
+    //Driver driver = (Driver) clazz.getConstructor().newInstance();
+    //DriverManager.registerDriver(driver);
+    // 3.建立连接
+    return DriverManager.getConnection(p.getProperty("url"), p.getProperty("user"), p.getProperty("password"));
+}
+```
+
+在第二步的注册驱动这里，可以注释的原因是mysql的Driver实现类中静态代码块已经注册过msyql的驱动了：
+
+```java
+static {
+    try {
+        DriverManager.registerDriver(new Driver());
+    } catch (SQLException var1) {
+        throw new RuntimeException("Can't register driver!");
+    }
+}
 ```
 
 > 说明：不必显式的注册驱动了。因为在DriverManager的源码中已经存在静态代码块，实现了驱动的注册。
 
-#### 2.4.5 配置文件
+# CRUD
 
-```java
-	@Test
-    public  void testConnection5() throws Exception {
-    	//1.加载配置文件
-        InputStream is = ConnectionTest.class.getClassLoader().getResourceAsStream("jdbc.properties");
-        Properties pros = new Properties();
-        pros.load(is);
-        
-        //2.读取配置信息
-        String user = pros.getProperty("user");
-        String password = pros.getProperty("password");
-        String url = pros.getProperty("url");
-        String driverClass = pros.getProperty("driverClass");
+## JDBC程序编写步骤
 
-        //3.加载驱动
-        Class.forName(driverClass);
+![1565969323908](jdbc.assets/1565969323908.png)
 
-        //4.获取连接
-        Connection conn = DriverManager.getConnection(url,user,password);
-        System.out.println(conn);
+> 备注：ODBC(**Open Database Connectivity**，开放式数据库连接)，是微软在Windows平台下推出的。使用者在程序中只需要调用ODBC API，由 ODBC 驱动程序将调用转换成为对特定的数据库的调用请求。
 
-    }
-```
-
-其中，配置文件声明在工程的src目录下：【jdbc.properties】
-
-```properties
-user=root
-password=abc123
-url=jdbc:mysql://localhost:3306/test
-driverClass=com.mysql.jdbc.Driver
-```
-
-## 第3章：使用PreparedStatement实现CRUD操作
-
-### 3.1 操作和访问数据库
-
-- 数据库连接被用于向数据库服务器发送命令和 SQL 语句，并接受数据库服务器返回的结果。其实一个数据库连接就是一个Socket连接。
+## statement和预编译语句
 
 - 在 java.sql 包中有 3 个接口分别定义了对数据库的调用的不同方式：
   - Statement：用于执行静态 SQL 语句并返回它所生成结果的对象。 
-  - PrepatedStatement：SQL 语句被预编译并存储在此对象中，可以使用此对象多次高效地执行该语句。
+  - PreparedStatement：SQL 语句被**预编译并存储**在此对象中，可以使用此对象**多次高效地执行**该语句。
   - CallableStatement：用于执行 SQL 存储过程
 
   ![1566573842140](jdbc.assets/1566573842140.png)
 
-### 3.2 使用Statement操作数据表的弊端
+**使用Statement操作数据表的弊端**
 
-- 通过调用 Connection 对象的 createStatement() 方法创建该对象。该对象用于执行静态的 SQL 语句，并且返回执行结果。
-
-- Statement 接口中定义了下列方法用于执行 SQL 语句：
-
-  ```sql
-  int excuteUpdate(String sql)：执行更新操作INSERT、UPDATE、DELETE
-  ResultSet executeQuery(String sql)：执行查询操作SELECT
-  ```
-
-- 但是使用Statement操作数据表存在弊端：
+- 使用Statement操作数据表存在弊端：
 
   - **问题一：存在拼串操作，繁琐**
   - **问题二：存在SQL注入问题**
-
 - SQL 注入是利用某些系统没有对用户输入的数据进行充分的检查，而在用户输入数据中注入非法的 SQL 语句段或命令(如：SELECT user, password FROM user_table WHERE user='a' OR 1 = ' AND password = ' OR '1' = '1') ，从而利用系统的 SQL 引擎完成恶意行为的做法。
-
 - 对于 Java 而言，要防范 SQL 注入，只要用 PreparedStatement(从Statement扩展而来) 取代 Statement 就可以了。
 
-- 代码演示：
-
-```java
-public class StatementTest {
-
-	// 使用Statement的弊端：需要拼写sql语句，并且存在SQL注入的问题
-	@Test
-	public void testLogin() {
-		Scanner scan = new Scanner(System.in);
-
-		System.out.print("用户名：");
-		String userName = scan.nextLine();
-		System.out.print("密   码：");
-		String password = scan.nextLine();
-
-		// SELECT user,password FROM user_table WHERE USER = '1' or ' AND PASSWORD = '='1' or '1' = '1';
-		String sql = "SELECT user,password FROM user_table WHERE USER = '" + userName + "' AND PASSWORD = '" + password
-				+ "'";
-		User user = get(sql, User.class);
-		if (user != null) {
-			System.out.println("登陆成功!");
-		} else {
-			System.out.println("用户名或密码错误！");
-		}
-	}
-
-	// 使用Statement实现对数据表的查询操作
-	public <T> T get(String sql, Class<T> clazz) {
-		T t = null;
-
-		Connection conn = null;
-		Statement st = null;
-		ResultSet rs = null;
-		try {
-			// 1.加载配置文件
-			InputStream is = StatementTest.class.getClassLoader().getResourceAsStream("jdbc.properties");
-			Properties pros = new Properties();
-			pros.load(is);
-
-			// 2.读取配置信息
-			String user = pros.getProperty("user");
-			String password = pros.getProperty("password");
-			String url = pros.getProperty("url");
-			String driverClass = pros.getProperty("driverClass");
-
-			// 3.加载驱动
-			Class.forName(driverClass);
-
-			// 4.获取连接
-			conn = DriverManager.getConnection(url, user, password);
-
-			st = conn.createStatement();
-
-			rs = st.executeQuery(sql);
-
-			// 获取结果集的元数据
-			ResultSetMetaData rsmd = rs.getMetaData();
-
-			// 获取结果集的列数
-			int columnCount = rsmd.getColumnCount();
-
-			if (rs.next()) {
-
-				t = clazz.newInstance();
-
-				for (int i = 0; i < columnCount; i++) {
-					// //1. 获取列的名称
-					// String columnName = rsmd.getColumnName(i+1);
-
-					// 1. 获取列的别名
-					String columnName = rsmd.getColumnLabel(i + 1);
-
-					// 2. 根据列名获取对应数据表中的数据
-					Object columnVal = rs.getObject(columnName);
-
-					// 3. 将数据表中得到的数据，封装进对象
-					Field field = clazz.getDeclaredField(columnName);
-					field.setAccessible(true);
-					field.set(t, columnVal);
-				}
-				return t;
-			}
-		} catch (Exception e) {
-			e.printStackTrace();
-		} finally {
-			// 关闭资源
-			if (rs != null) {
-				try {
-					rs.close();
-				} catch (SQLException e) {
-					e.printStackTrace();
-				}
-			}
-			if (st != null) {
-				try {
-					st.close();
-				} catch (SQLException e) {
-					e.printStackTrace();
-				}
-			}
-
-			if (conn != null) {
-				try {
-					conn.close();
-				} catch (SQLException e) {
-					e.printStackTrace();
-				}
-			}
-		}
-
-		return null;
-	}
-}
-```
-
-综上：
-
-![1566569819744](jdbc.assets/1566569819744.png)
-
-### 3.3 PreparedStatement的使用
-
-#### 3.3.1 PreparedStatement介绍
-
-- 可以通过调用 Connection 对象的 **preparedStatement(String sql)** 方法获取 PreparedStatement 对象
-
-- **PreparedStatement 接口是 Statement 的子接口，它表示一条预编译过的 SQL 语句**
-
-- PreparedStatement 对象所代表的 SQL 语句中的参数用问号(?)来表示，调用 PreparedStatement 对象的 setXxx() 方法来设置这些参数. setXxx() 方法有两个参数，第一个参数是要设置的 SQL 语句中的参数的索引(从 1 开始)，第二个是设置的 SQL 语句中的参数的值
-
-#### 3.3.2 PreparedStatement vs Statement
-
-- 代码的可读性和可维护性。
+- **PreparedStatement表示一条预编译过的 SQL 语句**，因此可以防止SQL注入。
 
 - **PreparedStatement 能最大可能提高性能：**
   - DBServer会对**预编译**语句提供性能优化。因为预编译语句有可能被重复调用，所以<u>语句在被DBServer的编译器编译后的执行代码被缓存下来，那么下次调用时只要是相同的预编译语句就不需要编译，只要将参数直接传入编译过的语句执行代码中就会得到执行。</u>
-  - 在statement语句中,即使是相同操作但因为数据内容不一样,所以整个语句本身不能匹配,没有缓存语句的意义.事实是没有数据库会对普通语句编译后的执行代码缓存。这样<u>每执行一次都要对传入的语句编译一次。</u>
-  - (语法检查，语义检查，翻译成二进制命令，缓存)
+  - 语法检查，语义检查，翻译成二进制命令，缓存
 
-- PreparedStatement 可以防止 SQL 注入 
-
-#### 3.3.3 Java与SQL对应数据类型转换表
-
-| Java类型           | SQL类型                  |
-| ------------------ | ------------------------ |
-| boolean            | BIT                      |
-| byte               | TINYINT                  |
-| short              | SMALLINT                 |
-| int                | INTEGER                  |
-| long               | BIGINT                   |
-| String             | CHAR,VARCHAR,LONGVARCHAR |
-| byte   array       | BINARY  ,    VAR BINARY  |
-| java.sql.Date      | DATE                     |
-| java.sql.Time      | TIME                     |
-| java.sql.Timestamp | TIMESTAMP                |
-
-#### 3.3.4 使用PreparedStatement实现增、删、改操作
+### 更新
 
 ```java
-	//通用的增、删、改操作（体现一：增、删、改 ； 体现二：针对于不同的表）
-	public void update(String sql,Object ... args){
-		Connection conn = null;
-		PreparedStatement ps = null;
-		try {
-			//1.获取数据库的连接
-			conn = JDBCUtils.getConnection();
-			
-			//2.获取PreparedStatement的实例 (或：预编译sql语句)
-			ps = conn.prepareStatement(sql);
-			//3.填充占位符
-			for(int i = 0;i < args.length;i++){
-				ps.setObject(i + 1, args[i]);
-			}
-			
-			//4.执行sql语句
-			ps.execute();
-		} catch (Exception e) {
-			
-			e.printStackTrace();
-		}finally{
-			//5.关闭资源
-			JDBCUtils.closeResource(conn, ps);
-			
-		}
-	}
+// 通用的增、删、改操作
+public void update(String sql,Object ... args){
+    Connection conn = null;
+    PreparedStatement ps = null;
+    try {
+        //1.获取数据库的连接
+        conn = JDBCUtils.getConnection();
+        //2.获取PreparedStatement的实例 (或：预编译sql语句)
+        ps = conn.prepareStatement(sql);
+        //3.填充占位符
+        for(int i = 0;i < args.length;i++){
+            ps.setObject(i + 1, args[i]);
+        }
+        //4.执行sql语句
+        ps.execute();
+    } catch (Exception e) {
+        e.printStackTrace();
+    }finally{
+        //5.关闭资源
+        JDBCUtils.closeResource(conn, ps);
+    }
+}
 ```
 
-
-
-#### 3.3.5 使用PreparedStatement实现查询操作
+### 查询
 
 ```java
-	// 通用的针对于不同表的查询:返回一个对象 (version 1.0)
-	public <T> T getInstance(Class<T> clazz, String sql, Object... args) {
+// 通用的针对于不同表的查询:返回一个对象 (version 1.0)
+public <T> T getInstance(Class<T> clazz, String sql, Object... args) {
+    Connection conn = null;
+    PreparedStatement ps = null;
+    ResultSet rs = null;
+    try {
+        // 1.获取数据库连接
+        conn = JDBCUtils.getConnection();
 
-		Connection conn = null;
-		PreparedStatement ps = null;
-		ResultSet rs = null;
-		try {
-			// 1.获取数据库连接
-			conn = JDBCUtils.getConnection();
+        // 2.预编译sql语句，得到PreparedStatement对象
+        ps = conn.prepareStatement(sql);
 
-			// 2.预编译sql语句，得到PreparedStatement对象
-			ps = conn.prepareStatement(sql);
+        // 3.填充占位符
+        for (int i = 0; i < args.length; i++) {
+            ps.setObject(i + 1, args[i]);
+        }
 
-			// 3.填充占位符
-			for (int i = 0; i < args.length; i++) {
-				ps.setObject(i + 1, args[i]);
-			}
+        // 4.执行executeQuery(),得到结果集：ResultSet
+        rs = ps.executeQuery();
 
-			// 4.执行executeQuery(),得到结果集：ResultSet
-			rs = ps.executeQuery();
+        // 5.得到结果集的元数据：ResultSetMetaData
+        ResultSetMetaData rsmd = rs.getMetaData();
 
-			// 5.得到结果集的元数据：ResultSetMetaData
-			ResultSetMetaData rsmd = rs.getMetaData();
+        // 6.1通过ResultSetMetaData得到columnCount,columnLabel；通过ResultSet得到列值
+        int columnCount = rsmd.getColumnCount();
+        if (rs.next()) {
+            T t = clazz.newInstance();
+            for (int i = 0; i < columnCount; i++) {// 遍历每一个列
 
-			// 6.1通过ResultSetMetaData得到columnCount,columnLabel；通过ResultSet得到列值
-			int columnCount = rsmd.getColumnCount();
-			if (rs.next()) {
-				T t = clazz.newInstance();
-				for (int i = 0; i < columnCount; i++) {// 遍历每一个列
-
-					// 获取列值
-					Object columnVal = rs.getObject(i + 1);
-					// 获取列的别名:列的别名，使用类的属性名充当
-					String columnLabel = rsmd.getColumnLabel(i + 1);
-					// 6.2使用反射，给对象的相应属性赋值
-					Field field = clazz.getDeclaredField(columnLabel);
-					field.setAccessible(true);
-					field.set(t, columnVal);
-
-				}
-
-				return t;
-
-			}
-		} catch (Exception e) {
-
-			e.printStackTrace();
-		} finally {
-			// 7.关闭资源
-			JDBCUtils.closeResource(conn, ps, rs);
-		}
-
-		return null;
-
-	}
+                // 获取列值
+                Object columnVal = rs.getObject(i + 1);
+                // 获取列的别名:列的别名，使用类的属性名充当
+                String columnLabel = rsmd.getColumnLabel(i + 1);
+                // 6.2使用反射，给对象的相应属性赋值
+                Field field = clazz.getDeclaredField(columnLabel);
+                field.setAccessible(true);
+                field.set(t, columnVal);
+            }
+            return t;
+        }
+    } catch (Exception e) {
+        e.printStackTrace();
+    } finally {
+        // 7.关闭资源
+        JDBCUtils.closeResource(conn, ps, rs);
+    }
+    return null;
+}
 ```
-
-> 说明：使用PreparedStatement实现的查询操作可以替换Statement实现的查询操作，解决Statement拼串和SQL注入问题。
->
-
-### 3.4 ResultSet与ResultSetMetaData
-
-#### 3.4.1 ResultSet
-
-- 查询需要调用PreparedStatement 的 executeQuery() 方法，查询结果是一个ResultSet 对象
-
-- ResultSet 对象以逻辑表格的形式封装了执行数据库操作的结果集，ResultSet 接口由数据库厂商提供实现
-- ResultSet 返回的实际上就是一张数据表。有一个指针指向数据表的第一条记录的前面。
-
-- ResultSet 对象维护了一个指向当前数据行的**游标**，初始的时候，游标在第一行之前，可以通过 ResultSet 对象的 next() 方法移动到下一行。调用 next()方法检测下一行是否有效。若有效，该方法返回 true，且指针下移。相当于Iterator对象的 hasNext() 和 next() 方法的结合体。
-- 当指针指向一行时, 可以通过调用 getXxx(int index) 或 getXxx(int columnName) 获取每一列的值。
-
-  - 例如: getInt(1), getString("name")
-  - **注意：Java与数据库交互涉及到的相关Java API中的索引都从1开始。**
-
-- ResultSet 接口的常用方法：
-  - boolean next()
-
-  - getString()
-  - …
-
-  ![1555580152530](jdbc.assets/1555580152530.png)
-
-#### 3.4.2 ResultSetMetaData
-
-- 可用于获取关于 ResultSet 对象中列的类型和属性信息的对象
-
-- ResultSetMetaData meta = rs.getMetaData();
-  - **getColumnName**(int column)：获取指定列的名称
-  - **getColumnLabel**(int column)：获取指定列的别名
-  - **getColumnCount**()：返回当前 ResultSet 对象中的列数。 
-
-  - getColumnTypeName(int column)：检索指定列的数据库特定的类型名称。 
-  - getColumnDisplaySize(int column)：指示指定列的最大标准宽度，以字符为单位。 
-  - **isNullable**(int column)：指示指定列中的值是否可以为 null。 
-
-  -  isAutoIncrement(int column)：指示是否自动为指定列进行编号，这样这些列仍然是只读的。 
-
-![1555579494691](jdbc.assets/1555579494691.png)
-
-**问题1：得到结果集后, 如何知道该结果集中有哪些列 ？ 列名是什么？**
-
-​     需要使用一个描述 ResultSet 的对象， 即 ResultSetMetaData
-
-**问题2：关于ResultSetMetaData**
-
-1. **如何获取 ResultSetMetaData**： 调用 ResultSet 的 getMetaData() 方法即可
-2. **获取 ResultSet 中有多少列**：调用 ResultSetMetaData 的 getColumnCount() 方法
-3. **获取 ResultSet 每一列的列的别名是什么**：调用 ResultSetMetaData 的getColumnLabel() 方法
 
 ![1555579816884](jdbc.assets/1555579816884.png)
 
-### 3.5 资源的释放
+### 资源的释放
 
 - 释放ResultSet, Statement,Connection。
 - 数据库连接（Connection）是非常稀有的资源，用完后必须马上释放，如果Connection不能及时正确的关闭将导致系统宕机。Connection的使用原则是**尽量晚创建，尽量早的释放。**
 - 可以在finally中关闭，保证及时其他代码出现异常，资源也一定能被关闭。
 
-
-
-### 3.6 JDBC API小结
-
-- 两种思想
-  - 面向接口编程的思想
-
-  - ORM思想(object relational mapping)
-    - 一个数据表对应一个java类
-    - 表中的一条记录对应java类的一个对象
-    - 表中的一个字段对应java类的一个属性
-
-  > sql是需要结合列名和表的属性名来写。注意起别名。
-
-- 两种技术
-  - JDBC结果集的元数据：ResultSetMetaData
-    - 获取列数：getColumnCount()
-    - 获取列的别名：getColumnLabel()
-  - 通过反射，创建指定类的对象，获取指定的属性并赋值
-
-
-
-***
-
-## 章节练习
-
-**练习题1：从控制台向数据库的表customers中插入一条数据，表结构如下：**
-
-![1555580275036](jdbc.assets/1555580275036.png)
-
-
-
-**练习题2：创立数据库表 examstudent，表结构如下：**
-
-![1555580735377](jdbc.assets/1555580735377.png)
-
-向数据表中添加如下数据：
-
-![1555580763636](jdbc.assets/1555580763636.png)
-
-**代码实现1：插入一个新的student 信息**
-
-请输入考生的详细信息
-
-Type: 
-IDCard:
-ExamCard:
-StudentName:
-Location:
-Grade:
-
-信息录入成功!
-
-**代码实现2：在 eclipse中建立 java 程序：输入身份证号或准考证号可以查询到学生的基本信息。结果如下：**
-
-![1555580937490](jdbc.assets/1555580937490.png)
-
-**代码实现3：完成学生信息的删除功能**
-
-![1555580965019](jdbc.assets/1555580965019.png)
-
-***
-
-
-
 ## 第4章 操作BLOB类型字段
 
 ### 4.1 MySQL BLOB类型
 
-- MySQL中，BLOB是一个二进制大型对象，是一个可以存储大量数据的容器，它能容纳不同大小的数据。
-- 插入BLOB类型的数据必须使用PreparedStatement，因为BLOB类型的数据无法使用字符串拼接写的。
+- MySQL中，BLOB是一个二进制大型对象，是一个可以存储大量数据的容器，它能容纳不同大小的数据
+- 插入BLOB类型的数据必须使用PreparedStatement，因为BLOB类型的数据无法使用字符串拼接写的
 
-- MySQL的四种BLOB类型(除了在存储的最大信息量上不同外，他们是等同的)
+| 类型       | 最大容量(byte) |
+| ---------- | -------------- |
+| TinyBlob   | 255            |
+| Blob       | 65k            |
+| MediumBlob | 16M            |
+| LongBlob   | 4G             |
 
-![1555581069798](jdbc.assets/1555581069798.png)
+### 4.2 操作blob
 
-- 实际使用中根据需要存入的数据大小定义不同的BLOB类型。
-- 需要注意的是：如果存储的文件过大，数据库的性能会下降。
-- 如果在指定了相关的Blob类型以后，还报错：xxx too large，那么在mysql的安装目录下，找my.ini文件加上如下的配置参数： **max_allowed_packet=16M**。同时注意：修改了my.ini文件之后，需要重新启动mysql服务。
-
-### 4.2 向数据表中插入大数据类型
+插入和更新操作都是相同用法。
 
 ```java
 //获取连接
@@ -668,71 +319,16 @@ ps.execute();
 		
 fis.close();
 JDBCUtils.closeResource(conn, ps);
-
 ```
 
-
-
-### 4.3 修改数据表中的Blob类型字段
+读取blob
 
 ```java
-Connection conn = JDBCUtils.getConnection();
-String sql = "update customers set photo = ? where id = ?";
-PreparedStatement ps = conn.prepareStatement(sql);
-
-// 填充占位符
-// 操作Blob类型的变量
-FileInputStream fis = new FileInputStream("coffee.png");
-ps.setBlob(1, fis);
-ps.setInt(2, 25);
-
-ps.execute();
-
-fis.close();
-JDBCUtils.closeResource(conn, ps);
+//读取Blob类型的字段
+Blob photo = rs.getBlob(5);
+InputStream is = photo.getBinaryStream();
+// 对输入流进行操作
 ```
-
-
-
-### 4.4 从数据表中读取大数据类型
-
-```java
-String sql = "SELECT id, name, email, birth, photo FROM customer WHERE id = ?";
-conn = getConnection();
-ps = conn.prepareStatement(sql);
-ps.setInt(1, 8);
-rs = ps.executeQuery();
-if(rs.next()){
-	Integer id = rs.getInt(1);
-    String name = rs.getString(2);
-	String email = rs.getString(3);
-    Date birth = rs.getDate(4);
-	Customer cust = new Customer(id, name, email, birth);
-    System.out.println(cust); 
-    //读取Blob类型的字段
-	Blob photo = rs.getBlob(5);
-	InputStream is = photo.getBinaryStream();
-	OutputStream os = new FileOutputStream("c.jpg");
-	byte [] buffer = new byte[1024];
-	int len = 0;
-	while((len = is.read(buffer)) != -1){
-		os.write(buffer, 0, len);
-	}
-    JDBCUtils.closeResource(conn, ps, rs);
-		
-	if(is != null){
-		is.close();
-	}
-		
-	if(os !=  null){
-		os.close();
-	}
-    
-}
-
-```
-
-
 
 ## 第5章 批量插入
 
@@ -748,8 +344,6 @@ JDBC的批量处理语句包括下面三个方法：
 通常我们会遇到两种批量执行SQL语句的情况：
 - 多条SQL语句的批量处理；
 - 一个SQL语句的批量传参；
-
-
 
 ### 5.2 高效的批量插入
 
@@ -1056,443 +650,14 @@ public void update(Connection conn ,String sql, Object... args) {
     
     ```
 
-    
 
-## 第7章：DAO及相关实现类
+ 
 
-- DAO：Data Access Object访问数据信息的类和接口，包括了对数据的CRUD（Create、Retrival、Update、Delete），而不包含任何业务相关的信息。有时也称作：BaseDAO
-- 作用：为了实现功能的模块化，更有利于代码的维护和升级。
-- 下面是尚硅谷JavaWeb阶段书城项目中DAO使用的体现：
 
-![1566726681515](jdbc.assets/1566726681515.png)
 
-- 层次结构：
 
-![1566745811244](jdbc.assets/1566745811244.png)
 
-### 【BaseDAO.java】
 
-```java
-package com.atguigu.bookstore.dao;
-
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
-import java.sql.Connection;
-import java.sql.SQLException;
-import java.util.List;
-
-import org.apache.commons.dbutils.QueryRunner;
-import org.apache.commons.dbutils.handlers.BeanHandler;
-import org.apache.commons.dbutils.handlers.BeanListHandler;
-import org.apache.commons.dbutils.handlers.ScalarHandler;
-
-
-/**
- * 定义一个用来被继承的对数据库进行基本操作的Dao
- * 
- * @author HanYanBing
- *
- * @param <T>
- */
-public abstract class BaseDao<T> {
-	private QueryRunner queryRunner = new QueryRunner();
-	// 定义一个变量来接收泛型的类型
-	private Class<T> type;
-
-	// 获取T的Class对象，获取泛型的类型，泛型是在被子类继承时才确定
-	public BaseDao() {
-		// 获取子类的类型
-		Class clazz = this.getClass();
-		// 获取父类的类型
-		// getGenericSuperclass()用来获取当前类的父类的类型
-		// ParameterizedType表示的是带泛型的类型
-		ParameterizedType parameterizedType = (ParameterizedType) clazz.getGenericSuperclass();
-		// 获取具体的泛型类型 getActualTypeArguments获取具体的泛型的类型
-		// 这个方法会返回一个Type的数组
-		Type[] types = parameterizedType.getActualTypeArguments();
-		// 获取具体的泛型的类型·
-		this.type = (Class<T>) types[0];
-	}
-
-	/**
-	 * 通用的增删改操作
-	 * 
-	 * @param sql
-	 * @param params
-	 * @return
-	 */
-	public int update(Connection conn,String sql, Object... params) {
-		int count = 0;
-		try {
-			count = queryRunner.update(conn, sql, params);
-		} catch (SQLException e) {
-			e.printStackTrace();
-		} 
-		return count;
-	}
-
-	/**
-	 * 获取一个对象
-	 * 
-	 * @param sql
-	 * @param params
-	 * @return
-	 */
-	public T getBean(Connection conn,String sql, Object... params) {
-		T t = null;
-		try {
-			t = queryRunner.query(conn, sql, new BeanHandler<T>(type), params);
-		} catch (SQLException e) {
-			e.printStackTrace();
-		} 
-		return t;
-	}
-
-	/**
-	 * 获取所有对象
-	 * 
-	 * @param sql
-	 * @param params
-	 * @return
-	 */
-	public List<T> getBeanList(Connection conn,String sql, Object... params) {
-		List<T> list = null;
-		try {
-			list = queryRunner.query(conn, sql, new BeanListHandler<T>(type), params);
-		} catch (SQLException e) {
-			e.printStackTrace();
-		} 
-		return list;
-	}
-
-	/**
-	 * 获取一个但一值得方法，专门用来执行像 select count(*)...这样的sql语句
-	 * 
-	 * @param sql
-	 * @param params
-	 * @return
-	 */
-	public Object getValue(Connection conn,String sql, Object... params) {
-		Object count = null;
-		try {
-			// 调用queryRunner的query方法获取一个单一的值
-			count = queryRunner.query(conn, sql, new ScalarHandler<>(), params);
-		} catch (SQLException e) {
-			e.printStackTrace();
-		} 
-		return count;
-	}
-}
-```
-
-### 【BookDAO.java】
-
-```java
-package com.atguigu.bookstore.dao;
-
-import java.sql.Connection;
-import java.util.List;
-
-import com.atguigu.bookstore.beans.Book;
-import com.atguigu.bookstore.beans.Page;
-
-public interface BookDao {
-
-	/**
-	 * 从数据库中查询出所有的记录
-	 * 
-	 * @return
-	 */
-	List<Book> getBooks(Connection conn);
-
-	/**
-	 * 向数据库中插入一条记录
-	 * 
-	 * @param book
-	 */
-	void saveBook(Connection conn,Book book);
-
-	/**
-	 * 从数据库中根据图书的id删除一条记录
-	 * 
-	 * @param bookId
-	 */
-	void deleteBookById(Connection conn,String bookId);
-
-	/**
-	 * 根据图书的id从数据库中查询出一条记录
-	 * 
-	 * @param bookId
-	 * @return
-	 */
-	Book getBookById(Connection conn,String bookId);
-
-	/**
-	 * 根据图书的id从数据库中更新一条记录
-	 * 
-	 * @param book
-	 */
-	void updateBook(Connection conn,Book book);
-
-	/**
-	 * 获取带分页的图书信息
-	 * 
-	 * @param page：是只包含了用户输入的pageNo属性的page对象
-	 * @return 返回的Page对象是包含了所有属性的Page对象
-	 */
-	Page<Book> getPageBooks(Connection conn,Page<Book> page);
-
-	/**
-	 * 获取带分页和价格范围的图书信息
-	 * 
-	 * @param page：是只包含了用户输入的pageNo属性的page对象
-	 * @return 返回的Page对象是包含了所有属性的Page对象
-	 */
-	Page<Book> getPageBooksByPrice(Connection conn,Page<Book> page, double minPrice, double maxPrice);
-
-}
-```
-
-### 【UserDAO.java】
-
-```java
-package com.atguigu.bookstore.dao;
-
-import java.sql.Connection;
-
-import com.atguigu.bookstore.beans.User;
-
-public interface UserDao {
-
-	/**
-	 * 根据User对象中的用户名和密码从数据库中获取一条记录
-	 * 
-	 * @param user
-	 * @return User 数据库中有记录 null 数据库中无此记录
-	 */
-	User getUser(Connection conn,User user);
-
-	/**
-	 * 根据User对象中的用户名从数据库中获取一条记录
-	 * 
-	 * @param user
-	 * @return true 数据库中有记录 false 数据库中无此记录
-	 */
-	boolean checkUsername(Connection conn,User user);
-
-	/**
-	 * 向数据库中插入User对象
-	 * 
-	 * @param user
-	 */
-	void saveUser(Connection conn,User user);
-}
-```
-
-### 【BookDaoImpl.java】
-
-```java
-package com.atguigu.bookstore.dao.impl;
-
-import java.sql.Connection;
-import java.util.List;
-
-import com.atguigu.bookstore.beans.Book;
-import com.atguigu.bookstore.beans.Page;
-import com.atguigu.bookstore.dao.BaseDao;
-import com.atguigu.bookstore.dao.BookDao;
-
-public class BookDaoImpl extends BaseDao<Book> implements BookDao {
-
-	@Override
-	public List<Book> getBooks(Connection conn) {
-		// 调用BaseDao中得到一个List的方法
-		List<Book> beanList = null;
-		// 写sql语句
-		String sql = "select id,title,author,price,sales,stock,img_path imgPath from books";
-		beanList = getBeanList(conn,sql);
-		return beanList;
-	}
-
-	@Override
-	public void saveBook(Connection conn,Book book) {
-		// 写sql语句
-		String sql = "insert into books(title,author,price,sales,stock,img_path) values(?,?,?,?,?,?)";
-		// 调用BaseDao中通用的增删改的方法
-		update(conn,sql, book.getTitle(), book.getAuthor(), book.getPrice(), book.getSales(), book.getStock(),book.getImgPath());
-	}
-
-	@Override
-	public void deleteBookById(Connection conn,String bookId) {
-		// 写sql语句
-		String sql = "DELETE FROM books WHERE id = ?";
-		// 调用BaseDao中通用增删改的方法
-		update(conn,sql, bookId);
-			
-	}
-
-	@Override
-	public Book getBookById(Connection conn,String bookId) {
-		// 调用BaseDao中获取一个对象的方法
-		Book book = null;
-		// 写sql语句
-		String sql = "select id,title,author,price,sales,stock,img_path imgPath from books where id = ?";
-		book = getBean(conn,sql, bookId);
-		return book;
-	}
-
-	@Override
-	public void updateBook(Connection conn,Book book) {
-		// 写sql语句
-		String sql = "update books set title = ? , author = ? , price = ? , sales = ? , stock = ? where id = ?";
-		// 调用BaseDao中通用的增删改的方法
-		update(conn,sql, book.getTitle(), book.getAuthor(), book.getPrice(), book.getSales(), book.getStock(), book.getId());
-	}
-
-	@Override
-	public Page<Book> getPageBooks(Connection conn,Page<Book> page) {
-		// 获取数据库中图书的总记录数
-		String sql = "select count(*) from books";
-		// 调用BaseDao中获取一个单一值的方法
-		long totalRecord = (long) getValue(conn,sql);
-		// 将总记录数设置都page对象中
-		page.setTotalRecord((int) totalRecord);
-
-		// 获取当前页中的记录存放的List
-		String sql2 = "select id,title,author,price,sales,stock,img_path imgPath from books limit ?,?";
-		// 调用BaseDao中获取一个集合的方法
-		List<Book> beanList = getBeanList(conn,sql2, (page.getPageNo() - 1) * Page.PAGE_SIZE, Page.PAGE_SIZE);
-		// 将这个List设置到page对象中
-		page.setList(beanList);
-		return page;
-	}
-
-	@Override
-	public Page<Book> getPageBooksByPrice(Connection conn,Page<Book> page, double minPrice, double maxPrice) {
-		// 获取数据库中图书的总记录数
-		String sql = "select count(*) from books where price between ? and ?";
-		// 调用BaseDao中获取一个单一值的方法
-		long totalRecord = (long) getValue(conn,sql,minPrice,maxPrice);
-		// 将总记录数设置都page对象中
-		page.setTotalRecord((int) totalRecord);
-
-		// 获取当前页中的记录存放的List
-		String sql2 = "select id,title,author,price,sales,stock,img_path imgPath from books where price between ? and ? limit ?,?";
-		// 调用BaseDao中获取一个集合的方法
-		List<Book> beanList = getBeanList(conn,sql2, minPrice , maxPrice , (page.getPageNo() - 1) * Page.PAGE_SIZE, Page.PAGE_SIZE);
-		// 将这个List设置到page对象中
-		page.setList(beanList);
-		
-		return page;
-	}
-
-}
-```
-
-### 【UserDaoImpl.java】
-
-```java
-package com.atguigu.bookstore.dao.impl;
-
-import java.sql.Connection;
-
-import com.atguigu.bookstore.beans.User;
-import com.atguigu.bookstore.dao.BaseDao;
-import com.atguigu.bookstore.dao.UserDao;
-
-public class UserDaoImpl extends BaseDao<User> implements UserDao {
-
-	@Override
-	public User getUser(Connection conn,User user) {
-		// 调用BaseDao中获取一个对象的方法
-		User bean = null;
-		// 写sql语句
-		String sql = "select id,username,password,email from users where username = ? and password = ?";
-		bean = getBean(conn,sql, user.getUsername(), user.getPassword());
-		return bean;
-	}
-
-	@Override
-	public boolean checkUsername(Connection conn,User user) {
-		// 调用BaseDao中获取一个对象的方法
-		User bean = null;
-		// 写sql语句
-		String sql = "select id,username,password,email from users where username = ?";
-		bean = getBean(conn,sql, user.getUsername());
-		return bean != null;
-	}
-
-	@Override
-	public void saveUser(Connection conn,User user) {
-		//写sql语句
-		String sql = "insert into users(username,password,email) values(?,?,?)";
-		//调用BaseDao中通用的增删改的方法
-		update(conn,sql, user.getUsername(),user.getPassword(),user.getEmail());
-	}
-
-}
-```
-
-### 【Book.java】
-
-```java
-package com.atguigu.bookstore.beans;
-/**
- * 图书类
- * @author songhongkang
- *
- */
-public class Book {
-
-	private Integer id;
-	private String title; // 书名
-	private String author; // 作者
-	private double price; // 价格
-	private Integer sales; // 销量
-	private Integer stock; // 库存
-	private String imgPath = "static/img/default.jpg"; // 封面图片的路径
-	//构造器，get()，set()，toString()方法略
-}
-```
-
-### 【Page.java】
-
-```java
-package com.atguigu.bookstore.beans;
-
-import java.util.List;
-/**
- * 页码类
- * @author songhongkang
- *
- */
-public class Page<T> {
-
-	private List<T> list; // 每页查到的记录存放的集合
-	public static final int PAGE_SIZE = 4; // 每页显示的记录数
-	private int pageNo; // 当前页
-//	private int totalPageNo; // 总页数，通过计算得到
-	private int totalRecord; // 总记录数，通过查询数据库得到
-
-```
-
-### 【User.java】
-
-```java
-package com.atguigu.bookstore.beans;
-/**
- * 用户类
- * @author songhongkang
- *
- */
-public class User {
-
-	private Integer id;
-	private String username;
-	private String password;
-	private String email;
-
-```
 
 
 
