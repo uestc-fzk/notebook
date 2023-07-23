@@ -282,9 +282,7 @@ public <T> T getInstance(Class<T> clazz, String sql, Object... args) {
 - 数据库连接（Connection）是非常稀有的资源，用完后必须马上释放，如果Connection不能及时正确的关闭将导致系统宕机。Connection的使用原则是**尽量晚创建，尽量早的释放。**
 - 可以在finally中关闭，保证及时其他代码出现异常，资源也一定能被关闭。
 
-## 第4章 操作BLOB类型字段
-
-### 4.1 MySQL BLOB类型
+## 操作BLOB类型字段
 
 - MySQL中，BLOB是一个二进制大型对象，是一个可以存储大量数据的容器，它能容纳不同大小的数据
 - 插入BLOB类型的数据必须使用PreparedStatement，因为BLOB类型的数据无法使用字符串拼接写的
@@ -295,8 +293,6 @@ public <T> T getInstance(Class<T> clazz, String sql, Object... args) {
 | Blob       | 65k            |
 | MediumBlob | 16M            |
 | LongBlob   | 4G             |
-
-### 4.2 操作blob
 
 插入和更新操作都是相同用法。
 
@@ -330,9 +326,7 @@ InputStream is = photo.getBinaryStream();
 // 对输入流进行操作
 ```
 
-## 第5章 批量插入
-
-### 5.1 批量执行SQL语句
+## 批量插入
 
 当需要成批插入或者更新记录时，可以采用Java的批量**更新**机制，这一机制允许多条语句一次性提交给数据库批量处理。通常情况下比单独提交处理更有效率
 
@@ -345,64 +339,13 @@ JDBC的批量处理语句包括下面三个方法：
 - 多条SQL语句的批量处理；
 - 一个SQL语句的批量传参；
 
-### 5.2 高效的批量插入
-
-举例：向数据表中插入20000条数据
-
-- 数据库中提供一个goods表。创建如下：
-
-```sql
-CREATE TABLE goods(
-id INT PRIMARY KEY AUTO_INCREMENT,
-NAME VARCHAR(20)
-);
-```
-
-
-
-#### 5.2.1 实现层次一：使用Statement
-
-```java
-Connection conn = JDBCUtils.getConnection();
-Statement st = conn.createStatement();
-for(int i = 1;i <= 20000;i++){
-	String sql = "insert into goods(name) values('name_' + "+ i +")";
-	st.executeUpdate(sql);
-}
-```
-
-
-
-#### 5.2.2 实现层次二：使用PreparedStatement
-
-```java
-long start = System.currentTimeMillis();
-		
-Connection conn = JDBCUtils.getConnection();
-		
-String sql = "insert into goods(name)values(?)";
-PreparedStatement ps = conn.prepareStatement(sql);
-for(int i = 1;i <= 20000;i++){
-	ps.setString(1, "name_" + i);
-	ps.executeUpdate();
-}
-		
-long end = System.currentTimeMillis();
-System.out.println("花费的时间为：" + (end - start));//82340
-		
-		
-JDBCUtils.closeResource(conn, ps);
-```
-
-#### 5.2.3 实现层次三
+实现1：
 
 ```java
 /*
  * 修改1： 使用 addBatch() / executeBatch() / clearBatch()
  * 修改2：mysql服务器默认是关闭批处理的，我们需要通过一个参数，让mysql开启批处理的支持。
  * 		 ?rewriteBatchedStatements=true 写在配置文件的url后面
- * 修改3：使用更新的mysql 驱动：mysql-connector-java-5.1.37-bin.jar
- * 
  */
 @Test
 public void testInsert1() throws Exception{
@@ -433,13 +376,9 @@ public void testInsert1() throws Exception{
 }
 ```
 
-#### 5.2.4 实现层次四
+实现2：
 
 ```java
-/*
-* 层次四：在层次三的基础上操作
-* 使用Connection 的 setAutoCommit(false)  /  commit()
-*/
 @Test
 public void testInsert2() throws Exception{
 	long start = System.currentTimeMillis();
@@ -476,21 +415,10 @@ public void testInsert2() throws Exception{
 }
 ```
 
+## 事务
 
+事务具有ACID四个属性。
 
-## 第6章： 数据库事务
-
-### 6.1 数据库事务介绍
-
-- **事务：一组逻辑操作单元,使数据从一种状态变换到另一种状态。**
-
-- **事务处理（事务操作）：**保证所有事务都作为一个工作单元来执行，即使出现了故障，都不能改变这种执行方式。当在一个事务中执行多个操作时，要么所有的事务都**被提交(commit)**，那么这些修改就永久地保存下来；要么数据库管理系统将放弃所作的所有修改，整个事务**回滚(rollback)**到最初状态。
-
-- 为确保数据库中数据的**一致性**，数据的操纵应当是离散的成组的逻辑单元：当它全部完成时，数据的一致性可以保持，而当这个单元中的一部分操作失败，整个事务应全部视为错误，所有从起始点以后的操作应全部回退到开始状态。 
-
-### 6.2 JDBC事务处理
-
-- 数据一旦提交，就不可回滚。
 - 数据什么时候意味着提交？
   - **当一个连接对象被创建时，默认情况下是自动提交事务**：每次执行一个 SQL 语句时，如果执行成功，就会向数据库自动提交，而不能回滚。
   - **关闭数据库连接，数据就会自动的提交。**如果多个操作，每个操作使用的是自己单独的连接，则无法保证事务。即同一个事务的多个操作必须在同一个连接下。
@@ -500,7 +428,7 @@ public void testInsert2() throws Exception{
   - 在所有的 SQL 语句都成功执行后，调用 **commit();** 方法提交事务
   - 在出现异常时，调用 **rollback();** 方法回滚事务
 
-  > 若此时 Connection 没有被关闭，还可能被重复使用，则需要恢复其自动提交状态 setAutoCommit(true)。尤其是在使用数据库连接池技术时，执行close()方法前，建议恢复自动提交状态。
+  > 若此时 Connection 没有被关闭，还可以被重复使用，则需要恢复其自动提交状态 setAutoCommit(true)。尤其是在使用数据库连接池技术时，执行close()方法前，建议恢复自动提交状态。
 
 【案例：用户AA向用户BB转账100】
 
@@ -545,123 +473,8 @@ public void testJDBCTransaction() {
 
 ```
 
-其中，对数据库操作的方法为：
 
-```java
-//使用事务以后的通用的增删改操作（version 2.0）
-public void update(Connection conn ,String sql, Object... args) {
-	PreparedStatement ps = null;
-	try {
-		// 1.获取PreparedStatement的实例 (或：预编译sql语句)
-		ps = conn.prepareStatement(sql);
-		// 2.填充占位符
-		for (int i = 0; i < args.length; i++) {
-			ps.setObject(i + 1, args[i]);
-		}
-		// 3.执行sql语句
-		ps.execute();
-	} catch (Exception e) {
-		e.printStackTrace();
-	} finally {
-		// 4.关闭资源
-		JDBCUtils.closeResource(null, ps);
-
-	}
-}
-```
-
-
-
-### 6.3 事务的ACID属性    
-
-1. **原子性（Atomicity）**
-    原子性是指事务是一个不可分割的工作单位，事务中的操作要么都发生，要么都不发生。 
-
-2. **一致性（Consistency）**
-    事务必须使数据库从一个一致性状态变换到另外一个一致性状态。
-
-3. **隔离性（Isolation）**
-    事务的隔离性是指一个事务的执行不能被其他事务干扰，即一个事务内部的操作及使用的数据对并发的其他事务是隔离的，并发执行的各个事务之间不能互相干扰。
-
-4. **持久性（Durability）**
-    持久性是指一个事务一旦被提交，它对数据库中数据的改变就是永久性的，接下来的其他操作和数据库故障不应该对其有任何影响。
-
-#### 6.3.1 数据库的并发问题
-
-- 对于同时运行的多个事务, 当这些事务访问数据库中相同的数据时, 如果没有采取必要的隔离机制, 就会导致各种并发问题:
-  - **脏读**: 对于两个事务 T1, T2, T1 读取了已经被 T2 更新但还**没有被提交**的字段。之后, 若 T2 回滚, T1读取的内容就是临时且无效的。
-  - **不可重复读**: 对于两个事务T1, T2, T1 读取了一个字段, 然后 T2 **更新**了该字段。之后, T1再次读取同一个字段, 值就不同了。
-  - **幻读**: 对于两个事务T1, T2, T1 从一个表中读取了一个字段, 然后 T2 在该表中**插入**了一些新的行。之后, 如果 T1 再次读取同一个表, 就会多出几行。
-
-- **数据库事务的隔离性**: 数据库系统必须具有隔离并发运行各个事务的能力, 使它们不会相互影响, 避免各种并发问题。
-
-- 一个事务与其他事务隔离的程度称为隔离级别。数据库规定了多种事务隔离级别, 不同隔离级别对应不同的干扰程度, **隔离级别越高, 数据一致性就越好, 但并发性越弱。**
-
-#### 6.3.2 四种隔离级别
-
-- 数据库提供的4种事务隔离级别：
-
-  ![1555586275271](jdbc.assets/1555586275271.png)
-
-- Oracle 支持的 2 种事务隔离级别：**READ COMMITED**, SERIALIZABLE。 Oracle 默认的事务隔离级别为: **READ COMMITED** 。
-
-
-- Mysql 支持 4 种事务隔离级别。Mysql 默认的事务隔离级别为: **REPEATABLE READ。**
-
-
-#### 6.3.3 在MySql中设置隔离级别
-
-- 每启动一个 mysql 程序, 就会获得一个单独的数据库连接. 每个数据库连接都有一个全局变量 @@tx_isolation, 表示当前的事务隔离级别。
-
-- 查看当前的隔离级别: 
-
-  ```mysql
-  SELECT @@tx_isolation;
-  ```
-
-- 设置当前 mySQL 连接的隔离级别:  
-
-  ```mysql
-  set  transaction isolation level read committed;
-  ```
-
-- 设置数据库系统的全局的隔离级别:
-
-  ```mysql
-  set global transaction isolation level read committed;
-  ```
-
-- 补充操作：
-
-  - 创建mysql数据库用户：
-
-    ```mysql
-    create user tom identified by 'abc123';
-    ```
-
-  - 授予权限
-
-    ```mysql
-    #授予通过网络方式登录的tom用户，对所有库所有表的全部权限，密码设为abc123.
-    grant all privileges on *.* to tom@'%'  identified by 'abc123'; 
-    
-     #给tom用户使用本地命令行方式，授予atguigudb这个库下的所有表的插删改查的权限。
-    grant select,insert,delete,update on atguigudb.* to tom@localhost identified by 'abc123'; 
-    
-    ```
-
-
- 
-
-
-
-
-
-
-
-
-
-## 第8章：数据库连接池
+## 连接池
 
 ### 8.1 JDBC数据库连接池的必要性
 
@@ -721,156 +534,6 @@ public void update(Connection conn ,String sql, Object... args) {
 - 特别注意：
   - 数据源和数据库连接不同，数据源无需创建多个，它是产生数据库连接的工厂，因此**整个应用只需要一个数据源即可。**
   - 当数据库访问结束后，程序还是像以前一样关闭数据库连接：conn.close(); 但conn.close()并没有关闭数据库的物理连接，它仅仅把数据库连接释放，归还给了数据库连接池。
-
-#### 8.3.1 C3P0数据库连接池
-
-- 获取连接方式一
-
-```java
-//使用C3P0数据库连接池的方式，获取数据库的连接：不推荐
-public static Connection getConnection1() throws Exception{
-	ComboPooledDataSource cpds = new ComboPooledDataSource();
-	cpds.setDriverClass("com.mysql.jdbc.Driver"); 
-	cpds.setJdbcUrl("jdbc:mysql://localhost:3306/test");
-	cpds.setUser("root");
-	cpds.setPassword("abc123");
-		
-//	cpds.setMaxPoolSize(100);
-	
-	Connection conn = cpds.getConnection();
-	return conn;
-}
-```
-
-
-
-- 获取连接方式二
-
-```java
-//使用C3P0数据库连接池的配置文件方式，获取数据库的连接：推荐
-private static DataSource cpds = new ComboPooledDataSource("helloc3p0");
-public static Connection getConnection2() throws SQLException{
-	Connection conn = cpds.getConnection();
-	return conn;
-}
-```
-
-其中，src下的配置文件为：【c3p0-config.xml】
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<c3p0-config>
-	<named-config name="helloc3p0">
-		<!-- 获取连接的4个基本信息 -->
-		<property name="user">root</property>
-		<property name="password">abc123</property>
-		<property name="jdbcUrl">jdbc:mysql:///test</property>
-		<property name="driverClass">com.mysql.jdbc.Driver</property>
-		
-		<!-- 涉及到数据库连接池的管理的相关属性的设置 -->
-		<!-- 若数据库中连接数不足时, 一次向数据库服务器申请多少个连接 -->
-		<property name="acquireIncrement">5</property>
-		<!-- 初始化数据库连接池时连接的数量 -->
-		<property name="initialPoolSize">5</property>
-		<!-- 数据库连接池中的最小的数据库连接数 -->
-		<property name="minPoolSize">5</property>
-		<!-- 数据库连接池中的最大的数据库连接数 -->
-		<property name="maxPoolSize">10</property>
-		<!-- C3P0 数据库连接池可以维护的 Statement 的个数 -->
-		<property name="maxStatements">20</property>
-		<!-- 每个连接同时可以使用的 Statement 对象的个数 -->
-		<property name="maxStatementsPerConnection">5</property>
-
-	</named-config>
-</c3p0-config>
-```
-
-
-
-#### 8.3.2 DBCP数据库连接池
-
-- DBCP 是 Apache 软件基金组织下的开源连接池实现，该连接池依赖该组织下的另一个开源系统：Common-pool。如需使用该连接池实现，应在系统中增加如下两个 jar 文件：
-  - Commons-dbcp.jar：连接池的实现
-  - Commons-pool.jar：连接池实现的依赖库
-- **Tomcat 的连接池正是采用该连接池来实现的。**该数据库连接池既可以与应用服务器整合使用，也可由应用程序独立使用。
-- 数据源和数据库连接不同，数据源无需创建多个，它是产生数据库连接的工厂，因此整个应用只需要一个数据源即可。
-- 当数据库访问结束后，程序还是像以前一样关闭数据库连接：conn.close(); 但上面的代码并没有关闭数据库的物理连接，它仅仅把数据库连接释放，归还给了数据库连接池。
-- 配置属性说明
-
-| 属性                       | 默认值 | 说明                                                         |
-| -------------------------- | ------ | ------------------------------------------------------------ |
-| initialSize                | 0      | 连接池启动时创建的初始化连接数量                             |
-| maxActive                  | 8      | 连接池中可同时连接的最大的连接数                             |
-| maxIdle                    | 8      | 连接池中最大的空闲的连接数，超过的空闲连接将被释放，如果设置为负数表示不限制 |
-| minIdle                    | 0      | 连接池中最小的空闲的连接数，低于这个数量会被创建新的连接。该参数越接近maxIdle，性能越好，因为连接的创建和销毁，都是需要消耗资源的；但是不能太大。 |
-| maxWait                    | 无限制 | 最大等待时间，当没有可用连接时，连接池等待连接释放的最大时间，超过该时间限制会抛出异常，如果设置-1表示无限等待 |
-| poolPreparedStatements     | false  | 开启池的Statement是否prepared                                |
-| maxOpenPreparedStatements  | 无限制 | 开启池的prepared 后的同时最大连接数                          |
-| minEvictableIdleTimeMillis |        | 连接池中连接，在时间段内一直空闲， 被逐出连接池的时间        |
-| removeAbandonedTimeout     | 300    | 超过时间限制，回收没有用(废弃)的连接                         |
-| removeAbandoned            | false  | 超过removeAbandonedTimeout时间后，是否进 行没用连接（废弃）的回收 |
-
-
-
-- 获取连接方式一：
-
-```java
-public static Connection getConnection3() throws Exception {
-	BasicDataSource source = new BasicDataSource();
-		
-	source.setDriverClassName("com.mysql.jdbc.Driver");
-	source.setUrl("jdbc:mysql:///test");
-	source.setUsername("root");
-	source.setPassword("abc123");
-		
-	//
-	source.setInitialSize(10);
-		
-	Connection conn = source.getConnection();
-	return conn;
-}
-```
-
-- 获取连接方式二：
-
-```java
-//使用dbcp数据库连接池的配置文件方式，获取数据库的连接：推荐
-private static DataSource source = null;
-static{
-	try {
-		Properties pros = new Properties();
-		
-		InputStream is = DBCPTest.class.getClassLoader().getResourceAsStream("dbcp.properties");
-			
-		pros.load(is);
-		//根据提供的BasicDataSourceFactory创建对应的DataSource对象
-		source = BasicDataSourceFactory.createDataSource(pros);
-	} catch (Exception e) {
-		e.printStackTrace();
-	}
-		
-}
-public static Connection getConnection4() throws Exception {
-		
-	Connection conn = source.getConnection();
-	
-	return conn;
-}
-```
-
-其中，src下的配置文件为：【dbcp.properties】
-
-```properties
-driverClassName=com.mysql.jdbc.Driver
-url=jdbc:mysql://localhost:3306/test?rewriteBatchedStatements=true&useServerPrepStmts=false
-username=root
-password=abc123
-
-initialSize=10
-#...
-```
-
-
 
 #### 8.3.3 Druid（德鲁伊）数据库连接池
 
