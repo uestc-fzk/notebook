@@ -2731,16 +2731,15 @@ https://www.jianshu.com/p/62274f4531a5
 
 ssh远程免密登录：
 
-1、在本机`用户/.ssh`目录下生成秘钥对` ssh-keygen -t rsa`
+1、在本机`用户/.ssh`目录下看看有没有公/私钥文件，如果没有可以生成：
 
-注意：第一个输入会让你输入秘钥存储文件名，建议自定义。如fzk-computer
-
-2、将生成的公钥文件fzk-computer.pub上传到服务器的`用户/.ssh目录`，将公钥内容拼接到对应用户目录下的 *authorized_keys* 文件内
-
+```shell
+ssh-keygen -t rsa -C "yourname@computername.com"
 ```
-# 文件可能不存在，可以手动创建
-cat id_rsa.pub >> ~/.ssh/authorized_keys
-```
+
+注意：第一个输入会让你输入秘钥存储文件名，建议默认。
+
+2、将公钥文件id_rsa.pub内容写入到服务器的`用户/.ssh/authorized_keys`文件末尾，不存在需要先创建该文件。
 
 3、设置文件权限：Linux强制要求.ssh目录权限为700，authorized_keys文件权限为600
 
@@ -2771,6 +2770,3 @@ PS C:\Users\zhike.feng\.ssh> ssh fzk-tx.top
 
 [root@k8s-master ~]#
 ```
-
-
-
