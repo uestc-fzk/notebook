@@ -1,14 +1,9 @@
 # 资料
->苞米豆官网：https://mp.baomidou.com/
+>苞米豆官网：https://baomidou.com/
 
 # mybatis-plus
 
-- 润物无声
-    - 只做增强不做改变，引入它不会对现有工程产生影响，如丝般顺滑。
-- 效率至上
-    - 只需简单配置，即可快速进行单表 CRUD 操作，从而节省大量时间。
-- 丰富功能
-    - 代码生成、物理分页、性能分析等功能一应俱全。
+- 润物无声：只做增强不做改变，引入它不会对现有工程产生影响，如丝般顺滑。
 
 框架结构
 ![框架](./MyBatis-plus.assets/框架.jpg)
@@ -76,26 +71,14 @@ Maven:
 	
     # 这个是MySQL5的连接方式
       datasource:
-        url: "jdbc:mysql://localhost:3306/test"
+        url: "jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=true&characterEncoding=utf-8&serverTimezone=GMT%2B8"
         username: "root"
-        password: "!MySQL123456"
-	    driver-class-name: com.mysql.jdbc.Driver
+        password: "123456"
+	    # 这是mysql5的驱动
+	    #driver-class-name: com.mysql.jdbc.Driver
+	    # 这是mysql8的驱动
+	    driver-class-name: com.mysql.cj.jdbc.Driver
 	```
-```properties
-如果是MySQL8
-    
-    ```properties
-    # mysql 5 驱动不同 com.mysql.jdbc.Driver 
-    # mysql 8 驱动不同com.mysql.cj.jdbc.Driver，
-    # 而且需要增加时区的配置 serverTimezone=GMT%2B8 
-    
-    spring.datasource.username=root 
-    spring.datasource.password=123456 
-    spring.datasource.url=jdbc:mysql://localhost:3306/test?useSSL=false&useUnicode=true&characterEncoding=utf-8&serverTimezone=GMT%2B8 
-    # 主要是要加上时区，其它的参数可以加也可以不加
-    spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
-```
-
 4. bean实体类User的书写
 
    ```java
@@ -154,8 +137,6 @@ Maven:
     </bean>
     ```
 
-
-
 ### 日志
 
 在没有配置日志的时候，无法在控制台看到sql语句；
@@ -174,7 +155,7 @@ mybatis-plus:
     auto-mapping-unknown-column-behavior: warning # 配置未在实体类找到对应属性的时候抛出异常：主要是提醒作用哦。默认是忽略
 ```
 
-> 注意：配置日志会**影响性能**，在项目上线之前需要关闭日志
+> 注意：配置日志会**影响性能**，建议线上环境关闭日志
 
 ## CRUD扩展
 
@@ -228,7 +209,7 @@ int updateById(@Param(Constants.ENTITY) T entity);
 
 创建时间、修改时间！这些个操作一遍都是自动化完成的，我们不希望手动更新！
 
-> 阿里巴巴开发手册：所有的数据库表：gmt_create、gmt_modifified几乎所有的表都要配置上！而且需要自动化！
+> 阿里巴巴开发手册：所有的数据库表：create_time、update_time字段几乎所有的表都要配置上！而且需要自动化！
 
 ![自动填充](./MyBatis-plus.assets/自动填充.png)
 
@@ -311,6 +292,8 @@ IPage<Map<String, Object>> selectMapsPage(IPage<T> page, @Param(Constants.WRAPPE
 Integer selectCount(@Param(Constants.WRAPPER) Wrapper<T> queryWrapper);
 ```
 
+测试代码：
+
 ```java
 	@Test
 	void testSelect(){
@@ -325,10 +308,6 @@ Integer selectCount(@Param(Constants.WRAPPER) Wrapper<T> queryWrapper);
 ==> Parameters: 李四(String)
 */
 ```
-
-
-
-
 
 ### delete
 
@@ -410,10 +389,6 @@ int deleteByMap(@Param(Constants.COLUMN_MAP) Map<String, Object> columnMap);
 > 1. 使用 `update` 方法并: `UpdateWrapper.set(column, value)`(推荐)
 > 2. 使用 `update` 方法并: `UpdateWrapper.setSql("column=value")`
 > 3. 使用[Sql注入器](https://mybatis.plus/guide/sql-injector.html)注入`com.baomidou.mybatisplus.extension.injector.methods.LogicDeleteByIdWithFill`并使用(推荐)
-
-
-
-
 
 ## 插件
 
@@ -535,8 +510,6 @@ update user set name = "kuangshen", version = version + 1 where id = 2 and versi
    ```
 
    ![分页](./MyBatis-plus.assets/分页.png)
-
-
 
 ## 动态SQL构建器
 
@@ -724,95 +697,4 @@ public class BlogSqlProvider implements ProviderMethodResolver {
 
 ## 代码生成器
 
-我这里测试 3.4.2 版本已经没有了Generator，需要手动导入。
-
-- 添加代码生成器依赖
-
-```xml
-<dependency>
-    <groupId>com.baomidou</groupId>
-    <artifactId>mybatis-plus-generator</artifactId>
-    <version>3.4.1</version>
-</dependency>
-```
-
-- 添加模板引擎依赖
-
-```xml
-<dependency>
-    <groupId>org.apache.velocity</groupId>
-    <artifactId>velocity-engine-core</artifactId>
-    <version>2.3</version>
-</dependency>
-```
-
-> 非默认模板引擎，看官网
-
-- 编写配置
-
-```java
-public class Code {
-    public static void main(String[] args) {
-        // 代码生成器
-        AutoGenerator mpg = new AutoGenerator();
-
-        // 全局配置
-        GlobalConfig gc = new GlobalConfig();
-        String projectPath = System.getProperty("user.dir");
-        gc.setOutputDir(projectPath + "/springboot5-mybatisplus/src/main/java");
-        gc.setAuthor("fzk");
-        gc.setOpen(false);
-        gc.setFileOverride(false); // 是否覆盖
-        gc.setServiceName("%sService"); // 去Service的I前缀
-        gc.setIdType(IdType.AUTO); // 主键为自增id
-        gc.setDateType(DateType.ONLY_DATE);
-//         gc.setSwagger2(true); 实体属性 Swagger2 注解
-        mpg.setGlobalConfig(gc);
-
-        // 数据源配置
-        DataSourceConfig dsc = new DataSourceConfig();
-        dsc.setUrl("jdbc:mysql://localhost:3306/test?useUnicode=true&useSSL=false&characterEncoding=utf8");
-        // dsc.setSchemaName("public");
-        dsc.setDriverName("com.mysql.jdbc.Driver");
-        dsc.setUsername("root");
-        dsc.setPassword("010326");
-        dsc.setDbType(DbType.MYSQL);
-        mpg.setDataSource(dsc);
-
-        // 包配置
-        PackageConfig pc = new PackageConfig();
-        pc.setModuleName("boot");
-        pc.setParent("com.fzk");
-        pc.setEntity("bean");
-        pc.setMapper("mapper");
-        pc.setService("service");
-        pc.setController("controller");
-        mpg.setPackageInfo(pc);
-
-
-        // 4.策略配置
-        StrategyConfig strategy = new StrategyConfig();
-        // 设置要映射的表名
-        strategy.setInclude("user");
-        strategy.setNaming(NamingStrategy.underline_to_camel);
-        strategy.setColumnNaming(NamingStrategy.underline_to_camel);
-        strategy.setEntityLombokModel(true); // 自动lombok；
-        strategy.setLogicDeleteFieldName("deleted"); // 自动填充配置
-        TableFill gmtCreate = new TableFill("create_time", FieldFill.INSERT);
-        TableFill gmtModified = new TableFill("update_time", FieldFill.INSERT_UPDATE);
-        ArrayList<TableFill> tableFills = new ArrayList<>(); tableFills.add(gmtCreate);
-        tableFills.add(gmtModified); strategy.setTableFillList(tableFills); // 乐观锁
-        strategy.setVersionFieldName("version");
-        strategy.setRestControllerStyle(true);
-        strategy.setControllerMappingHyphenStyle(true); // localhost:8080/hello_id_2
-        mpg.setStrategy(strategy);
-
-        //执行
-        mpg.execute();
-    }
-}
-```
-
-执行main方法之后的结果
-
-![执行结果](./MyBatis-plus.assets/执行结果.png)
+作用：根据数据库表结构自动生成dao层代码。有一定的作用。
