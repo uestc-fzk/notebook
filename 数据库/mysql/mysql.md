@@ -1651,6 +1651,7 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
   - 共享锁S
   - 排它锁X
 - 表锁
+- 全局锁：对整个数据库加锁
 
 `InnoDB`支持*多粒度锁*，允许行锁和表锁并存。
 
@@ -1687,9 +1688,83 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
 
 6、AUTO-INC lock：特殊表级锁，由插入到具有 `AUTO_INCREMENT`列的表中的事务获取。
 
+#### 全局锁
+
+`Flush tables with read lock`对整个数据库加全局读锁，其它线程的DML、DDL语句将阻塞。
+
+典型应用场景：全库逻辑备份。
+
+但是注意让全库只读非常危险：主库只读造成业务停摆，仓库只读造成binlog同步主从延迟。
+
+更好的方式的开启一个事务进行拷贝，在可重复读级别下也能拿到一致性视图。比如官方自带的逻辑备份工具是 `mysqldump`。当 `mysqldump` 使用参数`–single-transaction` 的时候，导数据之前就会启动一个事务，来确保拿到一致性视图。而由于 MVCC 的支持，这个过程中数据是可以正常更新的。
+
+对于MyISAM这种不支持事务的引擎也许只能通过全局读锁来全库备份了。
+
+#### 表级锁
+
+有2种表锁：
+
+- 表锁：`lock tables ... read/write`加表锁，`unlock tables`释放锁，连接中断自动释放锁。
+- 元数据锁(meta data lock, MDL)：对表数据做增删改查操作时，加MDL读锁，DDL语句对表结构变更时加MDL写锁，防止操作表数据期间发生表结构改变。事务提交后再释放MDL锁。
+
+读写锁的机制应该比较熟悉，当DDL尝试获取写锁时，存在读锁时将阻塞等待，**同时后续的事务请求读锁将排队在DDL之后，这会对业务造成阻塞**，尤其是热点表！
+
+**如何安全对一个热点表进行结构变更呢**？比较理想的机制是，在 alter table 语句里面设定等待时间，如果在这个指定的等待时间里面能够拿到 MDL 写锁最好，拿不到也不要阻塞后面的业务语句，先放弃。之后开发人员或者 DBA 再通过重试命令重复这个过程。
+
+目前MariaDB和AliSQL支持此功能：
+
+```sql
+ALTER TABLE tbl_name NOWAIT add column ...
+ALTER TABLE tbl_name WAIT N add column ... 
+```
+
+MySQL5.6支持online ddl的过程是这样的： 
+
+1. 拿MDL写锁 
+1.  降级成MDL读锁 
+1. 真正做DDL 
+1. 升级成MDL写锁 
+1. 释放MDL锁 
+
+1、2、4、5如果没有锁冲突，执行时间非常短。第3步占用了DDL绝大部分时间，这期间这个表可以正常读写数据，是因此称为"online"
+
+#### 行锁
+
+两阶段锁协议：在Innodb事务中，行锁是需要的时候才加上，但并不是不需要了就立刻释放，而是要等到事务结束时才释放。
+
+因此事务中要把最可能造成锁冲突、最可能影响并发度的锁尽量往后放。
+
+案例：需要删除表里的前10000行数据，有3种方式：
+
+1. 直接执行`delete from t limit 10000`
+2. 一个连接中循环执行20次`delete from t limit 500`
+3. 在20个连接中同时执行`delete from t limit 500`
+
+方案1：事务长，占用锁时间长，导致其他客户端等待资源时间长
+
+方案2：串行化执行，将相对长的事务分成多次相对短的事务，则每次事务占用锁的时间相对较短，其他客户端在等待相应资源的时间也较短。理论上并发性更好。
+
+方案3：竞争量加剧。
+
+理论上方案2更好，但是也要结合业务具体分析。
+
+#### 死锁
+
+可以启用`innodb_print_all_deadlocks`将所有死锁信息打印到mysql错误日志。
+
+MySQL默认启用死锁检测（`innodb_deadlock_detect`控制），自动检测事务死锁并回滚1个或多个事务以打破死锁。Innodb尝试选择小事务回滚(事务大小由影响的行数决定)。
+
+如果事务因死锁而失败，请始终准备好重新发出事务。死锁并不危险。再试一次。
+
+保持事务小且持续时间短，以使其不易发生冲突。
+
+建立良好的索引，查询扫描更少的索引记录以减少锁定。
+
 ### 事务隔离级别
 
-`InnoDB`提供 SQL:1992 标准描述的所有四种事务隔离级别： [`READ UNCOMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-uncommitted)、 [`READ COMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-committed)、 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)和 [`SERIALIZABLE`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_serializable)。默认隔离级别 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)。
+事务特性：ACID。
+
+`InnoDB`提供 SQL:1992 标准描述的所有四种事务隔离级别： [`READ UNCOMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-uncommitted)、 [`READ COMMITTED`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_read-committed)、 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)和 [`SERIALIZABLE`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_serializable)。Mysql默认隔离级别 [`REPEATABLE READ`](https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html#isolevel_repeatable-read)，可修改启动参数`transaction-isolation`的值设置成`READ-COMMITTED`改为读已提交。
 
 - REPEATABLE READ
   快照读：读取undo log快照
@@ -1705,6 +1780,16 @@ purge后台线程由`innodb_purge_threads`控制，默认4，最大32。
 
 - 一致性读：快照方式可实现避免幻读
 - 锁定读：Next-Key lock，避免其它事务插入数据
+
+在实现上，数据库里面会创建一个视图，访问的时候以视图的逻辑结果为准。读已提交级别下，MVCC视图会在每一个语句前创建一个，所以在读已提交级别下，一个事务是可以看到另外一个事务已经提交的内容，因为它在每一次查询之前都会重新给予最新的数据创建一个新的MVCC视图。 可重复读级别下，MVCC视图实在开始事务的时候就创建好了，这个视图会一直使用，直到该事务结束。 这里要注意不同的隔离级别他们的一致性事务视图创建的时间点是不同的。 
+
+读未提交：没有视图的概念，直接返回最新行数据。
+
+读已提交：在每一行SQL语句执行的时候创建。 
+
+可重复读：在事务启动的时候创建。 
+
+串行化：通过锁来实现数据访问，没有视图概念。
 
 ### 一致性非锁定读和锁定读
 
@@ -1722,25 +1807,44 @@ mysql> SELECT * FROM t WHERE i = 2 FOR UPDATE NOWAIT;
 ERROR 3572 (HY000): Do not wait for lock.
 ```
 
-
-
 锁定读、update、delete语句通常对扫过的每个索引记录设置record lock，无论WHERE条件如何过滤。这些锁通常是Next-key lock。如果是二级索引，还会将其对应的聚集索引锁住。
 
 如果是全表扫描，将会锁住表中所有行，因此索引很重要！
 
 但是如果是唯一索引行，则可以仅锁住该索引记录。
 
-### 死锁
+### 事务启动方式
 
-可以启用`innodb_print_all_deadlocks`将所有死锁信息打印到mysql错误日志
+- 显式启动单个事务，`begin`或`start transaction`，`commit`或`rollback`将结束此事务
+- `set autocommit=0`，关闭此连接线程的自动提交，意味着如果你只执行一个 select 语句，这个事务就启动了，而且并不会自动提交。当执行`commit`或`rollback`时**结束当前事务并自动开启下一个事务**。
 
-MySQL默认启用死锁检测，自动检测事务死锁并回滚1个或多个事务以打破死锁。Innodb尝试选择小事务回滚(事务大小由影响的行数决定)。
+> 注意：begin/start transaction并没有真正启动事务，开启事务后的第一条语句到达才真正启动事务，进行资源的获取，比如表元数据锁MDL和一致性视图的创建。
+>
+> 如果要立刻开始事务，`start transaction with consistent snapshot`命令立刻创建一致性视图。
 
-如果事务因死锁而失败，请始终准备好重新发出事务。死锁并不危险。再试一次。
+### 避免长事务
 
-保持事务小且持续时间短，以使其不易发生冲突。
+注意要避免长事务，因为undo log只有当没有比这个回滚日志更早的read-view的时候才能删除。长事务意味着会存在很老的事务视图，**造成undo log占用大量存储空间**。长事务还**占用锁资源**。
 
-建立良好的索引，查询扫描更少的索引记录以减少锁定。
+可以在 information_schema 库的 innodb_trx 这个表中查询长事务，比如下面这个语句，用于查找持续时间超过 60s 的事务：
+
+```sql
+SELECT * FROM information_schema.innodb_trx WHERE TIME_TO_SEC(timediff(now(),trx_started))>60
+```
+
+如何避免长事务：
+
+业务上：
+
+1. 确认是否使用了`set autocommit=0`，在很多框架中如Spring会自动将此设为0，你可以考虑手动设为`1`.
+2. 确认是否有不必要的只读事务
+3. 业务连接数据库的时候，根据业务本身的预估，通过 `SET MAX_EXECUTION_TIME`命令，来控制每个语句执行的最长时间，避免单个语句意外执行太长时间
+
+数据库端：
+
+1. 监控`infomation_schema.INNODB_TRX`表，设置长事务阈值，超过报警
+2. 把 `innodb_undo_tablespaces`设置成 2（或更大的值）。如果真的出现大事务导致回滚段过大，这样设置后清理起来更方便。
+3. Percona 的 pt-kill 这个工具不错，推荐使用；
 
 ## 优化器统计信息
 
@@ -1852,53 +1956,6 @@ DYNAMIC行格式与COMPACT基本相同，但增加了对可变长列的增强存
 列是否存储在页外取决于页大小和行的总大小。当一行太长时，选择最长的列进行页外存储，直到聚集索引记录适合[B 树](https://dev.mysql.com/doc/refman/8.0/en/glossary.html#glos_b_tree)页。不超过40B的TEXT/BLOB列按行存储。这样避免了长列的大量数据使得节点页存储行数过少的问题。
 
 在Innodb中，最大行长度不能超过页面一半，默认16KB页面，则最大行长度8KB。
-
-## 事务
-
-事务特性：ACID。SQL标准事务隔离级别有读未提交、读已提交、可重复读、串行化。
-
-MySQL默认事务隔离级别是可重复读，可修改启动参数`transaction-isolation`的值设置成`READ-COMMITTED`改为读已提交。
-
-在实现上，数据库里面会创建一个视图，访问的时候以视图的逻辑结果为准。读已提交级别下，MVCC视图会在每一个语句前创建一个，所以在读已提交级别下，一个事务是可以看到另外一个事务已经提交的内容，因为它在每一次查询之前都会重新给予最新的数据创建一个新的MVCC视图。 可重复读级别下，MVCC视图实在开始事务的时候就创建好了，这个视图会一直使用，直到该事务结束。 这里要注意不同的隔离级别他们的一致性事务视图创建的时间点是不同的。 
-
-读未提交：没有视图的概念，直接返回最新行数据。
-
-读已提交：在每一行SQL语句执行的时候创建。 
-
-可重复读：在事务启动的时候创建。 
-
-串行化：通过锁来实现数据访问，没有视图概念。
-
-### 事务启动方式
-
-- 显式启动单个事务，`begin`或`start transaction`，`commit`或`rollback`将结束此事务
-- `set autocommit=0`，关闭此连接线程的自动提交，意味着如果你只执行一个 select 语句，这个事务就启动了，而且并不会自动提交。当执行`commit`或`rollback`时**结束当前事务并自动开启下一个事务**。
-
-
-
-### 避免长事务
-
-注意要避免长事务，因为undo log只有当没有比这个回滚日志更早的read-view的时候才能删除。长事务意味着会存在很老的事务视图，**造成undo log占用大量存储空间**。长事务还**占用锁资源**。
-
-可以在 information_schema 库的 innodb_trx 这个表中查询长事务，比如下面这个语句，用于查找持续时间超过 60s 的事务：
-
-```sql
-SELECT * FROM information_schema.innodb_trx WHERE TIME_TO_SEC(timediff(now(),trx_started))>60
-```
-
-如何避免长事务：
-
-业务上：
-
-1. 确认是否使用了`set autocommit=0`，在很多框架中如Spring会自动将此设为0，你可以考虑手动设为1.
-2. 确认是否有不必要的只读事务
-3. 业务连接数据库的时候，根据业务本身的预估，通过 `SET MAX_EXECUTION_TIME`命令，来控制每个语句执行的最长时间，避免单个语句意外执行太长时间
-
-数据库端：
-
-1. 监控`infomation_schema.INNODB_TRX`表，设置长事务阈值，超过报警
-2. 把 `innodb_undo_tablespaces`设置成 2（或更大的值）。如果真的出现大事务导致回滚段过大，这样设置后清理起来更方便。
-3. Percona 的 pt-kill 这个工具不错，推荐使用；
 
 ## 索引
 
