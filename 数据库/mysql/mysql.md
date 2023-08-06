@@ -1443,69 +1443,42 @@ SET GLOBAL innodb_buffer_pool_dump_now=ON;
 SET GLOBAL innodb_buffer_pool_load_now=ON;
 ```
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ### change buffer
 
-对表进行INSERT/UPDATE/DELETE等DML操作时，二级索引通过需要大量I/O才能保持最新。当相关页面不在缓冲池时，change buffer缓存对二级索引条目的更改，避免立刻I/O，当页面加载到缓冲池时，将更改合并，更新后的页面稍后刷新到磁盘。
+INSERT/UPDATE/DELETE等DML操作时中往往涉及对二级索引的更新，当普通二级索引的数据页不在缓存池时，InnoDB 会**将更新操作缓存在 change buffer 中，避免立刻I/O**。在之后其它查询访问这个数据页并将其读入缓冲池，会顺便将change buffer中缓存的变更merge。
 
-它可以减少磁盘I/O，对有大量DML操作的情况下很有效。
+> 注意：change buffer是缓冲池的一部分，占用缓冲池空间，由变量`innodb_channge_buffer_max_size`控制占用百分比，默认25，最大50。因其占用buffer pool空间，最好不要设置过大。
+>
+> 太大会影响缓冲池页面过早老化，太小会造成change buffer合并跟不上新的change buffer条目，使得I/O增加。
 
-change buffer是缓冲池的一部分，占用缓冲池空间，由变量`innodb_channge_buffer_max_size`控制占用百分比，默认25，最大50。
+change buffer使用限制：**实际上只有普通二级索引可以使用change buffer缓存更改**。
 
-太大会影响缓冲池页面过早老化，太小会造成change buffer合并跟不上新的change buffer条目，使得I/O增加。
+- 唯一索引更新操作需要判断是否违反了唯一性约束，而这必须将数据页读入内存池中进行判断，无法使用change buffer。
+
+**优点**：与聚集索引相比，二级索引更新顺序相对随机，可能会访问不相邻的二级索引页，change buffer缓存更改可以避免从磁盘中读取索引页到缓冲池所造成的大量随机I/O。系统后台线程会定期将更改merge到索引页并写入磁盘。
+
+**使用场景**：写多读少业务，页面在写完后马上访问到的概率比较小，此时使用change buffer效果最好，比如账单类、日志类、历史数据类系统。
+
+反过来，若更新并缓存更改到change buffer后，马上访问这个数据页，会立即触发 merge 过程。这样随机I/O 不会减少，反而增加了 change buffer 的维护代价。所以，对于这种业务模式来说，change buffer 反而起到了副作用。
+
+案例：`insert into t(id,k) values(id1,k1),(id2,k2);`，k字段建普通二级索引，假设k1所在page1正好在缓冲池中，k2所在page2不在，更新结果如下：
+
+![change buffer更新过程](mysql.assets/change buffer更新过程.png)
+
+将page1的内容直接修改，并在change buffer中记录page2的修改，将两个更新顺序记入redo log中，事务提交则落盘redo log。虚线部分是后台线程异步操作落盘。
+
+可以看到更新成本很低，两处内存写，一处磁盘顺序写。
+
+若之后执行`select * from t where k in (k1,k2)`，读请求在这个二级索引上的操作大致如下：
+
+![change buffer读过程](mysql.assets/change buffer读过程.png)
+
+page1直接从缓冲池返回，而page2先从磁盘读入缓冲池，再将change buffer里的更新操作日志merge到数据页再返回。
+
+简单对比change buffer和redo log：
+
+- redo log记录更新操作，让数据页在缓冲池中更新而不用立刻落盘，节省了更新操作引起的随机写I/O。
+- change buffer记录二级索引更新操作，避免了立刻加载不在缓冲池的数据页，节省了更新操作引起的随机读I/O。
 
 ## 表空间
 
@@ -2014,7 +1987,12 @@ Innodb引擎使用B+树索引模型，每个索引对应一棵B+树。索引分�
 
 比如`select * from tuser where name like '张%' and age=10;`如果存在联合索引（name,age），那么执行索引下推，在索引遍历过程中，对索引中name和age字段先做判断，直接过滤掉不满足条件的记录，减少回表次数。若没有索引下推，将只能用到该联合索引的第一个name字段，对于满足name字段的进行回表查询判断是否满足age字段。
 
+唯一二级索引和普通二级索引怎么选择：
 
+- 查询上，都是B+树，都需要从磁盘读取数据页到缓冲池中，内存中二分查找，查询性能上基本无差别。不过如果查询的数据刚好在页末尾，普通索引就需要读取下一页直到第一个不满足条件的记录。
+- 二级索引数据行往往较小，Innodb中数据页16KB可以放成近千行索引数据，出现上诉情况概率很低，因此平均查询性能差异非常小。
+- 更新上，唯一索引不能使用change buffer，而普通索引可以，若更新操作之后都伴随着该记录的查询，你最好关闭change buffer。其它情况下，change buffer都能提升写性能。
+- 业务允许情况下，更建议普通索引。尤其是归档库，在线上库数据表唯一索引下已经确保了唯一键时，为了提高归档效率，可以考虑将归档库表的唯一索引改为普通索引。
 
 ## 限制
 
