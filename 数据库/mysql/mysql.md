@@ -774,7 +774,7 @@ mysql> SHOW VARIABLES LIKE '%general%';
 
 一般查询日志默认不开启；默认文件名为`${主机名}.log`。
 
-## 二进制日志
+## 二进制日志binlog
 
 **binlog记录数据库写操作**，如表DDL和表DML语句。可用`mysqlbinlog`程序显示binlog文件内容。
 
@@ -1642,6 +1642,38 @@ mysql> SELECT FILE_NAME, START_LSN, END_LSN FROM performance_schema.innodb_redo_
 
 MySQL8.0.30以前重做日志文件默认存储于数据目录下，且仅有2个文件分别为：`ib_logfile0`和 `ib_logfile1`，并循环写入这些文件。
 
+### 两阶段提交
+
+事务执行时，只是将缓冲池的数据页修改，并将修改项记入redo log buffer，事务提交时需要将redo log buffer内容写入redolog 文件并落盘，同时需要将事务语句写入binlog并落盘，为了保证这两者数据一致性，采用了如下两阶段提交的策略：
+
+![两阶段提交](mysql.assets/两阶段提交.png)
+
+在两阶段提交的不通时刻，MySQL异常重启：redolog 和binlog有个共同的数据字段XID
+
+- 时刻A：写入redo log处于prepare阶段时崩溃重启，未写binlog，事务回滚
+- 时刻B：binlog写完，redo log未commit前发生崩溃重启，此时数据恢复规则：
+  - 若redo log事务完整，有commit标识，直接提交
+  - 若redo log事务只有prepare标识，就以 XID 去 binlog 找对应的事务，binlog中存在该事务且完整则提交事务，否则回滚事务。
+
+MySQL如何知道binlog是否完整：
+
+- statement格式的binlog最后有个COMMIT
+- row格式的binlog最后有个XID event
+
+在MySQL5.6之后，引入了binlog-checksum参数用来验证 binlog 内容的正确性。
+
+为什么写入binlog的完整事务必须提交呢？
+
+因为binlog用于主从复制、数据归档与恢复，其写入的完整事务会被从库读取使用，以及数据恢复使用，为了保证数据一致性，binlog中的完整事务就必须提交。
+
+
+
+
+
+
+
+
+
 ## undo log
 
 undo log记录如何撤销事务对数据的更改。undo log存储于undo段，而undo段位于undo表空间或全局临时表空间。
@@ -1941,6 +1973,12 @@ SELECT * FROM information_schema.innodb_trx WHERE TIME_TO_SEC(timediff(now(),trx
 1. 监控`infomation_schema.INNODB_TRX`表，设置长事务阈值，超过报警
 2. 把 `innodb_undo_tablespaces`设置成 2（或更大的值）。如果真的出现大事务导致回滚段过大，这样设置后清理起来更方便。
 3. Percona 的 pt-kill 这个工具不错，推荐使用；
+
+### 经典案例
+
+https://time.geekbang.org/column/article/73161
+
+里面有个业务设计问题，巧妙的设计表结构和业务操作逻辑来巧妙锁住了X行锁，从而使当数据行不存在时无法利用X行锁而造成的业务重复问题解决了。
 
 ## 优化器统计信息
 
