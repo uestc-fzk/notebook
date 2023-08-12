@@ -2213,6 +2213,45 @@ COUNT(1)比COUNT(id)快，因为从引擎返回 id 会涉及到解析数据行�
 
 若以方案2优化，需要**先插入或删除数据行，最后再更新计数表**。从两阶段所协议可知，更新计数表时，会设置X行锁直至事务结束，放在最后更新可以最大限度减少X行锁持有时间。
 
+## ORDER BY
+
+MySQL会给每个线程分配一块sort_buffer内存用于排序。
+
+比如这样一个表：
+
+```sql
+CREATE TABLE `t` (
+  `id` int NOT NULL,
+  `city` varchar(16) NOT NULL,
+  `name` varchar(16) NOT NULL,
+  `age` int NOT NULL,
+  `addr` varchar(128) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `city` (`city`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+```
+
+如下查询sql语句：
+
+```sql
+select city,name,age from t where city='杭州' order by name limit 1000  ;
+```
+
+通常情况下该排序sql执行流程如下：
+
+1. 初始化sort_buffer，确定放入name、city、age三个字段
+2. 根据city索引获取主键id并回表获取整行数据，取出name、city、age三个字段存入sort_buffer，重复上诉过程直至不再满足过滤条件
+3. 对sort_buffer中的数据按照name字段做快速排序
+4. 反回前1000行给客户端。
+
+`sort_buffer_size`参数决定了每个线程的sort_buffer大小，默认256KB，若sort_buffer放不下，将不得不利用磁盘临时文件辅助排序，此时将使用归并排序。
+
+上诉案例中将查询的所有字段放入sort_buffer中进行排序，若是查询字段特别长呢？
+
+`max_length_for_sort_data`参数默认4096，当单行长度超过此阈值，MySQL认为单行太长，在上诉第2步中只将要排序的列name和id放入sort_buffer中，**<u>排序后以id再次回表查询得到所有数据</u>**。
+
+要减少排序操作，最好是对order by字段建立索引，比如上诉案例中可以建立联合索引city和name字段。要减少回表查询则需要索引覆盖，比如建立联合索引city、name、age字段。
+
 ## 限制
 
 - 表最多有1017列
