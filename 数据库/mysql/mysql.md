@@ -1246,6 +1246,46 @@ SELECT * FROM tbl ORDER BY key_part1, key_part2;
 - 定时执行`ANALYZE TABLE tbl_name`
 - `FORCE INDEX`强制使用某个索引
 
+### 索引失效
+
+以下几种情况会造成索引失效而全表扫描：
+
+1、对索引字段使用函数计算，会无法利用索引，如时间函数：
+
+```sql
+SELECT COUNT(*) FROM t_user WHERE MONTH(update_time)=7;
+```
+
+对索引字段做函数操作，可能会破坏索引值的有序性，因此优化器就决定放弃走树搜索功能。
+
+2、隐式类型转换
+
+```sql
+SELECT * FROM t_order WHERE order_id=1024;
+```
+
+如果order_id是varchar类型的索引就需要类型转换，如果是1024转为"1024"字符串那么索引有效，可如果是order_id转为数组那么索引失效字
+
+数据类型转换规则中，**一般是字符串转数字**。可以通过`SELECT '10'>9`验证，字符串转数字则结果为1，反之则结果为0，测试结果为1.
+
+上诉sql对于优化器相当于：
+
+```sql
+SELECT * FROM t_order WHERE CAST(order_id AS signed INT)=1024;
+```
+
+这条语句触发了上面规则：对索引字段做函数操作，优化器会放弃走树搜索功能。
+
+3、隐式字符编码转换
+
+若表1是utf8mb4字符集，表2是utf8字符集，两者以字符串类型索引连接时会造成索引失效。因为需要对字符串进行字符集转换。字符集转换会涉及如下函数调用，索引就失效了：
+
+```sql
+select * from trade_detail where CONVERT(traideid USING utf8mb4)=$L2.tradeid.value; 
+```
+
+> 上诉3个例子都是同一个原理：**对索引字段做函数操作，可能会破坏索引值的有序性，因此优化器就决定放弃走树搜索功能。**
+
 ## 哈希join优化
 
 MySQL 8.0.18 开始会尽可能对join查询使用哈希进行优化，即hash join，通常比以前[块嵌套循环连接算法](https://dev.mysql.com/doc/refman/8.0/en/nested-loop-joins.html#block-nested-loop-join-algorithm) 更快。从 MySQL 8.0.20 开始，删除了对块嵌套循环的支持。
