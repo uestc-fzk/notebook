@@ -1869,6 +1869,32 @@ MySQL5.6支持online ddl的过程是这样的：
 
 1、2、4、5如果没有锁冲突，执行时间非常短。第3步占用了DDL绝大部分时间，这期间这个表可以正常读写数据，是因此称为"online"。
 
+#### 行锁
+
+加锁规则：
+
+- 原则1：加锁的基本单位是next-key lock，前开后闭区间
+- 原则2：查找过程中访问到的对象才加锁
+- 优化1：索引上的等值查询，给唯一索引加锁时，next-key lock退化为行锁
+- 优化2：索引上的等值查询，向右遍历时且最后一个值不满足等值条件时，next-key lock退化为间隙锁
+- bug：唯一索引上的范围查询会访问到不满足条件的第一个值为止
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ### 两阶段锁协议
 
 **两阶段锁协议**：在Innodb事务中，行锁是需要的时候才加上，但并不是不需要了就立刻释放，而是要等到事务结束时才释放。
@@ -2373,7 +2399,7 @@ START SLAVE;
 START REPLICA;
 ```
 
-> 注意：MySQL8默认以`caching_sha_password`插件进行身份验证，必须在CHANGE REPLICATION SOURCE TO | CHANGE MASTER TO语句中指定SOURCE_PUBLIC_KEY_PATH | MASTER_PUBLIC_6EY_PATH或GET_SOURCE_PUBLIC_KEY | GET_MASTER_PPUBLIC_KEY选项，以启用基于RSA密钥对的密码交换。
+> 注意：MySQL8默认以`caching_sha_password`插件进行身份验证，必须在`CHANGE REPLICATION SOURCE TO | CHANGE MASTER TO`语句中指定`SOURCE_PUBLIC_KEY_PATH | MASTER_PUBLIC_6EY_PATH`或`GET_SOURCE_PUBLIC_KEY | GET_MASTER_PPUBLIC_KEY`选项，以启用基于RSA密钥对的密码交换。
 
 还可以给出以下选项：
 
