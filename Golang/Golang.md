@@ -2135,6 +2135,25 @@ ok      command-line-arguments  5.750s
 
 # other
 
+## 监控ctrl+c中断信号
+
+```go
+//TODO 协程执行业务代码
+
+//监听退出序号
+ctx, cancelFunc := context.WithCancel(context.Background())
+sigs := make(chan os.Signal, 1)
+signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+go func() {
+	defer cancelFunc()
+	sig := <-sigs
+	log.Printf("监听到中断信号, %s", sig)
+}()
+log.Println("等待中断信号")
+<-ctx.Done()
+log.Println("Program Exit")
+```
+
 ## 导出Excel
 
 使用的第3方库为：github.com/tealeg/xlsx
