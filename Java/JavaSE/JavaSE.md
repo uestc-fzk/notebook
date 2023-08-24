@@ -5907,6 +5907,36 @@ public class Logger {
 
 此目录记录一些自己写的小工具类。
 
+## 监听中断信号-优雅关闭进程
+
+可以用于优雅的关闭整个进程。
+
+```java
+ArrayBlockingQueue<String> queue = new ArrayBlockingQueue<>(1);
+// 监听`ctrl+c`中断信号
+Signal.handle(new Signal("INT"), (Signal sig) -> {
+    System.out.println("监听到中断信号: name: " + sig.getName() + ", number: " + sig.getNumber());
+    try {
+        queue.put(sig.toString());
+    } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+    }
+});
+// 监听`kill`信号，注意无法捕获`kill -9`信号
+Signal.handle(new Signal("TERM"), (Signal sig) -> {
+    System.out.println("监听到kill信号: name: " + sig.getName() + ", number: " + sig.getNumber());
+    try {
+        queue.put(sig.toString());
+    } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+    }
+});
+System.out.println("开始等待信号");
+queue.take();
+System.out.println("线程结束");
+System.exit(0);// 结束整个虚拟机进程     
+```
+
 ## 加密算法
 
 ### AES
