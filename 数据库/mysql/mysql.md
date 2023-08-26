@@ -819,6 +819,26 @@ mysql> show variables like 'log_bin%';
 
 > 注意：如果使用innodb引擎且事务隔离级别为`READ_COMMITTED`或`READ_UNCOMMITED`，只能使用基于行的日志格式。
 
+### 写入机制
+
+系统为每个线程单独分配了一块binlog cache内存，由参数`binlog_cache`控制，默认32KB。
+
+事务执行时先把日志写到binlog cache中，事务提交时，再把binlog cache中的完整事务写入binlog文件并清空cache。
+
+![binlog写盘状态](mysql.assets/binlog写盘状态.png)
+
+如图中的write指将binlog cache内存的内容写入到文件系统的page cache，此时未落盘速度是很快的。图中的fsync落盘才会占用磁盘的IOPS，write和fsync的时机由参数`sync_binlog`控制：
+
+- sync_binlog=0：事务提交只write，不fsync
+- sync_binlog=1：每次事务提交都fsync。默认。
+- sync_binlog=n：累计n个事务提交才fsync
+
+sync_binlog设置较大时可以提升写性能，但风险是主机宕机会导致丢失最近n个binlog日志。
+
+
+
+
+
 ## 慢查询日志
 
 slowlog记录执行时间超过`long_query_time`的SQL，`mysqldumpslow`命令可处理slowlog并汇总其内容。
@@ -1682,6 +1702,40 @@ mysql> SELECT FILE_NAME, START_LSN, END_LSN FROM performance_schema.innodb_redo_
 
 MySQL8.0.30以前重做日志文件默认存储于数据目录下，且仅有2个文件分别为：`ib_logfile0`和 `ib_logfile1`，并循环写入这些文件。
 
+### 写入机制
+
+Innodb事务执行中，将缓冲池数据页修改记录到`redo log buffer`，事务提交时：
+
+- write：`redo log bufer`的内容write到redo log文件的page cache
+- flush：落盘redo log文件
+
+参数`innodb_flush_log_at_trx_commit`控制redo log写入策略：
+
+- 0：事务提交时，redo log 停留在 redo log buffer，此时仅依赖后台线程写文件并落盘。
+- 1：每次事务提交时都将日志write到redo log文件的page cache并fsync落盘。默认。
+- 2：每次事务提交时只是把日志write到redo log文件的page cache。
+
+Innodb有一个后台线程定时1s将redo log buffer中的日志write到文件系统page cache并fsync落盘。一个没有提交的事务的 redo log，也是可能已经持久化到磁盘的。
+
+在默认配置情况下，binlog和redo log都配置为事务提交就落盘，即**双1配置**，指的就是 sync_binlog 和 innodb_flush_log_at_trx_commit 都设置成 1。
+
+根据事务的两阶段提交可知，事务提交是先写redo log prepare状态，再写binlog，最后写redo log commit状态，理论上有3次刷盘，实际上Innodb只在前两次刷盘，因为redo log每s一次的后台轮询刷盘，再加上崩溃恢复逻辑，redo log 在 commit 的时候只需要write到文件系统的 page cache，无需落盘也是crash安全的。
+
+**表面上看双1配置会造成性能很低，实际上组提交(group commit)机制可以保证同步提交的性能也不错。**
+
+组提交中，每次提交的组员越多(即redo log LSN越大)，节省IO效果就越好。MySQL有一个有趣的优化：将write和fsync分开以拖时间累计更多的write，从而得到更大的LSN。
+
+![两阶段提交细化](mysql.assets/两阶段提交细化.png)
+
+总所周知从内存缓冲到文件落盘一般都有两个步骤：
+
+- write：从内存缓冲写入文件系统page cache，耗时很短(几乎内存操作)。
+- flush：调用fsync落盘文件，耗时较长(IO操作)。
+
+MySQL将redolog和binlog落盘动作都分开间隔执行，使得组提交中每次落盘前暂存的落盘请求更多。
+
+
+
 ### 两阶段提交
 
 事务执行时，只是将缓冲池的数据页修改，并将修改项记入`redo log buffer`，事务提交时需要将`redo log buffer`内容写入redolog 文件并落盘，同时需要将事务语句写入binlog并落盘，为了保证这两者数据一致性，采用了如下两阶段提交的策略：
@@ -1710,7 +1764,9 @@ MySQL如何知道binlog是否完整：
 
 
 
+问题：为什么 binlog cache 是每个线程自己维护的，而 redo log buffer 是全局共用的？
 
+回答：MySQL 这么设计的主要原因是，binlog 是不能“被打断的”。一个事务的 binlog 必须连续写，因此要整个事务完成后，再一起写到文件里。而 redo log 并没有这个要求，中间有生成的日志可以写到 redo log buffer 中。redo log buffer 中的内容还能“搭便车”，其他事务提交的时候可以被一起写到磁盘中。
 
 
 

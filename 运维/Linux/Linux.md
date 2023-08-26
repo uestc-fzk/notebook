@@ -1073,43 +1073,66 @@ COMMAND   启动该进程的命令名
 
 #### kill
 
->通常在三种情况下进程被终止运行:
->	1.进程运行完成,  自动消亡;
->	2.用户按^c 或 Del 等中断键,  强行终止前台进程的运行;
->	3.用户发出 kill 命令, 强行终止后台进程或键盘锁住了的前台进程的运行.
->kill 命令的三种常用格式为:
->     kill         PID
->正常结束进程, 自动完成所有善后工作, 作用类似于按 Del 键.
->     kill   -1   PID
->先挂起该进程, 终止子进程, 完成善后工作, 再终止该进程.
->     kill   -9   PID
->立即强行终止该进程, 不作任何善后工作.  可能出现资源浪费和"孤儿"进程. 
+kill命令将信号发送给指定程序，以终止程序运行。linux 的 **kill** 命令是向进程发送信号，**kill** 不是杀死的意思，**-9** 表示无条件退出，但由进程自行决定是否退出，这就是为什么 **kill -9** 终止不了系统进程和守护进程的原因。
+
+默认信号为`SIGTERM(15)`，正常结束进程, 自动完成所有善后工作, 作用类似于**按 Del 键**.
+
+```shell
+kill pid
+kill -15 pid
+kill -TERM pid
+```
+
+按`CTRL+C`键向前台进程发送`SIGINT`信号，类似于`kill -2 pid`和`kill -INT pid`。
+
+```shell
+# 先挂起该进程, 终止子进程, 完成善后工作, 再终止该进程.
+kill -1 pid 
+
+# 立即强行终止该进程, 不作任何善后工作.  可能出现资源浪费和"孤儿"进程. 
+kill -9 pid 
+
+# PID为0，表示杀死本用户所有进程(包括命令解释器Shell)，运行结果为本用户退出操作系统
+kill -9 0 
+```
 
 基于安全原因，普通用户只能终止自己的进程，超级管理员才可以终止所有进程。
 
-前台进程可以用`Ctrl+c`终止，后台进程采用kill命令终止。
-
 ```shell
-$ kill [-signal] PID
-# signal为信号编号，一般取值范围1~30(不同版本Linux可能不同)，默认为15
-$ kill -9 0
-# PID为0，表示杀死本用户所有进程(包括命令解释器Shell)，运行结果为本用户退出操作系统
+# 列出所有信号名称和序号
+[root@k8s-master ~]# kill -l
+ 1) SIGHUP       2) SIGINT       3) SIGQUIT      4) SIGILL       5) SIGTRAP
+ 6) SIGABRT      7) SIGBUS       8) SIGFPE       9) SIGKILL     10) SIGUSR1
+11) SIGSEGV     12) SIGUSR2     13) SIGPIPE     14) SIGALRM     15) SIGTERM
+16) SIGSTKFLT   17) SIGCHLD     18) SIGCONT     19) SIGSTOP     20) SIGTSTP
+21) SIGTTIN     22) SIGTTOU     23) SIGURG      24) SIGXCPU     25) SIGXFSZ
+26) SIGVTALRM   27) SIGPROF     28) SIGWINCH    29) SIGIO       30) SIGPWR
+31) SIGSYS      34) SIGRTMIN    35) SIGRTMIN+1  36) SIGRTMIN+2  37) SIGRTMIN+3
+38) SIGRTMIN+4  39) SIGRTMIN+5  40) SIGRTMIN+6  41) SIGRTMIN+7  42) SIGRTMIN+8
+43) SIGRTMIN+9  44) SIGRTMIN+10 45) SIGRTMIN+11 46) SIGRTMIN+12 47) SIGRTMIN+13
+48) SIGRTMIN+14 49) SIGRTMIN+15 50) SIGRTMAX-14 51) SIGRTMAX-13 52) SIGRTMAX-12
+53) SIGRTMAX-11 54) SIGRTMAX-10 55) SIGRTMAX-9  56) SIGRTMAX-8  57) SIGRTMAX-7
+58) SIGRTMAX-6  59) SIGRTMAX-5  60) SIGRTMAX-4  61) SIGRTMAX-3  62) SIGRTMAX-2
+63) SIGRTMAX-1  64) SIGRTMAX
+```
 
+**在程序中可以手动捕获这些信号，其中`SIGKILL(9)`无法捕获。**
 
-[centos@localhost ~]$ sleep 100 &
-[1] 9813
-[centos@localhost ~]$ ps
-   PID TTY          TIME CMD
-  9734 pts/0    00:00:00 bash
-  9813 pts/0    00:00:00 sleep
-  9814 pts/0    00:00:00 ps
-[centos@localhost ~]$ kill 9813
-[centos@localhost ~]$ ps
-   PID TTY          TIME CMD
-  9734 pts/0    00:00:00 bash
-  9823 pts/0    00:00:00 ps
-[1]+  Terminated              sleep 100
-[centos@localhost ~]$ 
+比如golang中捕获`SIGINT`和`SIGTERM`信号实现自己控制退出：
+
+```go
+//监听退出序号
+ctx, cancelFunc := context.WithCancel(context.Background())
+sigs := make(chan os.Signal, 1)
+signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+go func() {
+	defer cancelFunc()
+	sig := <-sigs
+	log.Printf("监听到中断信号, %s", sig)
+}()
+log.Println("等待中断信号")
+<-ctx.Done()
+log.Println("Program Exit")
 ```
 
 
