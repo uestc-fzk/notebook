@@ -817,6 +817,10 @@ mysql> show variables like 'log_bin%';
 
 在少量SQL语句会修改大量行的情况下，记录SQL更有效，而某些SQL的WHERE过滤可能需要大量执行时间，但只会修改几行，此时记录行修改更有效。
 
+默认为row格式而不是mixed，是因为row格式可用于**恢复数据**：
+
+row格式会将delete删除的行、insert插入的行、update更新行的整行字段信息都保存在binlog中，如果发现误操作了，可以手动把这些数据改回去。MariaDB 的Flashback工具就是基于该原理来回滚数据的。
+
 > 注意：如果使用innodb引擎且事务隔离级别为`READ_COMMITTED`或`READ_UNCOMMITED`，只能使用基于行的日志格式。
 
 ### 写入机制
@@ -2392,6 +2396,8 @@ select city,name,age from t where city='杭州' order by name limit 1000  ;
 
 ## 基于binlog复制
 
+![主从备份流程图](mysql.assets/主从备份流程图.png)
+
 主节点将更新事件写入binlog，副本读取主节点binlog，并执行其中事件。
 
 每个副本会保存各自的binlog坐标：从master中读取和处理的文件名和偏移量。
@@ -2568,7 +2574,31 @@ MySQL 复制功能是使用三个主线程实现的，一个在master服务器�
 
 应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
 
-## 故障迁移
+## 主从延迟
+
+`SHOW SLAVE STATUS `命令可以显示从库的**同步延迟**，`seconds_behind_master`表示当前从库延迟了多少秒。
+
+每个事务的binlog存在一个时间字段记录主库写入时间，从库用其与当前系统时间的差值作为`seconds_behind_master`，单位秒。
+
+主从同步主要有以下3个时间节点：
+
+- 主库执行事务写binlog时刻为T1
+- 从库接受到binlog时刻为T2
+- 从库消费中转日志(relay log)执行完该事务时刻为T3
+
+同步时延就是T3-T1。其中在网络正常时，binlog从主库传输到从库是很短的，即T2-T1较小，那么同步时延主要来自T3-T2。
+
+**主从时延来源**：
+
+- 主从性能差距，比如主库位于一个机器，而多个从库位于同一个机器。
+  解决：考虑到主从切换情况，尽量还是对称部署。
+- 从库可能反而压力大，比如读多写少，从库执行大量查询占用大量资源影响了同步速度。
+  解决：一主多从。
+- 大事务。如大事务在主库执行10分钟，那么在从库也执行10分钟（即T3-T2），这会导致从库延迟10分钟。比如大表DDL，一次性delete很多数据。建议控制事务的
+
+## 故障迁移-主从切换
+
+![mysql主从切换](mysql.assets/mysql主从切换.png)
 
 可以直接使用以下命令更改新master：
 
