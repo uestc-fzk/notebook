@@ -812,8 +812,8 @@ mysql> show variables like 'log_bin%';
 
 - `STATEMENT`：记录写操作SQL语句。**对于非确定性SQL如`now()`等时间函数会出现主从数据不一致问题。**
 
-- `ROW`：默认，记录行的修改
-- `MIXED`：混合模式，一般记录SQL，非确定性SQL情况下记录行修改。
+- `ROW`：默认，记录行的修改。
+- `MIXED`：混合记录格式，对于确定性SQL则以语句格式记录，不确定性SQL则以行格式记录。
 
 在少量SQL语句会修改大量行的情况下，记录SQL更有效，而某些SQL的WHERE过滤可能需要大量执行时间，但只会修改几行，此时记录行修改更有效。
 
@@ -2495,26 +2495,26 @@ mysql> STOP REPLICA SQL_THREAD;
 
 进停止SQL线程时，IO接受线程继续从master读事件，但不执行，可用于执行副本备份，备份完再重启SQL线程。
 
-## 提高复制性能
+### 树形复制
 
 若并发量很高，需要的副本数量很多，若都连到一个master上，master的网络负载会很重。此时可以采用树形结构：
 
 ```mermaid
 graph TD
 m0(master0)
-m0-->m1(master1)
-m0-->m2(master2)
-m1-->replica1[replica1]
-m1-->replica2[replica2]
-m2-->replica3[replica3]
-m2-->replica4[replica4]
+m0-->|binlog|m1(master1)
+m0-->|binlog|m2(master2)
+m1-->|binlog|replica1[replica1]
+m1-->|binlog|replica2[replica2]
+m2-->|binlog|replica3[replica3]
+m2-->|binlog|replica4[replica4]
 ```
 
 master1和master2订阅master0的binlog，replica1、replica2订阅master1的binlog，replica3、replica4订阅master2的binlog。
 
 此时master1和master2必须开启`log-slave-updates`选项（默认开启），将接收到的binlog的指令修改也记录到自己的binlog中。
 
-## 延迟复制
+### 延迟复制
 
 副本可以故意比master晚指定时间才执行事务。
 
@@ -2533,46 +2533,6 @@ GTID是全局事务id，它可以识别跟踪每个事务。
 因为基于GTID的复制是完全基于事务的，所以很容易判断master和副本是否一致；只要在master上提交的所有事务也在副本上提交，就可以保证两者之间的一致性。
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
-
-## 复制实现原理
-
-副本从master中拉取binlog数据，跟踪其数据库的更新操作。
-
-### 复制格式
-
-复制从binlog从读取事件，binlog格式有3种，由`binlog_format`选项决定：
-
-- STATEMENT：基于语句的binlog，记录将更新SQL记录到binlog。优点是写入日志文件数据少，但不是所有SQL都能直接记录，对于不确定函数如UUID()/USER()等不安全。
-- ROW：默认，基于行的binlog，记录各个表行更改方式。能记录所有修改，但是需要记录的数据较多。如UPDATE语句可能更改了很多行记录，在基于语句记录的binlog中仅记录该SQL语句，而在基于行的binlog就需要记录非常多的修改数据。
-- MIXED：混合纪录格式，对于确定性SQL则以语句格式记录，不确定性SQL则以行格式记录。
-
-### 复制线程
-
-MySQL 复制功能是使用三个主线程实现的，一个在master服务器上，两个在副本服务器上：
-
-- binlog转储线程：当副本连接时，master创建线程将binlog内容发送到副本，此线程为binlog dump线程，它会获取binlog的锁。
-- 复制I/O接收线程：副本执行`START REPLICA`命令时会创建IO接收线程，它会连接到master，读取master的binlog dump线程发送的更新事件，并将其赋值到中继日志文件。
-- 复制SQL应用线程：副本创建一个SQL应用线程读取中继日志并执行其中事件。
-
-### 中继日志和元数据
-
-副本`中继日志relay log`由IO接收线程写入，并由IO应用线程读取并执行。
-
-中继日志由一组编号的文件组成，其中包含描述数据库更改的事件，以及一个包含所有已使用中继日志文件名称的索引文件。中继日志文件的默认位置是数据目录。
-
-中继日志文件与二进制日志文件具有相同的格式，可以使用[**mysqlbinlog**](https://dev.mysql.com/doc/refman/8.0/en/mysqlbinlog.html)读取。中继日志文件大小由`max_relay_log_size`指定。
-
-中继日志文件名：`${host_name}-relay-bin.nnnnnn`，如`fzk-relay-bin.000001`，中继日志索引文件：`${host_name}-relay-bin.index`
-
-> 注意：如果修改主机名，会导致复制出现错误Failed to open the relay log和Could not find target log during relay log initialization。
->
-> 可以使用`relay_log`和`relay_log_index`明确指定中继日志文件名。
-
-复制SQL应用线程在执行完中继文件所有事件且不再需要时会自动删除每个中继日志文件。
-
-副本的连接元数据写入`mysql.slave_master_info`表。*连接元数据存储库*包含复制接收器线程连接到复制源服务器并从源的二进制日志检索事务所需的信息。
-
-应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
 
 ## 主从延迟
 
@@ -2624,6 +2584,155 @@ CHANGE REPLICATION TO # 8.0.23以后
 3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
 
 若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
+
+## 复制实现原理
+
+### 复制线程
+
+MySQL 复制功能是使用三个主线程实现的，一个在master服务器上，两个在副本服务器上：
+
+- binlog转储线程：当副本连接时，master创建线程将binlog内容发送到副本，此线程为binlog dump线程，它会获取binlog的锁。
+- 复制I/O接收线程：副本执行`START REPLICA`命令时会创建IO接收线程，它会连接到master，读取master的binlog dump线程发送的更新事件，并将其赋值到中继日志文件。
+- 复制SQL应用线程：副本创建一个SQL应用线程读取中继日志并执行其中事件。
+
+### 中继日志和元数据
+
+副本`中继日志relay log`由IO接收线程写入，并由IO应用线程读取并执行。
+
+中继日志由一组编号的文件组成，其中包含描述数据库更改的事件，以及一个包含所有已使用中继日志文件名称的索引文件。中继日志文件的默认位置是数据目录。
+
+中继日志文件与二进制日志文件具有相同的格式，可以使用[**mysqlbinlog**](https://dev.mysql.com/doc/refman/8.0/en/mysqlbinlog.html)读取。中继日志文件大小由`max_relay_log_size`指定。
+
+中继日志文件名：`${host_name}-relay-bin.nnnnnn`，如`fzk-relay-bin.000001`，中继日志索引文件：`${host_name}-relay-bin.index`
+
+> 注意：如果修改主机名，会导致复制出现错误Failed to open the relay log和Could not find target log during relay log initialization。
+>
+> 可以使用`relay_log`和`relay_log_index`明确指定中继日志文件名。
+
+复制SQL应用线程在执行完中继文件所有事件且不再需要时会自动删除每个中继日志文件。
+
+副本的连接元数据写入`mysql.slave_master_info`表。*连接元数据存储库*包含复制接收器线程连接到复制源服务器并从源的二进制日志检索事务所需的信息。
+
+应用程序元数据写入`mysql.slave_relay_log_info`表。应用程序*元数据存储库* 包含复制应用程序线程需要从副本的中继日志读取和应用事务的信息。
+
+### 并发复制
+
+```shell
+mysql> show variables like '%slave_p%';
++-----------------------------+---------------+
+| Variable_name               | Value         |
++-----------------------------+---------------+
+| slave_parallel_type         | LOGICAL_CLOCK |
+| slave_parallel_workers      | 4             |
+| slave_pending_jobs_size_max | 134217728     |
+| slave_preserve_commit_order | ON            |
++-----------------------------+---------------+
+```
+
+**MySQL5.6 版本之前只支持单线程复制，由此在主库并发高、TPS 高时就会出现严重的主从延迟问题。**
+
+在MySQL5.6之后，原本处理中继日志的sql_thread只负责读取中继日志和分发事务event到各个worker线程：
+
+```mermaid
+graph LR
+relayLog(relay log)-->sqlThread[sql_thread<br/>coordinator]
+sqlThread-->worker1
+sqlThread-->worker2
+sqlThread-->worker3
+```
+
+worker线程数量由参数`slave_parallel_workers`控制，默认4.
+
+中继日志中的事务可以被任意分配到不同的worker吗？
+
+不行，因为CPU调度策略可能会导致后面的事务反而先执行完成，若这些事务更新的是同一行数据，在主库和从库上的执行顺序相反，会导致主从数据不一致的问题。
+
+事务分发时有以下要求：
+
+- 事务不能被拆开分发，必须在同一个worker线程
+- 不能造成更新覆盖，这要求更新同一行的两个事务必须保持原有的执行顺序。
+
+目前有以下几种分发策略：
+
+- 按库并行：msyql5.6使用，并发性能不算好，存在热点库问题将退化为单线程复制。
+- 按表并行：在多个表负载均匀的场景里应用效果很好。存在热点表问题将退化为单线程复制。
+- 按行并行：并发度高，但耗内存和CPU
+- 基于group commit并行：优秀的设计。
+
+#### 基于库/表/行并发
+
+MySQL5.6支持的并行复制的并发粒度为按库并行。
+
+按库、表、行分发，要求每个worker线程维护一个hash表和一个执行队列，执行队列保存待执行事务，hash表保存执行队列中所有事务所涉及的库/表/行。
+
+如果按库，则key为"库名"，value为数字，表示当前队列有多少个事务涉及修改此库。
+
+如果按表，则key为"库名.表名"。
+
+当有事务分配给该worker时，将涉及的库/表生成key加入到hash表中，若存在key则value加1。执行完成后将value-1，若为0则移除key。
+
+sql_thread分配流程如下：假设事务T涉及修改表t1和表t2，那么它需要判断两个key分别为"库名.t1"和"库名.t2"
+
+1. 判读事务T和各个worker的冲突关系，即判断key是否存在，若有key存在则表示与该worker冲突
+2. 若事务T只和一个worker冲突，则将该事务放入冲突worker的执行队列并将两个key放入其hash表并增加计数value。
+3. 若事务T和多个worker冲突，sql_thread就进入等待直至仅有1个冲突worker时再分发事务T。
+
+要解决热点表就必须按行分发，其核心思路：如果两个事务没有更新相同的行，它们在备库上可以并行执行。显然，这个模式要求 binlog 格式必须是 row。
+
+那么key的构建方案就是："库名.表名.唯一键名.唯一键值"。
+
+如果涉及唯一键的修改，那么将至少有3个key：
+
+- 主键id构建的key
+- 唯一键修改前的值构建的key
+- 唯一键修改后的值构建的key
+
+可见，**相比于按表并行分发策略，按行并行策略在决定线程分发的时候，需要消耗更多的计算资源**。
+
+按表分发和按行分发的约束：
+
+- 要能够从 binlog 里面解析出表名、主键值和唯一索引的值。也就是说，主库的 binlog 格式必须是 row；
+- 表不能有外键，表上如果有外键，级联更新的行不会记录在 binlog 中，这样冲突检测就不准确。
+
+按行分发虽然并发度更高，但对于大事务存在以下问题：
+
+- 耗费内存：比如一个语句修改了100w行，那hash表就需要插入数百万的key
+- 耗费cpu：解析binlog和计算hash值成本高
+
+MySQL5.6之所以只支持按库分发，是因为**按库分发可以兼容不同的binlog格式**，不强制要求row格式。
+
+#### 基于group commit并发
+
+这是MariaDB设计的并行复制策略，它利用了**redolog组提交优化**的特征：
+
+- **能在一组提交的事务一定不会修改同一行，因为行锁。**
+- 主库上能并行的事务，从库也一定可以并行。
+
+在实现上，MariaDB 是这么做的：
+
+- 在一组里面一起提交的事务，有一个相同的 commit_id，下一组就是 commit_id+1；commit_id 直接写到 binlog 里面；
+- 传到备库应用的时候，相同 commit_id 的事务分发到多个 worker 执行；这一组全部执行完成后，coordinator 再去取下一批。
+
+当时，这个策略出来的时候是相当惊艳的。因为，之前业界的思路都是在“分析 binlog，并拆分到 worker”上。而 MariaDB 的这个策略，目标是“模拟主库的并行模式”。
+
+但是此策略也有问题：它并没有实现“真正的模拟主库并发度”这个目标。在主库上，一组事务在 commit 的时候，下一组事务是同时处于“执行中”状态的。而这里的从库并发复制，必须在一组事务执行并提交完成后，coordinator 才能分配下一组。
+
+
+
+MySQL5.7以后，提供参数`slave_parallel_type`控制并行复制策略：
+
+- DATABASE：执行MySQL5.6的按库并行策略
+- LOGICAL_CLOCK：默认。基于group commit并行策略
+
+还提供了参数`binlog_transaction_dependency_tracking`控制并行：
+
+- COMMIT_ORDER：默认，基于group commit并行
+- WRITESET：基于行并发。对于事务涉及更新的每一行，计算出这一行的 hash 值，组成集合 writeset。如果两个事务没有操作相同的行，也就是说它们的 writeset 没有交集，就可以并行。
+- WRITESET_SESSION：是在 WRITESET 的基础上多了一个约束，即在主库上同一个线程先后执行的两个事务，在备库执行的时候，要保证相同的先后顺序。
+
+writeset 是在主库生成后直接写入到 binlog 里面的，这样在备库执行的时候，不需要解析 binlog 内容（event 里的行数据），节省了很多计算量；不需要把整个事务的 binlog 都扫一遍才能决定分发到哪个 worker，更省内存；由于备库的分发策略不依赖于 binlog 内容，所以 binlog 是 statement 格式也是可以的。
+
+当然，对于“表上没主键”和“外键约束”的场景，WRITESET 策略也是没法并行的，也会暂时退化为单线程模型。
 
 # 分区
 
