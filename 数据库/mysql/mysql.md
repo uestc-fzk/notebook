@@ -2388,11 +2388,13 @@ select city,name,age from t where city='杭州' order by name limit 1000  ;
 
 # 主从复制
 
-一主多从，默认异步复制，支持半同步复制和延迟复制。MySQL NDB Cluster是同步复制。
+一主多从，**默认异步复制**，支持半同步复制和延迟复制。MySQL NDB Cluster是同步复制。
 
-半同步复制：直到至少一个副本确认它已经接收并记录了事务的事件，才能事务提交。
+半同步复制：直到至少一个副本确认它已经接收并记录了事务的事件，才能事务提交。[MySQL 8.0支持通过插件实现的半同步复制接口](https://dev.mysql.com/doc/refman/8.0/en/replication-semisync.html)。
 
 延迟复制：副本故意落后主节点至少指定的时间。
+
+**为保证数据一致性，主从同步必须开启GTID。**
 
 ## 基于binlog复制
 
@@ -2407,7 +2409,7 @@ select city,name,age from t where city='杭州' order by name limit 1000  ;
 以下步骤为正在运行的MySQL实例添加副本：
 
 1、新建客户端连接到master，刷新master的所有表：`FLUSH TABLES WITH READ LOCK;`
-注意：不要关闭客户端，此时它会一直持有读锁，从而避免新事务commit成功，期间数据库无法修改。
+注意：不要关闭客户端，此时它会**一直持有读锁，从而避免新事务commit成功**，期间数据库**无法修改，可以查询**。
 
 2、再新建会话：确定当前binlog文件名和坐标：
 
@@ -2422,6 +2424,8 @@ mysql> SHOW MASTER STATUS;
 
 记下这些值，它们将被配置在副本中。
 
+`Executed_Gtid_Set`是GTID集合，若开启了GTID会记录执行了哪些事务的GTID集合。
+
 3、如果master包含有数据，则必须先将master数据复制到每个副本中，可以使用mysqldump命令。
 
 ```sql
@@ -2430,13 +2434,15 @@ $> mysqldump --all-databases --master-data > dbdump.db
 
 4、在之前持有读锁的客户端连接上释放读锁：`UNLOCK TABLES;`或直接关闭客户端。
 
+**在步骤1到4之间，主库可以查询，事务中的查询可以返回，写操作将阻塞等待锁释放。**
+
 5、启动各个副本，将数据拷贝到副本中：
 
 ```sql
 $> mysql < dbdump.db
 ```
 
-6、设置副本与master通信：
+6、设置副本与master通信并指定同步位点：
 
 ```sql
 # 旧版本
@@ -2460,6 +2466,8 @@ START SLAVE;
 # 8.0.23以后版本   
 START REPLICA;
 ```
+
+上诉参数`MASTER_LOG_FILE`和`MASTER_LOG_POS`需配置为主库日志文件和日志偏移量，需与之前的`SHOW MASTER STATUS`命令的结果对齐，表明从指定日志文件指定位置开始同步。
 
 > 注意：MySQL8默认以`caching_sha_password`插件进行身份验证，必须在`CHANGE REPLICATION SOURCE TO | CHANGE MASTER TO`语句中指定`SOURCE_PUBLIC_KEY_PATH | MASTER_PUBLIC_6EY_PATH`或`GET_SOURCE_PUBLIC_KEY | GET_MASTER_PPUBLIC_KEY`选项，以启用基于RSA密钥对的密码交换。
 
@@ -2516,7 +2524,7 @@ master1和master2订阅master0的binlog，replica1、replica2订阅master1的bin
 
 ### 延迟复制
 
-副本可以故意比master晚指定时间才执行事务。
+延迟复制：副本故意落后主节点至少指定的时间。
 
 在 MySQL 8.0 中，延迟复制的方法取决于两个时间戳， `immediate_commit_timestamp`和 `original_commit_timestamp`
 
@@ -2526,15 +2534,7 @@ CHANGE REPLICATION SOURCE TO xxx DELAY=n # MySQL8.0.23以后
 CHANGE MASTER TO xxx MASTER_DELAY=n # 老版本
 ```
 
-## 基于GTID复制
-
-GTID是全局事务id，它可以识别跟踪每个事务。
-
-因为基于GTID的复制是完全基于事务的，所以很容易判断master和副本是否一致；只要在master上提交的所有事务也在副本上提交，就可以保证两者之间的一致性。
-
-文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
-
-## 主从延迟
+### 主从延迟
 
 `SHOW SLAVE STATUS `命令可以显示从库的**同步延迟**，`seconds_behind_master`表示当前从库延迟了多少秒。
 
@@ -2555,35 +2555,6 @@ GTID是全局事务id，它可以识别跟踪每个事务。
 - 从库可能反而压力大，比如读多写少，从库执行大量查询占用大量资源影响了同步速度。
   解决：一主多从。
 - 大事务。如大事务在主库执行10分钟，那么在从库也执行10分钟（即T3-T2），这会导致从库延迟10分钟。比如大表DDL，一次性delete很多数据。建议控制事务的
-
-## 故障迁移-主从切换
-
-![mysql主从切换](mysql.assets/mysql主从切换.png)
-
-可以直接使用以下命令更改新master：
-
-```sql
-CHANGE MASTER TO # 老版本
-CHANGE REPLICATION TO # 8.0.23以后
-```
-
-这个命令不仅可以开启复制，还能用于故障迁移捏。
-
-副本不会检查master的数据库是否与自身的数据库兼容，它只会读取master的binlog的指定坐标。
-
-假设有master、replica1、replica2，若master发生故障，此时将replica2改为从replica1获取binlog，即可实现手动故障迁移。
-
-注意：必须将replica1和replica2的`log-slave-update`选项设置为`OFF`，默认为`ON`。如果replica1的该选项开启，它会记录来自master的binlog的所有更新事件到自己的binlog，若此时将replica2改为从replica1获取binlog，那么replica2会从replica1那里收到它早就从master收到过的更新事件。
-
-若该选项关闭，则replica1的binlog为空，replica2就不会重复收到更新事件，replica1收到update/delete/insert语句后会将这些更新内容写入binlog。
-
-更改新master的具体步骤：
-
-1. 确保所有replica已处理干净中继日志：`STOP REPLICA IO_THREAD`停止复制IO接收线程，然后`SHOW PROCESSLIST`观察输出直到看到Has read all relay log。
-2. 将replica1停用复制：`STOP REPLICA`和`RESET MASTER`
-3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
-
-若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
 
 ## 复制实现原理
 
@@ -2733,6 +2704,145 @@ MySQL5.7以后，提供参数`slave_parallel_type`控制并行复制策略：
 writeset 是在主库生成后直接写入到 binlog 里面的，这样在备库执行的时候，不需要解析 binlog 内容（event 里的行数据），节省了很多计算量；不需要把整个事务的 binlog 都扫一遍才能决定分发到哪个 worker，更省内存；由于备库的分发策略不依赖于 binlog 内容，所以 binlog 是 statement 格式也是可以的。
 
 当然，对于“表上没主键”和“外键约束”的场景，WRITESET 策略也是没法并行的，也会暂时退化为单线程模型。
+
+## 故障迁移-主从切换
+
+![mysql主从切换](mysql.assets/mysql主从切换.png)
+
+可以直接使用以下命令更改新master：这个命令不仅可以开启复制，还能用于故障迁移捏。
+
+```sql
+CHANGE MASTER TO # 老版本
+CHANGE REPLICATION TO # 8.0.23以后
+```
+
+**副本不会检查master的数据库是否与自身的数据库兼容，它只会读取master的binlog的指定坐标。**
+
+假设有master、replica1、replica2，若master发生故障，此时将replica2改为从replica1获取binlog，即可实现手动故障迁移。
+
+更改新master的具体步骤：
+
+1. 确保所有replica已处理干净中继日志：`STOP REPLICA IO_THREAD`停止复制IO接收线程，然后`SHOW PROCESSLIST`观察输出直到看到Has read all relay log。
+2. 将replica1停用复制：`STOP REPLICA`和`RESET MASTER`
+3. 其它replica先停止复制：`STOP REPLICA`， 再更改指向新master：`CHANGE REPLICATION SOURCE TO xxx`，然后开启复制：`START REPLICA`
+
+若旧master恢复了，此时应该将其作为replica指向新master，这样在故障期间错过的更新还能从新master中同步过来。
+
+### 无法确定同步位点
+
+**有个问题，`CHANGE MASTER TO xxx`需要指定参数`master_log_name`和`master_log_pos`以确定同步位点，而这种情况下几乎无法指定！**
+
+- 首先无法得知replica1和replica2谁复制进度更靠前。
+- 由于并发复制存在，同一个事务在replica1和replica2的binlog的位置很可能不一样。
+- 若直接以新master的binlog最新位点开始同步，很可能因事务丢失或重复执行而造成数据不一致。
+
+可以通过旧master崩溃时间点来大致定位一个范围，但是也有问题：https://time.geekbang.org/column/article/77427。
+
+要让replica1和replica2的数据保持一致，就需要知道哪些replica1上执行了哪些事务，replica2上执行了哪些事务，这就是要**得到两者事务集合之间的差集**。
+
+首先要标识事务，每个事务启动时都会分配一个自增的事务xid，这xid可用来算集合吗？很显然不能：
+
+- xid自增但不连续，事务回滚则该xid不会写入binlog。那总不能遍历binlog（耗时）并用hashset统计（耗内存）吧?
+- binlog内的xid几乎无序，xid是事务启动时计算，由于事务并发执行，xid写入binlog是乱序的，尤其是长事务甚至会写入下一个binlog文件。
+
+最好是事务写入binlog的时候再分配一个自增的id以标识事务，**保证其在master的binlog内是连续自增有序的**。这就是GTID的作用。
+
+## 基于GTID复制和故障迁移
+
+官网文档：https://dev.mysql.com/doc/refman/8.0/en/replication-gtids.html
+
+MySQL5.6引入的GTID（Global Transaction Identifier）全局事务id，可以识别跟踪每个事务，它可解决主从故障迁移导致的数据不一致问题。**GTID协议可自动识别同步位点**。
+
+**GTID在事务提交时生成，是事务的唯一标识，格式为`GTID = server_uuid:transaction_id`。server_uuid是MySQL实例第一次启动时生成，transaction_id初始值为1，自增。**
+
+默认不开启GTID，开启需要配置参数`gtid_mode=ON`和`enforce_gtid_consistency=ON`。
+
+**master的binlog内GTID是连续自增有序的，在从节点则因为并发复制可能会乱序，但是group commit之间肯定是有序的，组内可能乱序**。
+
+**每个节点都维护了一个GTID集合，保存该节点执行过的所有事务，从节点接收binlog中的事务时，先判断其GTID是否早已执行过，未执行过的事务执行后再将其GTID加入集合。**
+
+基于GTID的主从同步命令如下：故障迁移的切换命令也是这个：
+
+```sql
+CHANGE MASTER TO 
+MASTER_HOST=$host_name 
+MASTER_PORT=$port 
+MASTER_USER=$user_name 
+MASTER_PASSWORD=$password 
+master_auto_position=1 
+```
+
+参数`master_auto_position=1`表示主从同步使用GTID协议。
+
+不采用GTID前必须手动指定`master_log_file`和`master_log_pos`参数来确定同步位点了，而GTID协议无须手动指定，因为**GTID协议是自动识别从哪开始同步**。
+
+可以通过`SHOW MASTER STATUS`命令查看GTID集合：
+
+![gtid集合](mysql.assets/gtid集合.png)
+
+假设有master、replica1、replica2是基于GTID同步的，若某一时刻master的GTID集合为`[uuid_origin_master:1-100]`，而replica1的GTID集合为`[uuid_origin_master:1-99]`，replica2的GTID集合为`[uuid_origin_master:1-95]`，说明master提交了100个事务，而replica1已经同步了99个事务，replica2同步了95个事务。
+
+若此时master挂了，**可以通过`SHOW MASTER STATUS`命令得到replica1和replica2的同步进度，选择replica1作为新master**，将其余从节点指向新master，具体操作流程看上面的主从切换章节。
+
+故障迁移不需要手动找同步位点，切换完成后replica2向新master发起同步请求，处理逻辑为：
+
+- replica2将自己的GTID集合`[uuid_origin_master:1-95]`发给replica1
+- replica1计算出差集，判断本地binlog是否包含了这个差集需要的所有 binlog 事务。
+- 若不包含，说明replica1已经把部分binlog文件删除了，直接返回错误。
+  解决方式：缺少较多时可以基于replica1的dump文件重建从库，缺少很少时可以手动补上事务。
+  更多解决方式：https://time.geekbang.org/column/article/77636
+- 若全部包含，则replica1在自己的binlog中找到第一个不在replica2的GTID集合的事务发给replica2。从这个事务开始replica1按序往后发binlog给replica2.
+
+若新master又提交了10个事务，此时replica1的GTID集合为`[uuid_replica1:1-10, uuid_origin_master:1-99]`，replica2的GTID集合也应是这个。
+
+节点判断binlog中是否包含GTID：
+
+在binlog文件开头，有一个Previous_gtids, 用于记录 “生成这个binlog的时候，实例的Executed_gtid_set”, 所以启动的时候只需要解析最后一个文件； 同样的，由于有这个Previous_gtids，可以快速地定位GTID在哪个文件里。
+
+上面的例子还有个问题：旧master的有个事务，replica1并未同步到，这会造成数据丢失！有两个解决方式：
+
+- 最终一致性：旧master恢复后，需要将其作为replica指向新master，若事务数据丢失肯定会报错，根据GTID手动补齐。
+- 强一致性：配置为半同步复制，确保master的每个事务都至少有一个从节点执行完成。
+
+## 读写分离
+
+主从架构主要用于读写分离，从库分担主库的读压力。
+
+负载均衡策略：
+
+- 直连方案：客户端主动负载均衡，客户端主动将事务进行分发到主库和不同备库。
+- 代理方案：中间代理层proxy，客户端只负责连接proxy，proxy根据事务类型分发路由。
+  对客户端友好，但是proxy自身需要高可用架构，整体架构会更复杂。
+
+主从复制存在主从时延，在主库执行事务，若立刻在从库查可能查不到数据。为了处理主动时延造成的读写问题，有以下解决方案：
+
+- 强制走主库
+- sleep
+- 判断主从无延迟方案
+	- 配合半同步复制
+	- 等主库位点方案
+	- 等GTID方案
+
+### 强制走主库方案
+
+开发根据业务需要，自己判断查询请求：
+
+- 对于必须拿到最新数据的查询，手动发到主库。
+- 可以容忍旧数据的查询，默认发从库。
+
+**这个方案是目前用的最多的**。
+
+### Sleep方案
+
+不是真在程序里去Sleep，而是在业务上模拟Sleep，不立刻发请求到从库。
+
+比如卖家发布商品，前端发布成功后直接展示在页面，而不是刷新页面立刻查询数据库。之后该卖家再访问商品页时，其实已经过了一段时间了，达到了Sleep效果。
+
+### 判断主从无延迟方案
+
+这个方案比较复杂，适合基于proxy方案，由proxy判断当前事务在主从是否已经同步完成，再分发路由。
+
+资料：https://time.geekbang.org/column/article/77636
 
 # 分区
 
