@@ -1335,11 +1335,21 @@ EXPLAIN: -> Filter: (t1.c1 < t2.c1)  (cost=4.70 rows=12)
 
 参数`join_buffer_size`控制hash join的内存使用，默认256KB。超过限制时将使用文件处理。此参数可设高点。
 
+更多join细节：https://time.geekbang.org/column/article/79700
+
+**如果join字段有索引，其实join代价就还好。**
+
 ## Multi-Range读取优化
 
 多范围读取(MRR)：在表很大时，通过索引范围读取数据行可能会导致对基表的多次随机io。
 
-MySQL为了减少范围扫描的随机io次数，会先仅扫描索引并收集相关主键id，对其排序后从基表的主键聚族索引顺序读取数据
+MySQL为了减少范围扫描的随机io次数，会先仅扫描索引并收集相关主键id，对其排序后从基表的主键聚族索引顺序读取数据.
+
+```sql
+SELECT * FROM t WHERE a>1 AND a<1000;
+```
+
+MySQL不会一行一行的去回表查数据，而是将id搜集起来，再统一查询。通过explain可以看到Extra列有`Using MRR`说明。
 
 ## 优化innodb表
 
@@ -1447,14 +1457,16 @@ Innodb是高可靠性和高性能的通用存储引擎。默认都应该使用In
 
 缓冲池是主内存中一个区域，在专用MySQL服务器上通常将80%物理内存分配给缓冲池。
 
+#### 改进LRU算法
+
 缓冲池以页面链表实现，LRU算法。
 
 如何利用缓冲池将频繁访问的数据保存在内存中是MySQL调优的重要方面。
 
 新页面将插入链表中间：中点插入策略将列表视为2个子列表
 
-- 头部，维护最近访问的年轻页面的子列表
-- 尾部，维护较少访问的旧页面的子列表
+- 头部young区：维护最近访问的年轻页面的子列表
+- 尾部old区：维护较少访问的旧页面的子列表
 
 ![innodb-buffer-pool-list](mysql.assets/innodb-buffer-pool-list.png)
 
@@ -1464,6 +1476,14 @@ Innodb是高可靠性和高性能的通用存储引擎。默认都应该使用In
 
 - 若该新页面是由于用户读取需要而产生，会立刻发生第1次访问，这会使其成为年轻页面移动到新子列表头部。
 - 若该页面由预读产生，很可能在该页面被驱逐之前都不会发生访问。
+
+- 处于young区页面再次访问将移到young区链表头部
+- 处于old区页面再次访问时，根据该页面在链表中的停留时间判断：
+  - 超过1s则移到young区链表头部
+  - 1s内则位置不变
+  - 由参数`innodb_old_blocks_time`控制停留时间，默认1000ms。
+
+> 优点：**短时偶发性访问**的数据页很快老化，热点页停留率更高，大幅提升缓冲池命中率。
 
 #### 预读
 
@@ -2339,9 +2359,9 @@ COUNT(1)比COUNT(id)快，因为从引擎返回 id 会涉及到解析数据行�
 
 若以方案2优化，需要**先插入或删除数据行，最后再更新计数表**。从两阶段所协议可知，更新计数表时，会设置X行锁直至事务结束，放在最后更新可以最大限度减少X行锁持有时间。
 
-## ORDER BY
+## order by
 
-MySQL会给每个线程分配一块sort_buffer内存用于排序。
+MySQL会给每个线程分配一块`sort_buffer`内存用于排序。
 
 比如这样一个表：
 
@@ -2377,6 +2397,149 @@ select city,name,age from t where city='杭州' order by name limit 1000  ;
 `max_length_for_sort_data`参数默认4096，当单行长度超过此阈值，MySQL认为单行太长，在上诉第2步中只将要排序的列name和id放入sort_buffer中，**<u>排序后以id再次回表查询得到所有数据</u>**。
 
 要减少排序操作，最好是对order by字段建立索引，比如上诉案例中可以建立联合索引city和name字段。要减少回表查询则需要索引覆盖，比如建立联合索引city、name、age字段。
+
+## group by
+
+对于`union`、`group by`、`distinct`等这类需要去重的语句，如果查询时不能直接得到结果，就需要构建**内部临时表**来暂存中间数据，在explain的Extra列中有`Using temporary`信息提示。
+
+```shell
+mysql> EXPLAIN SELECT view_times,count(*) FROM tbl_blog GROUP BY view_times \G;
+*************************** 1. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: tbl_blog
+   partitions: NULL
+         type: ALL
+possible_keys: NULL
+          key: NULL
+      key_len: NULL
+          ref: NULL
+         rows: 31
+     filtered: 100.00
+        Extra: Using temporary
+```
+
+在上诉sql中没有索引的group by 执行流程：
+
+- 创建内存临时表，表内有字段view_times和count(*)，主键为view_times
+- 扫描全表，遍历每行数据，若某行view_times为n
+  - 如果临时表上没有该数据则插入一个记录
+  - 否则将该记录的count(*)值加1
+- 若内存临时表放不下，则转为磁盘临时表
+- 将结果集返回
+
+参数`tmp_table_size`控制内存临时表上限，默认16MB，**超过时将内存临时表转为磁盘临时表**：
+
+- **内存临时表 - Memory引擎，主键索引为Hash**
+- **磁盘临时表 - Innodb引擎，主键索引为B+树**
+
+**为什么group by会建立临时表？**
+
+因为group by的字段在表中数据是无序的，需临时表暂存中间数据，并通过其唯一索引将相同值的列聚合起来统计结果，如果表数据量很大，group by语句就会很慢。
+
+> **group by优化 --> 索引**
+>
+> **若扫描过程中确保数据是有序，就无序建立临时表，比如索引。**
+
+如下sql使用索引列进行group by时就不会建立临时表了：
+
+```shell
+mysql> explain select recommend_level,count(*) from tbl_blog group by recommend_level\G;
+*************************** 1. row ***************************
+           id: 1
+  select_type: SIMPLE
+        table: tbl_blog
+   partitions: NULL
+         type: index
+possible_keys: idx_blog_rt
+          key: idx_blog_rt
+      key_len: 8
+          ref: NULL
+         rows: 31
+     filtered: 100.00
+        Extra: Using index # 这个表示使用了覆盖索引
+```
+
+**group by和distinct区别？**
+
+- 如果只是去重，则两者都是临时表方式，区别不大
+- 若有limit，则distinct快一点
+
+## 自增id
+
+基于自增主键的聚集索引保证顺序插入，避免页分裂。
+
+自增id保存在内存，**在MySQL8以后支持持久化**。在MySQL5.7以前，自增id未做持久化，每次重启MySQL后，第一次打开表时将根据表中最大id加1作为此时的自增值。MySQL8以后将自增id变更记录在redo log中，重启后依靠redo log恢复重启之前的自增id值。
+
+### 插入策略
+
+若字段id定义为AUTO_INCREMENT自增列，插入数据时，若id指定为0，null或未指定值则插入当前自增值：
+
+```sql
+mysql> insert into t2(id,c) values(null,101),(0,102);
+mysql> insert into t2(c) values(103);
+
+mysql> select id,c from t2 limit 3;
++----+-----+
+| id | c   |
++----+-----+
+|  1 | 101 |
+|  2 | 102 |
+|  3 | 103 |
++----+-----+
+```
+
+若id指定了插入值x，当前表的自增值为y，则y变化如下：
+
+- x<y，则y不变
+- x>=y，则将y修改为新的自增值。从`auto_increment_offer`开始，以`auto_increment_increment`为步长，累加直至找到第一个大于X的值作为新自增值。
+
+`auto_increment_offer`和`auto_increment_increment`分别为自增的初始值和步长，默认都为1.
+
+> 注意：在一些场景下，如双Master主从架构要求双写时，就可能将步长设为2，初始值分别设为奇数与偶数，避免两个库生成的主键冲突。
+
+### 递增但不连续
+
+自增id是递增但不一定连续的，以下情况可能造成id不连续：
+
+- 插入时其它唯一索引冲突
+- 事务回滚
+- 批量插入数据，如`insert ... select...`、`replace...select...`、`load data`等语句
+
+对于批量插入数据，预先不知道要申请多少个自增值，为避免自增锁申请影响插入性能，采用了二进制批量申请自增id策略：
+
+- 第一次申请id，将申请1个
+- 第n次申请id将申请2^(n-1)个
+
+该申请策略的最后一次申请的id若用不完，则会导致自增值不连续。
+
+
+
+自增值申请需要先获取自增锁，参数`innodb_autoinc_lock_mode`控制自增值锁的释放时机：
+
+- 0，sql语句执行完再释放
+- 1，普通insert语句申请完自增值就释放，批量插入语句需等语句结束才释放
+- 2（默认），申请完自增值就释放
+
+若批量插入语句与普通insert语句并发执行时，其自增值与数据对应具有不可预见性，在`binlog_format=statement`情况下，从节点执行这些语句后某条数据对应的id很可能与主节点不同，这就造成了数据不一致。
+
+MySQL8默认`binlog_format=row`，因此`innodb_autoinc_lock_mode`默认为2是安全的。
+
+
+
+例子：以下sql在可重复读级别下会对t1所有行和间隙都加锁。
+
+```sql
+insert into t2(c,d) select c,d from t1;
+```
+
+原因：如果不加锁，执行期间t1执行了插入新数据的事务且先执行完写入binlog，从节点执行时，在binlog_format=statement时可能会出现数据不一致。
+
+
+
+
+
+
 
 ## 限制
 
