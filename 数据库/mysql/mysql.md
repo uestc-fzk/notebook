@@ -901,7 +901,7 @@ log_throttle_queries_not_using_indexes=10
 
 1、物理备份：
 
-物理备份包括存储数据库内容的目录和文件的原始副本。这种备份适用于发生问题时需要快速恢复的大型、重要的数据库。
+物理备份包括存储数据库内容的目录和文件的原始副本(直接拷贝表的idb文件)。这种备份适用于发生问题时需要快速恢复的大型、重要的数据库。
 
 **物理备份比逻辑备份更快。**
 
@@ -968,7 +968,9 @@ mysqldump --single-transaction --flush-logs --master-data=2 \
 
 mysqldump命令进行全量备份时会**先读取此时binlog坐标**：此备份操作会获取所有表的全局读锁（使用[`FLUSH TABLES WITH READ LOCK`](https://dev.mysql.com/doc/refman/8.0/en/flush.html#flush-tables-with-read-lock)），一旦获得此锁，就会读取二进制日志坐标并释放锁。
 
-`-flush-logs`：会将旧binlog日志落盘并创建新binlog文件，这个新文件就是增量文件。
+`--single-transaction`表示导出数据不对表加锁，而是使用`START TRANSACTION WITH CONSISTENT SNAPSHOT`的方法；
+
+`--flush-logs`：会将旧binlog日志落盘并创建新binlog文件，这个新文件就是增量文件。
 
 若备份前binlog文件为demo-bin.000001：
 
@@ -3370,6 +3372,111 @@ Innodb引擎**分区不支持外键**
 **子分区必须使用HASH或KEY分区，可以RANGE和LIST分区可以被子分区。**
 
 > **表上的每个唯一键都必须使用表的分区表达式中的每一列。**
+
+# 权限控制
+
+grant语句授予权限、revoke语句收回权限、flush privileges刷新权限。
+
+权限分类：
+
+- 全局权限
+- 库权限
+- 表权限
+- 列权限
+
+创建用户：
+
+```sql
+mysql>  create user 'test_user'@'%' identified by '!Test123456';
+Query OK, 0 rows affected (0.01 sec)
+```
+
+在MySQL中用户名加地址才表示一个用户，如上`'test_user'@'%'`，因此ua@ip1 和 ua@ip2 代表的是两个不同的用户。
+
+删除用户：
+
+```sql
+drop user 'test_user'@'%';
+```
+
+## 全局权限
+
+该命令向mysql.user表插入一个数据，所有权限字段都为N。
+
+```sql
+mysql> select * from mysql.user where user='test_user'\G;
+*************************** 1. row ***************************
+                    Host: %
+                    User: test_user
+             Select_priv: N
+             Insert_priv: N
+             Update_priv: N
+             Delete_priv: N
+             Create_priv: N
+               Drop_priv: N
+# 忽略部分数据
+```
+
+**全局权限授予：**
+
+```sql
+GRANT ALL ON *.* TO 'test_user'@'%';
+```
+
+将磁盘上`mysql.user`表中所有权限都设为Y，将内存里的`acl_users`数组中该用户的对象是access 值（权限位）修改为二进制的“全 1”。
+
+该命令执行完后，新连接将把该用户权限拷贝到连接线程中，而早已存在的连接无法感知到权限变化哦。
+
+> 注意：权限一定要控制范围，若非得授予全部权限，建议设置ip为内网地址。
+
+**收回全局权限：**
+
+```sql
+mysql> revoke all on *.* from 'test_user'@'%';
+ERROR 1227 (42000): Access denied; you need (at least one of) the SYSTEM_USER privilege(s) for this operation
+```
+
+收回所有权限，磁盘上将mysql.user表所有权限字段设为N，内存里将acl_users数组该用户的access 的值修改为 0。
+
+## db权限
+
+```sql
+mysql> grant all on test.* to 'test_user'@'%';
+Query OK, 0 rows affected (0.02 sec)
+```
+
+基于库的权限记录保存在` mysql.db` 表中，在内存里则保存在数组`acl_dbs `中。
+
+操作逻辑类似全局权限授予。
+
+
+
+表权限定义存放在表 mysql.tables_priv 中，列权限定义存放在表 mysql.columns_priv 中。
+
+这两类权限，组合起来存放在内存的 hash 结构 column_priv_hash 中。
+
+```sql
+create table db1.t1(id int, a int);
+
+grant all on db1.t1 to 'ua'@'%';
+GRANT SELECT(id), INSERT (id,a) ON mydb.mytbl TO 'ua'@'%' with grant option;
+```
+
+操作逻辑类似于全局权限授予。
+
+
+
+## flush privileges
+
+flush privileges 命令会清空 acl_users 数组，然后从 mysql.user 表中读取数据重新加载，重新构造一个 acl_users 数组。也就是说，以数据表中的数据为准，会将全局权限内存数组重新加载一遍。
+
+对于db、表、列权限也是类似处理。
+
+而从上面的grant和revoke语句执行过程中，很明显数据库和内存的权限是一致的，不需要执行flush privileges语句。**正常情况下，grant 命令之后，没有必要跟着执行 flush privileges 命令。**
+
+使用场景：
+
+当数据库存的权限和内存的权限不一致时，用来重建内存数据，达到一致状态。**这种不一致往往是由不规范的操作导致的，比如直接用 DML 语句操作系统权限表。**
 
 # 单机运行多MySQL实例
 
