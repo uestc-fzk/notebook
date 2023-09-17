@@ -1768,7 +1768,7 @@ MySQL将redolog和binlog落盘动作都分开间隔执行，使得组提交中�
 
 ![两阶段提交](mysql.assets/两阶段提交.png)
 
-在两阶段提交的不通时刻，MySQL异常重启：redolog 和binlog有个共同的数据字段XID
+在两阶段提交的不通时刻，MySQL异常重启：**redolog 和binlog有个共同的数据字段`XID`**
 
 - 时刻A：写入redo log处于prepare阶段时崩溃重启，未写binlog，事务回滚
 - 时刻B：binlog写完，redo log未commit前发生崩溃重启，此时数据恢复规则：
@@ -2400,7 +2400,7 @@ select city,name,age from t where city='杭州' order by name limit 1000  ;
 
 要减少排序操作，最好是对order by字段建立索引，比如上诉案例中可以建立联合索引city和name字段。要减少回表查询则需要索引覆盖，比如建立联合索引city、name、age字段。
 
-## group by
+## group by与distinct
 
 对于`union`、`group by`、`distinct`等这类需要去重的语句，如果查询时不能直接得到结果，就需要构建**内部临时表**来暂存中间数据，在explain的Extra列中有`Using temporary`信息提示。
 
@@ -2464,7 +2464,7 @@ possible_keys: idx_blog_rt
 
 **group by和distinct区别？**
 
-- 如果只是去重，则两者都是临时表方式，区别不大
+- 如果只是去重，没有count(*)等聚合函数，则两者都是临时表方式，执行流程相同，性能相同
 - 若有limit，则distinct快一点
 
 ## 自增id
@@ -3372,6 +3372,16 @@ Innodb引擎**分区不支持外键**
 **子分区必须使用HASH或KEY分区，可以RANGE和LIST分区可以被子分区。**
 
 > **表上的每个唯一键都必须使用表的分区表达式中的每一列。**
+
+## 分库分表建议
+
+分区表与业务手动分表对比：
+
+- 分区表由server层决定使用哪个分区，手工分表由代码决定使用哪个表
+- 在 server 层，认为所有分区是同一张表，因此**所有分区共用一个 MDL锁**
+- 在引擎层，认为分区是不同的表，因此 MDL 锁之后的执行过程，会根据分区表规则，只访问必要的分区。
+
+> 建议根据某个键手动分库分表，再结合一些分库分表中间件开发业务。
 
 # 权限控制
 
