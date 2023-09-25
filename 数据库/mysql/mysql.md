@@ -1941,7 +1941,7 @@ ALTER TABLE tbl_name NOWAIT add column ...
 ALTER TABLE tbl_name WAIT N add column ... 
 ```
 
-MySQL5.6支持online ddl的过程是这样的： 
+MySQL5.6支持**online ddl**的过程是这样的： 
 
 1. 拿MDL写锁 
 1.  降级成MDL读锁 
@@ -1962,20 +1962,6 @@ MySQL5.6支持online ddl的过程是这样的：
 - bug：唯一索引上的范围查询会访问到不满足条件的第一个值为止
 
 关于行锁的更多加锁细节，请看极客时间MySQL实战45讲 19-22章
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ### 两阶段锁协议
 
@@ -2066,7 +2052,7 @@ ERROR 3572 (HY000): Do not wait for lock.
 
 InnoDB 里面每个事务有一个唯一的事务 ID，叫作 transaction id。在事务开始的时候向 InnoDB 的事务系统申请，按申请顺序严格递增的。
 
-每行数据有多个版本，事务更新时都会生成一个新的数据版本，并且把 transaction id 赋值给这个数据版本的事务 ID，记为 row trx_id。同时旧的数据版本要保留在undo log中。
+每行数据有多个版本，事务更新时都会生成一个新的数据版本，并且把 transaction id 赋值给这个数据版本的事务 ID，记为 `row trx_id`。同时旧的数据版本要保留在undo log中。
 
 ![行状态变更图](mysql.assets/行状态变更图.png)
 
