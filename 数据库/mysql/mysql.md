@@ -1119,7 +1119,9 @@ MySQL意外退出后，直接重启即可自动恢复：https://dev.mysql.com/do
 - `Using index condition`：通过索引过滤。
 - `Using index for group-by`：表示MySQL找到了一个索引可用于检索GROUP BY 或 DISTINCT查询的所有列，而无需对实际表进行额外io
 
-- `Using temporary`：为了解析查询，MySQL 需要创建一个临时表来保存结果。GROUP BY通常出现。
+- `Using sort_union(...)`, `Using union(...)`, `Using intersect(...)`：当where条件匹配多个索引且都较合适时，Index merge通过多次扫描索引并将其结果合并后再查主表。
+
+- `Using temporary`：为了解析查询，MySQL 需要创建一个临时表来保存结果。GROUP BY和ORDER BY通常出现。
 
 - `Using where`：从数据表中读取数据后进行过滤。
 
@@ -1163,7 +1165,7 @@ AND col1=val1 AND col2=val2 AND col3=val3;
 
 ### 索引合并
 
-Index merge通过多次扫描索引并将其结果合并，仅能合并单表扫描，不适用于全文索引。
+当where条件匹配多个索引且都较合适时，**Index merge通过多次扫描索引并将其结果合并后再查主表**。仅能合并单表扫描，不适用于全文索引。
 
 ```sql
 SELECT * FROM tbl_name WHERE k1=10 AND k2=20;
