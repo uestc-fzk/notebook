@@ -9768,3 +9768,85 @@ public class FileIndex implements AutoCloseable {
 }
 ```
 
+
+
+# jdk发行说明
+
+## jdk21
+
+[jdk21](https://www.oracle.com/java/technologies/javase/21-relnote-issues.html)主要新功能：
+
+- **虚拟线程**：https://openjdk.org/jeps/444
+- 有序集合：`SequencedSet`、`SequencedMap`
+- 准备禁止动态加载代理
+
+### 虚拟线程
+
+```java
+public void testSleep() {
+    // 虚拟线程只运行大概大概1s
+    // start: 2023-10-14T23:28:59.945284600, end: 2023-10-14T23:29:01.149835600
+    executeSleepTasks(Executors.newVirtualThreadPerTaskExecutor());
+
+    // 200个线程的线程池大概要运行50s
+    // start: 2023-10-14T23:29:01.153834800, end: 2023-10-14T23:29:51.634957600
+    executeSleepTasks(Executors.newFixedThreadPool(200));
+}
+
+public void executeSleepTasks(ExecutorService executor) {
+    LocalDateTime start = LocalDateTime.now();
+    IntStream.range(0, 10_000).forEach(i -> {
+        executor.submit(() -> {
+            Thread.sleep(1000);// 休眠1s
+            return i;
+        });
+    });
+    executor.close();// 执行结束并关闭
+    LocalDateTime end = LocalDateTime.now();
+    System.out.printf("start: %s, end: %s\n", start, end);
+}
+```
+
+上诉示例中的任务是简单的代码（休眠一秒钟），现代硬件可以轻松支持 10,000 个虚拟线程同时运行此类代码。在幕后，JDK 在少量操作系统线程（可能只有一个）上运行代码。
+具有 200 个平台线程的池只能实现每秒 200 个任务的吞吐量，而虚拟线程可实现每秒约 10,000 个任务的吞吐量（在充分预热后）。
+若任务是CPU密集型，而不是仅仅休眠，那么增加线程数量超出处理器核心数量将无济于事，无论它们是虚拟线程还是平台线程。
+**虚拟线程并不是更快的线程——它们运行代码的速度并不比平台线程快。**
+虚拟线程是为了提供规模（更高的吞吐量），而不是速度（更低的延迟）。它们的数量可以比平台线程多得多，因此根据利特尔定律，它们可以实现更高吞吐量所需的更高并发性。
+
+**虚拟线程有助于提高典型服务器应用程序的吞吐量**，因为此类应用程序由大量并发任务组成，而这些任务大部分时间都在等待(网络I/O等待)。
+
+虚拟线程支持线程局部变量和线程中断，就像平台线程一样。这意味着处理请求的现有 Java 代码可以轻松地在虚拟线程中运行。可以用虚拟线程直接优化代码中的简单阻塞调用。
+
+**不要池化虚拟线程**：池化目的是共享昂贵资源，但虚拟线程并不昂贵。、
+
+
+
+
+
+
+
+
+
+JDK调度程序将虚拟现场分配给平台线程(即M:N调度)，JDK的虚拟线程调度程序是一个[`ForkJoinPool`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinPool.html)以先进先出（FIFO）模式运行的工作窃取程序。
+
+调度程序为其分配虚拟线程的平台线程称为虚拟线程的***载体***。虚拟线程在其生命周期内可以被调度到不同的载体上。换句话说，调度程序不维护虚拟线程和任何特定平台线程之间的关联性，即虚拟线程和载体是逻辑独立的：
+
+- 虚拟线程无法获取载体身份，Thread.currentThread()返回虚拟线程本身。
+
+- 虚拟线程和载体的堆栈跟踪是分开的，虚拟线程中抛出的异常将不包括载体的堆栈帧。线程转储不会显示虚拟线程堆栈中载体的堆栈帧，反之亦然。
+
+- 虚拟线程和载体的局部变量互相不可见。
+
+调度程序当前**未实现虚拟线程的*时间共享***。分时是对消耗了分配的 CPU 时间的线程进行强制抢占。虽然当平台线程数量相对较少且 CPU 利用率为 100% 时，时间共享可以有效减少某些任务的延迟，但尚不清楚时间共享对于 100 万个虚拟线程是否同样有效。
+
+通常，虚拟线程在 I/O 阻塞或 JDK 中的其他阻塞操作（例如`BlockingQueue.take()`. 当阻塞操作准备完成时（例如，套接字上已接收到字节），它将虚拟线程提交回调度程序，调度程序将虚拟线程安装在载体上以恢复执行。
+
+JDK中绝大多数阻塞操作都会卸载虚拟线程，释放其载体和底层操作系统线程来承担新的工作。
+
+但部分阻塞不会卸载，从而阻塞载体和平台线程，这是因为操作系统级别（例如许多文件系统操作）或 JDK 级别（例如[`Object.wait()`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html#wait())）的限制。这些阻塞操作的实现通过暂时扩展调度程序的并行性来补偿操作系统线程的捕获。因此，调度程序中的平台线程数量`ForkJoinPool`可能会暂时超过可用处理器的数量。
+
+以下两种情况虚拟线程阻塞操作无法卸载载体：
+
+- synchronized阻塞
+- 执行native方法或外部函数
+
