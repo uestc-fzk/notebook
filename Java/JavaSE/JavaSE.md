@@ -9770,6 +9770,84 @@ public class FileIndex implements AutoCloseable {
 
 
 
+# JDK tools
+
+jdk21的工具文档：https://docs.oracle.com/en/java/javase/21/docs/specs/man/index.html
+
+jar：为类和资源创建存档，并从存档中操作或恢复单个类或资源。
+
+`jar`命令是一个通用**归档和压缩工具**，基于 ZIP 和 ZLIB 压缩格式，JAR 文件可以用作**类路径**条目。
+
+
+
+## java命令
+
+文档：https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html
+
+`java`命令：启动Java程序，它启动Java虚拟机(JVM)，加载指定的class类并调用该类的`public static void main(String[] args)`方法。
+
+```shell
+java [options] mainclass [args ...]
+java [options] -jar jarfile [args ...] # 最常用
+java [options] -m module[/mainclass] [args ...]
+```
+
+### 虚拟机选项参数
+
+选项参数可以通过空格、冒号 (:) 或等号 (=) 与选项名称分隔，或者参数可以直接跟在选项后面(每个选项的确切语法有所不同)。
+
+布尔选项用于启用默认情况下禁用的功能或禁用默认情况下启用的功能。此类选项不需要参数。`-XX`使用加号 ( `-XX:+OptionName`) 启用布尔选项，使用减号 ( `-XX:OptionName `) 禁用布尔选项。
+
+java命令的额外选项：`-Xxx?`
+
+| 选项    | 说明                                                         |
+| ------- | ------------------------------------------------------------ |
+| `-Xint` | 以解释模式运行，即关闭JIT(即时热编译优化)，所有字节码均由解释器执行。默认关闭。 |
+| `-Xms`  | 设置堆的最小和初始大小。如果不设置此选项，则初始大小将设置为老年代和年轻代分配的大小之和。附加字母 `m`或`M`表示兆字节，或 `g`或`G`表示千兆字节，比如`-Xms1g`、`-Xms256m`。同`-XX:InitialHeapSize`选项. |
+| `-Xmx`  | 设置堆最大大小。**一般服务器部署， `-Xms`和`-Xmx`通常设置为相同的值。**默认为系统内存1/4。同 `-XX:MaxHeapSize`选项。 |
+| `-Xmn`  | 同时设置分代收集器年轻代堆的初始大小和最大大小，`-Xmn256m`。建议G1收集器不要设置年轻代的大小，而其他收集器的年轻代的大小应达到堆空间的25%~50%。`-XX:NewSize`指定初始大小和 `-XX:MaxNewSize`指定最大大小。 |
+| `-Xss`  | 设置线程堆栈大小(单位KB)。同`-XX:ThreadStackSize`选项。比如`-Xss1k`表示线程堆栈MB。 |
+
+java命令高级垃圾收集选项：`-XX:xxxx=?`
+
+| 选项                    | 说明                                                         |
+| ----------------------- | ------------------------------------------------------------ |
+| `-XX:ConcGCThreads=n`   | 并发GC线程数，默认为JVM 可用的 CPU 数量。                    |
+| `-XX:ParallelGCThreads` | 设置停止世界 (STW) 工作线程的数量。默认值取决于 JVM 可用的 CPU 数量和所选的垃圾收集器。 |
+| `-XX:+UseG1GC`          | 默认启动G1收集器。对于需要大堆（大小约为 6 GB 或更大）且 GC 延迟要求有限（稳定且可预测的暂停时间低于 0.5 秒）的应用程序，建议使用 G1 收集器。 |
+| `-XX:G1HeapRegionSize`  | G1收集器的region大小，值是 2 的幂，范围可以从 1 MB 到 32 MB。 |
+| `-XX:MaxGCPauseMillis`  | 设置最大 GC 暂停时间的目标(单位ms)。这是软目标，JVM会尽最大努力来实现它。G1收集器默认为200ms。其它收集器不使用暂停时间选项。 |
+| `-XX:MaxMetaspaceSize`  | 元空间最大容量。默认无限制。`-XX:MaxMetaspaceSize=256m`      |
+| `-XX:NewRatio`          | 新生代和老年代大小之间的比率，默认为2.                       |
+| `-XX:SurvivorRatio`     | 新生代的伊甸园空间大小和幸存者空间大小之间的比率，默认为8，即`eden:survivor1:survivor2=8:1:1`。 |
+| `-XX:MaxHeapFreeRatio`  | 设置 GC 事件后允许的最大空闲堆空间百分比，默认70，若超过将缩容堆。`-XX:MinHeapFreeRatio`设置最小空闲堆百分比，默认40，低于该值将扩容堆。 |
+| `-XX:TLABSize`          | 设置线程本地分配缓冲区 (TLAB) 的初始大小，比如`-XX:TLABSize=512k` |
+| `-XX:+UseZGC`           | 启用ZGC收集器。低延迟垃圾收集器，以一定的吞吐量成本提供几毫秒的最大暂停时间。暂停时间与使用的堆大小无关。支持从 8MB 到 16TB 的堆大小。 |
+
+优化示例：
+
+1、缩短响应时间：
+
+```shell
+java -XX:+UseG1GC -XX:MaxGCPauseMillis=100 ......
+```
+
+2、保持 Java 堆较小并减少嵌入式应用程序的动态占用空间：
+
+```shell
+java -XX:MaxHeapFreeRatio=10 -XX:MinHeapFreeRatio=5 ......
+```
+
+这会造成性能下降。
+
+3、保持高吞吐量：
+
+```shell
+java -server -XX:+UseParallelGC -XX:+UseLargePages -Xmn10g  -Xms26g -Xmx26g ......
+```
+
+
+
 # jdk发行说明
 
 ## jdk21
