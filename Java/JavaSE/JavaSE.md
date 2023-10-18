@@ -9846,6 +9846,138 @@ java -XX:MaxHeapFreeRatio=10 -XX:MinHeapFreeRatio=5 ......
 java -server -XX:+UseParallelGC -XX:+UseLargePages -Xmn10g  -Xms26g -Xmx26g ......
 ```
 
+## javap反编译
+
+javap命令可反编译class文件为字节码。
+
+Class文件是一种二进制文件，它包含了编译后的Java字节码指令、常量池、类的结构等信息。它可以被JVM加载和解释执行。
+
+IDEA编辑器的插件`jclasslib bytecode viewer`也可以看字节码。
+
+```shell
+# -l 打印行和局部变量表
+# -c 打印类中每个方法的反汇编代码，例如组成 Java 字节码的指令
+javap -c -l .\target\classes\com\fzk\Main.class
+```
+
+## jcmd诊断命令
+
+`jcmd`命令用于向 JVM 发送诊断命令请求。它必须在运行 JVM 的同一台计算机上使用（注意docker要进入容器内部使用），并且具有与用于启动 JVM 相同的有效用户和组标识符。每个诊断命令都有自己的一组参数。
+
+```shell
+jcmd {pid} {诊断命令}
+```
+
+如果指定进程标识符 ( *pid* ) 或主类 ( *main-class* ) 作为第一个参数，则 `jcmd`实用程序将诊断命令请求发送到具有指定标识符的 Java 进程或具有指定名称的所有 Java 进程。
+
+| 诊断命令             | 说明                                                         |
+| -------------------- | ------------------------------------------------------------ |
+| `GC.class_histogram` | 提供有关 Java 堆使用情况的统计信息。                         |
+| `GC.heap_info`       | 提供通用 Java 堆信息。                                       |
+| `GC.heap_dump`       | 生成 Java 堆的 HPROF 格式转储。`jcmd pid GC.heap_dump test.dump` |
+| `VM.classloaders`    | 打印类加载器层次结构。                                       |
+
+
+
+```shell
+[root@k8s-master ~]# jcmd 2859 GC.heap_info
+2859:
+ garbage-first heap   total 86016K, used 55928K [0x0000000085c00000, 0x0000000100000000)
+  region size 1024K, 35 young (35840K), 6 survivors (6144K)
+ Metaspace       used 55927K, committed 56448K, reserved 1105920K
+  class space    used 6766K, committed 6976K, reserved 1048576K
+  
+  
+[root@k8s-master blogDockerDir]# jcmd 6481 VM.classloaders
+6481:
++-- <bootstrap>
+      |     
+      +-- jdk.internal.reflect.DelegatingClassLoader (+ 11 more)
+      |           
+      +-- "platform", jdk.internal.loader.ClassLoaders$PlatformClassLoader
+            |     
+            +-- "app", jdk.internal.loader.ClassLoaders$AppClassLoader
+                  |     
+                  +-- org.springframework.boot.loader.LaunchedURLClassLoader
+                        |     
+                        +-- jdk.internal.reflect.DelegatingClassLoader (+ 101 more)
+                        |           
+                        +-- org.springframework.boot.web.embedded.tomcat.TomcatEmbeddedWebappClassLoader
+```
+
+## jconsole监控
+
+jconsole命令启动一个图形控制台工具，使可以监视和管理本地或远程计算机上的 Java 应用程序和虚拟机，目前只能用在windows平台上。
+
+```shell
+jconsole -interval=n
+# -interval=n 更新间隔n秒，默认4s
+```
+
+如下图堆内存下降就是发生了young gc：
+
+![image-20231018215643155](JavaSE.assets/image-20231018215643155.png)
+
+## jmap
+
+jmap命令打印指定进程的详细信息.
+
+`jmap -dump`连接到正在运行的进程并转储 Java 堆：
+
+```shell
+jmap -dump:live,format=b,file=heap.bin {pid}
+```
+
+- `live`---指定时，仅转储活动对象；如果未指定，则转储堆中的所有对象。
+- `format=b``hprof`--- 以二进制格式转储 Java 堆
+- `file=`*filename* --- 将堆转储到 *filename*
+
+
+
+## jps
+
+jps命令可查看系统上已检测的 JVM进程。
+
+```shell
+[root@k8s-master ~]# jps
+4379 distribute_file_service-1.0-SNAPSHOT.jar
+```
+
+## jstack堆栈追踪
+
+`jstack pid`：打印指定 Java 进程的 Java 线程的 Java 堆栈跟踪。
+
+选项`-l`：打印有关锁的附加信息。
+
+该命令**可用于观察死锁**，通过分析每个线程阻塞在哪个对象从而分析死锁原因。
+
+## jstat
+
+`jstat -option pid`监控JVM统计信息。
+
+```shell
+jstat -<option> [-h<lines>] <pid> [<interval> [<count>]]
+# <interval> 采样间隔，单位ms
+# <count> 采样次数
+
+# class：显示有关类加载器行为的统计信息。
+# compiler：显示有关 Java HotSpot VM 即时编译器行为的统计信息。
+# gc：显示有关垃圾收集堆行为的统计信息。
+# gccapacity：显示各代容量及其对应空间的统计信息。
+# gccause：显示有关垃圾收集统计信息的摘要（与 相同-gcutil），以及上次和当前（如果适用）垃圾收集事件的原因。
+# gcnew：显示新生代行为的统计信息。
+# gcnewcapacity：显示新生代大小及对应空间的统计信息。
+# gcold：显示有关老年代行为的统计信息和元空间统计信息。
+# gcoldcapacity：显示老年代大小的统计信息。
+# gcmetacapacity：显示有关元空间大小的统计信息。
+# gcutil：显示有关垃圾收集统计信息的摘要。
+# printcompilation：显示Java HotSpot VM编译方法统计信息。
+```
+
+关于各个统计项字段说明：https://docs.oracle.com/en/java/javase/21/docs/specs/man/jstat.html
+
+
+
 
 
 # jdk发行说明
