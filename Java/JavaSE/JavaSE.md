@@ -9982,6 +9982,65 @@ jstat -<option> [-h<lines>] <pid> [<interval> [<count>]]
 
 # jdk发行说明
 
+## jdk11
+
+jdk11发行说明：https://www.oracle.com/java/technologies/javase/11-relnote-issues.html#NewFeature
+
+- **HTTP Client**：[JEP321](https://openjdk.org/jeps/321)。**完全异步**，API位于java.net.http包。
+- **默认启用G1收集器**：G1默认2048个region，并根据设置的最大堆大小调整region大小2MB~32MB，必须是2的幂。
+- **引入ZGC实验性功能**，[JEP333](https://openjdk.org/jeps/333)。ZGC在jdk15标记可生产环境使用。
+- 删除Thread.destroy()和Thread.stop()方法
+
+### G1
+
+https://www.jianshu.com/p/b530907c0fc3
+
+https://wiki.openjdk.org/display/zgc
+
+https://malloc.se/blog/zgc-jdk16
+
+### ZGC
+
+Wiki：https://wiki.openjdk.org/display/zgc
+
+ZGC收集器(Z Garbage Collector)由Oracle公司研发。2018年提交了JEP 333将ZGC提交给了OpenJDK，推动进入OpenJDK11的发布清单中，在jdk15宣布生产就绪。
+
+ZGC是可扩展的**低延迟**垃圾收集器，设计目标如下：
+
+- GC**暂停时间不超过10ms**。G1往往用时200ms。现在ZGC已经达到[微秒级](https://malloc.se/blog/zgc-jdk16)，平均50微秒(0.05ms)。
+- 与G1相比，应用程序吞吐量减少不超过15%
+- **暂停时间与堆大小无关**
+
+ZGC使用彩色指针、读屏障、内存多重映射等技术来实现`并发的标记整理`算法。
+
+ZGC完全抛弃分代收集理论，将内存划分多个小区域：小页面、中页面、大页面。
+
+ZGC有两个版本：新的分代版本和旧的非分代版本：
+
+- 分代ZGC启用选项：`-XX:+UseZGC -XX:+ZGenerational`
+- 非分代ZGC启用选项：`-XX:+UseZGC`
+
+ZGC最重要的选项是设置**最大堆大小`-Xmx`和`-XX:SoftMaxHeapSize`设置其堆的软限制，**ZGC将努力控制堆大小在此限制内，比如`-Xmx5g -XX:SoftMaxHeapSize=2g`，则ZGC将以2g为其启发式限制，但允许暂时使用最多5g内存。
+
+案例：比如99%的正常流量情况下，服务只需要2g内存，但其峰值流量使用最多4g内存，为处理这种情况可能会设置最大堆为5g。那么大部分情况下有3g内存将浪费掉，这在资源按用付费的容器环境是难以接受的。而如果设置了堆软限制，结合zgc [uncommit unused memory](https://openjdk.java.net/jeps/351) 能力，可在峰值流量下使用最多5g内存，而在正常流量时将闲置的3g内存返回操作系统。
+
+zgc分配对象内存非常快：分配路径经过以下几层：
+
+![zgc分配路径](JavaSE.assets/zgc分配路径.svg)
+
+绝大多数分配第一次满足，仅当所有先前的层都无法满足分配时，分配才会在最后一层结束。这是最后的手段，ZGC 将要求操作系统提交更多内存来扩展堆。
+
+## jdk14
+
+jdk14发行说明：https://www.oracle.com/java/technologies/javase/14-relnote-issues.html#NewFeature
+
+- **删除 Concurrent Mark and Sweep (CMS) 垃圾收集器**
+- **弃用 ParallelScavenge + SerialOld GC 组合**，直接替换是通过`-XX:+UseParallelGC`命令行使用 ParallelScavenge + ParallelOld 垃圾收集器。
+
+## jdk18
+
+- G1允许最大region从32MB扩展到512MB。默认为32MB，可用参数`-XX:G1HeapRegionSize`指定最大region大小。
+
 ## jdk21
 
 [jdk21](https://www.oracle.com/java/technologies/javase/21-relnote-issues.html)主要新功能：
