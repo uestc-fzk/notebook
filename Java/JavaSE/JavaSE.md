@@ -9995,13 +9995,15 @@ jdk11发行说明：https://www.oracle.com/java/technologies/javase/11-relnote-i
 
 https://www.jianshu.com/p/b530907c0fc3
 
-https://wiki.openjdk.org/display/zgc
+[美团技术团队：Java Hotspot G1 GC的一些关键技术](https://tech.meituan.com/2016/09/23/g1.html)
 
-https://malloc.se/blog/zgc-jdk16
+https://www.pdai.tech/md/java/jvm/java-jvm-gc-g1.html
 
 ### ZGC
 
-Wiki：https://wiki.openjdk.org/display/zgc
+官方Wiki：https://wiki.openjdk.org/display/zgc
+
+[美团技术团队：新一代垃圾收集器ZGC探索与实践](https://tech.meituan.com/2020/08/06/new-zgc-practice-in-meituan.html)
 
 ZGC收集器(Z Garbage Collector)由Oracle公司研发。2018年提交了JEP 333将ZGC提交给了OpenJDK，推动进入OpenJDK11的发布清单中，在jdk15宣布生产就绪。
 
@@ -10009,9 +10011,11 @@ ZGC是可扩展的**低延迟**垃圾收集器，设计目标如下：
 
 - GC**暂停时间不超过10ms**。G1往往用时200ms。现在ZGC已经达到[微秒级](https://malloc.se/blog/zgc-jdk16)，平均50微秒(0.05ms)。
 - 与G1相比，应用程序吞吐量减少不超过15%
-- **暂停时间与堆大小无关**
+- **暂停时间与堆大小无关，停顿时间不随堆增大而增加**
 
-ZGC使用彩色指针、读屏障、内存多重映射等技术来实现`并发的标记整理`算法。
+ZGC适用于**大内存低延迟**服务的内存管理和回收。
+
+ZGC使用着色指针、读屏障、内存多重映射等技术来实现`并发的标记整理`算法。
 
 ZGC完全抛弃分代收集理论，将内存划分多个小区域：小页面、中页面、大页面。
 
