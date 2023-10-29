@@ -9812,16 +9812,17 @@ java命令高级垃圾收集选项：`-XX:xxxx=?`
 
 | 选项                    | 说明                                                         |
 | ----------------------- | ------------------------------------------------------------ |
-| `-XX:ConcGCThreads=n`   | 并发GC线程数，默认为JVM 可用的 CPU 数量。                    |
+| `-XX:ConcGCThreads=n`   | 并发标记阶段，并行GC线程数，默认为JVM 可用的 CPU 数量。      |
 | `-XX:ParallelGCThreads` | 设置停止世界 (STW) 工作线程的数量。默认值取决于 JVM 可用的 CPU 数量和所选的垃圾收集器。 |
-| `-XX:+UseG1GC`          | 默认启动G1收集器。对于需要大堆（大小约为 6 GB 或更大）且 GC 延迟要求有限（稳定且可预测的暂停时间低于 0.5 秒）的应用程序，建议使用 G1 收集器。 |
-| `-XX:G1HeapRegionSize`  | G1收集器的region大小，值是 2 的幂，范围可以从 1 MB 到 32 MB。 |
-| `-XX:MaxGCPauseMillis`  | 设置最大 GC 暂停时间的目标(单位ms)。这是软目标，JVM会尽最大努力来实现它。G1收集器默认为200ms。其它收集器不使用暂停时间选项。 |
 | `-XX:MaxMetaspaceSize`  | 元空间最大容量。默认无限制。`-XX:MaxMetaspaceSize=256m`      |
 | `-XX:NewRatio`          | 新生代和老年代大小之间的比率，默认为2.                       |
 | `-XX:SurvivorRatio`     | 新生代的伊甸园空间大小和幸存者空间大小之间的比率，默认为8，即`eden:survivor1:survivor2=8:1:1`。 |
 | `-XX:MaxHeapFreeRatio`  | 设置 GC 事件后允许的最大空闲堆空间百分比，默认70，若超过将缩容堆。`-XX:MinHeapFreeRatio`设置最小空闲堆百分比，默认40，低于该值将扩容堆。 |
 | `-XX:TLABSize`          | 设置线程本地分配缓冲区 (TLAB) 的初始大小，比如`-XX:TLABSize=512k` |
+| `-XX:+UseG1GC`          | 默认启动G1收集器。对于需要大堆（大小约为 6 GB 或更大）且 GC 延迟要求有限（稳定且可预测的暂停时间低于 0.5 秒）的应用程序，建议使用 G1 收集器。 |
+| `-XX:G1HeapRegionSize`  | G1收集器的region大小，值是 2 的幂，范围可以从 1 MB 到 32 MB。 |
+| `-XX:MaxGCPauseMillis`  | 设置最大 GC 暂停时间的目标(单位ms)。这是软目标，JVM会尽最大努力来实现它。G1收集器默认为200ms。其它收集器不使用暂停时间选项。 |
+| `-XX:G1NewSizePercent`  | G1的年轻代占堆最小百分比，默认5%。`-XX:G1MaxNewSizePercent`选项G1的年轻代占堆最大百分比，默认60% |
 | `-XX:+UseZGC`           | 启用ZGC收集器。低延迟垃圾收集器，以一定的吞吐量成本提供几毫秒的最大暂停时间。暂停时间与使用的堆大小无关。支持从 8MB 到 16TB 的堆大小。 |
 
 优化示例：
@@ -9845,6 +9846,81 @@ java -XX:MaxHeapFreeRatio=10 -XX:MinHeapFreeRatio=5 ......
 ```shell
 java -server -XX:+UseParallelGC -XX:+UseLargePages -Xmn10g  -Xms26g -Xmx26g ......
 ```
+
+### gc日志
+
+可以使用该`-Xlog`选项来配置或启用 Java 虚拟机 (JVM) 统一日志记录框架的日志记录。
+
+```shell
+-Xlog[:[what][:[output][:[decorators][:output-options[,...]]]]]
+```
+
+可使用`java -Xlog:help`查看使用方法。
+
+1、what 指定标签和级别
+
+日志级别：off、trace、debug、info、warning、error
+
+标签：gc、safepoint等
+
+`-Xlog:tag1[+tag2...][*][=level][,...]`，除非指定通配符`*`，否则仅匹配完全带有指定标签的日志消息。
+
+如`-Xlog:gc+region=trace`将输出同时包含gc和region标签的trace日志，`-Xlog:gc*=debug`将输出所有gc的debug日志。
+
+可用`java -Xlog:help`查看所有标签。
+
+2、output 指定输出路径，output-options指定输出选项：
+
+- stdout：标准输出
+- stderr：标准错误输出
+- file=文件名：输出到文件
+
+文件名可使用`%t`指定当前时间，如`file=jvm/gc%t.log`文件命名为`gc2023-10-27_12-11-03.log`。
+
+**日志轮转**：默认情况下jvm将设置5个20M文件轮转输出日志。输出选项`filecount=50,filesize=100M`可修改该配置。filesize只是近似值，不确保精确。
+
+3、decorators 输出哪些装饰消息内容：默认值是`uptime,level,tags`。
+
+- uptime：自jvm启动开始计算的时间，如6.566秒。
+- utctime：协调世界时
+- timemillis：与System.currentTimeMillis()相同
+- timenanos：与System.nanoTime()相同
+- hostname：主机名
+- pid：进程id
+- tid：线程id
+- level：日志级别
+- tags：日志标签集
+
+建议`utctime,level,tags`。
+
+在Java11之前，gc日志是单独配置的，未统一到xlog，比如`-PrintGCDetails`对应为`-Xlog:gc*`。
+
+4、典型gc日志输出配置：
+
+```shell
+-Xlog:gc*=debug,gc+task*=info:file=jvm/gc%t.log:utctime,level,tags:filecount=50,filesize=100M
+```
+
+单独设置`gc+task*=info`为了避免输出记忆集采样任务日志：这个日志特别多。
+
+```
+[2023-10-28T17:37:36.696+0000][debug][gc,task,start     ] G1 Service Thread (Remembered Set Sampling Task) (run)
+[2023-10-28T17:37:36.696+0000][debug][gc,task           ] G1 Service Thread (Remembered Set Sampling Task) (run) 0.101ms (cpu: 0.000ms)
+[2023-10-28T17:37:36.993+0000][debug][gc,task,start     ] G1 Service Thread (Periodic GC Task) (run)
+[2023-10-28T17:37:36.993+0000][debug][gc,task           ] G1 Service Thread (Periodic GC Task) (run) 0.089ms (cpu: 0.000ms)
+```
+
+### 经典jvm选项参数设置
+
+如下设置G1以及最大停顿时间100ms：
+
+```shell
+java -Xmx6g -Xms6g -Xss512k -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:+HeapDumpOnOutOfMemoryError -XX:+HeapDumpBeforeFullGC -XX:HeapDumpPath=jvm/heap.dump -Xlog:gc*=debug,gc+task*=info:file=jvm/gc%t.log:utctime,level,tags:filecount=50,filesize=100M -jar hello.jar
+```
+
+G1根据最大暂时时间自动调整年轻代，无须手动设置。
+
+其实最大暂停100ms在STW期间可能造成部分请求响应延迟增加，若对延迟非常敏感，可调低一点，最好还是换ZGC。
 
 ## javap反编译
 
@@ -9993,11 +10069,26 @@ jdk11发行说明：https://www.oracle.com/java/technologies/javase/11-relnote-i
 
 ### G1
 
-https://www.jianshu.com/p/b530907c0fc3
-
 [美团技术团队：Java Hotspot G1 GC的一些关键技术](https://tech.meituan.com/2016/09/23/g1.html)
 
 https://www.pdai.tech/md/java/jvm/java-jvm-gc-g1.html
+
+G1 GC，全称Garbage-First Garbage Collector，默认将堆划分为2048个固定大小region，它们组成年轻代、老年代，内存回收以region为基本单位。也可以参数`-XX:G1HeapRegionSize=16m`可指定分区大小(1MB~32MB，且必须是2的幂)。
+
+**G1中年轻代大小是动态调整的**，在初始空间`-XX:G1NewSizePercent`(默认整堆5%)和最大空间`-XX:G1MaxNewSizePercent`(默认整堆60%)之间动态变化。由目标暂停时间`-XX:MaxGCPauseMillis`(默认200ms)、需要扩缩容的大小以及分区的已记忆集合(RSet)计算得到。
+
+G1也可用`-Xmn2g`设置固定年轻代大小，但同时暂停目标选项将失去意义。
+
+![g1分代布局](JavaSE.assets/g1分代布局.png)
+
+H是Humongous，存储**巨大对象**，即超过region一半大小的对象。为巨大对象分配内存时无法在TLAB直接分配，将直接分配到老年代(因为年轻代经常复制，巨大对象移动成本高)。巨型对象可能会占几个region，G1内部做了一个优化，一旦发现没有引用指向巨大对象，则可直接在年轻代收集周期中被回收。
+
+G1提供Young GC和Mixed GC，而不提供Full GC：
+
+- Young GC：选定所有年轻代region。通过控制年轻代region个数，即年轻代大小，来控制young GC的时间开销。
+- Mixed GC：选定所有年轻代region和global concurrent marking统计的收集收益高的部分老年代region，在用户指定gc停顿时间内尽可能选择收益高的老年代region。
+
+若Mixed GC无法跟上内存分配速度，老年代满后导致FullGC，此时只能用Serial Old GC执行单线程FullGC收集整堆。由于G1的应用场合往往堆内存都比较大，所以Full GC的收集代价非常昂贵，应该避免Full GC的发生。
 
 ### ZGC
 
@@ -10026,7 +10117,7 @@ ZGC有两个版本：新的分代版本和旧的非分代版本：
 
 ZGC最重要的选项是设置**最大堆大小`-Xmx`和`-XX:SoftMaxHeapSize`设置其堆的软限制，**ZGC将努力控制堆大小在此限制内，比如`-Xmx5g -XX:SoftMaxHeapSize=2g`，则ZGC将以2g为其启发式限制，但允许暂时使用最多5g内存。
 
-案例：比如99%的正常流量情况下，服务只需要2g内存，但其峰值流量使用最多4g内存，为处理这种情况可能会设置最大堆为5g。那么大部分情况下有3g内存将浪费掉，这在资源按用付费的容器环境是难以接受的。而如果设置了堆软限制，结合zgc [uncommit unused memory](https://openjdk.java.net/jeps/351) 能力，可在峰值流量下使用最多5g内存，而在正常流量时将闲置的3g内存返回操作系统。
+案例：比如99%的正常流量情况下，服务只需要2g内存，但其峰值流量使用最多4g内存，为处理这种情况可能会设置最大堆为5g。那么大部分情况下有3g内存将浪费掉，这在资源按用付费的容器环境是难以接受的。而如果设置了堆软限制，结合**zgc [uncommit unused memory](https://openjdk.java.net/jeps/351) 释放空闲内存能力**，可在峰值流量下使用最多5g内存，而在正常流量时将闲置的3g内存返回操作系统。
 
 zgc分配对象内存非常快：分配路径经过以下几层：
 

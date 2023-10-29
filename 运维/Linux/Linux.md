@@ -2507,43 +2507,59 @@ addEnvArg $JAVA_HOME/bin $MAVEN_HOME/bin $GRADLE_HOME/bin
 
 ```shell
 #!/bin/bash
-jarfile="target/distribute_file_service-1.0-SNAPSHOT.jar"
+jarfile="target/blog-1.3.0-GA.jar"
+app_args="--spring.profiles.active=product --server.port=9090"
+# jvm选项参数
+jvm_options="-Xmx2g -Xms128m -Xss512k -XX:+UseG1GC -XX:MaxGCPauseMillis=10 -XX:+HeapDumpOnOutOfMemoryError -XX:+HeapDumpBeforeFullGC -XX:HeapDumpPath=jvm/heap.dump -Xlog:gc*=debug,gc+task*=info:file=jvm/gc%t.log:utctime,level,tags:filecount=50,filesize=100M"
+# jvm日志输出目录
+jvmLogDir="jvm"
+if [ ! -e ${jvmLogDir} ]
+then
+    mkdir -m 664 ${jvmLogDir}
+fi
+
 pid=`ps -ef | grep "${jarfile}" | grep -v grep| awk '{print $2}'` # 现存服务的pid
+function start_func(){
+	echo "即将启动服务: ${jarfile}"
+	if [ -z "${pid}" ] # 检查字符串是否为空
+	then
+        echo "nohup java ${jvm_options} -jar ${jarfile} ${app_args} &"
+        nohup java ${jvm_options} -jar ${jarfile} ${app_args} &
+        echo "服务启动成功: ${jarfile}"
+    else
+    	echo "服务早已启动: pid: ${pid}"
+    fi
+    ps -ef | grep ${jarfile} | grep -v "grep"
+}
+function stop_func(){
+	echo "即将关闭服务: ${jarfile}"
+    if [ ! -z "${pid}" ] # 检查字符串是否为空
+    then 
+        echo "关闭服务: ${jarfile}, pid: ${pid}"
+        kill ${pid}
+        echo "成功关闭, pid: ${pid}"
+        pid=""
+    else
+    	echo "服务不存在: ${jarfile}"
+    fi
+}
 
 if [ $1 = "start" ]
 then
-    echo "即将启动服务: ${jarfile}"
-    if [ -n "${pid}" ] # 检查字符串是否不为空
-    then
-        echo "服务已经启动，请勿重复操作, pid: ${pid}"
-        exit
-    fi
-    echo "nohup java -jar ${jarfile} &"
-    nohup java -jar ${jarfile} &
-    ps -ef | grep ${jarfile} | grep -v "grep"
+    start_func
 elif [ $1 = "stop" ]
 then
-    echo "即将关闭服务: ${jarfile}"
-    if [ -z "${pid}" ] # 检查字符串是否为空
-    then 
-        echo "服务不存在: ${jarfile}"
-        exit
-    fi
-    echo "kill ${pid}"
-    kill ${pid}
-    echo "成功关闭, pid: ${pid}"
+	stop_func
 elif [ $1 = "restart" ]
 then 
     echo "即将重启服务: ${jarfile}"
-    if [ -n "${pid}" ] # 检查字符串是否不为空
-    then
-        echo "关闭服务: ${jarfile}, pid: ${pid}"
-        kill ${pid}
-    fi
+	stop_func
     sleep 5s
-    echo "nohup java -jar ${jarfile} &"
-    nohup java -jar ${jarfile} &
-fi 	# 这个fi必须得有
+    start_func
+else
+	echo "非法参数"
+	exit 1
+fi      # 这个fi必须得有
 ```
 
 # Linux下安装MySQL8
