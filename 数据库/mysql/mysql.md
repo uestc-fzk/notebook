@@ -2551,6 +2551,8 @@ insert into t2(c,d) select c,d from t1;
 
 ## 基于binlog复制
 
+官方配置手册：https://dev.mysql.com/doc/refman/8.0/en/replication-howto.html
+
 ![主从备份流程图](mysql.assets/主从备份流程图.png)
 
 主节点将更新事件写入binlog，副本读取主节点binlog，并执行其中事件。
@@ -2558,6 +2560,24 @@ insert into t2(c,d) select c,d from t1;
 每个副本会保存各自的binlog坐标：从master中读取和处理的文件名和偏移量。
 
 > 注意：**每个节点必须配置不同的唯一`server_id`**（默认1），主节点必须开启binlog（默认开启）。
+
+```shell
+# 客户端设置，即客户端默认的连接参数
+[client]
+# 默认连接端口
+port = 3306
+# 字符集编码
+default-character-set = utf8mb4
+
+# 服务端基本设置
+[mysqld] 
+server-id=1
+# MySQL监听端口
+port = 3306
+datadir = /var/lib/mysql
+# 服务端默认编码（数据库级别）
+character_set_server = utf8mb4
+```
 
 以下步骤为正在运行的MySQL实例添加副本：
 
@@ -2601,6 +2621,7 @@ $> mysql < dbdump.db
 # 旧版本
 mysql> CHANGE MASTER TO
     ->     MASTER_HOST='source_host_name',
+    ->     MASTER_PORT='source_port',
     ->     MASTER_USER='replication_user_name',
     ->     MASTER_PASSWORD='replication_password',
     ->     MASTER_LOG_FILE='recorded_log_file_name',
@@ -2609,15 +2630,11 @@ mysql> CHANGE MASTER TO
 # 8.0.23以后版本
 mysql> CHANGE REPLICATION SOURCE TO
     ->     SOURCE_HOST='source_host_name',
+    ->     SOURCE_PORT='source_port',
     ->     SOURCE_USER='replication_user_name',
     ->     SOURCE_PASSWORD='replication_password',
     ->     SOURCE_LOG_FILE='recorded_log_file_name',
     ->     SOURCE_LOG_POS=recorded_log_position;
-        
-# 旧版本    
-START SLAVE;
-# 8.0.23以后版本   
-START REPLICA;
 ```
 
 上诉参数`MASTER_LOG_FILE`和`MASTER_LOG_POS`需配置为主库日志文件和日志偏移量，需与之前的`SHOW MASTER STATUS`命令的结果对齐，表明从指定日志文件指定位置开始同步。
@@ -2638,7 +2655,7 @@ report_password='xxx' -- 副本报告给master的密码
 --replicate-wild-do-table=db_name.% # 此为复制指定数据库的所有表
 ```
 
-7、可用`SHOW REPLICA STATUS`查询当前主从复制状态信息。MySQL8.0.22以前为`SHOW SLAVE STATUS`。
+7、启动复制：`START REPLICA`。可用`SHOW REPLICA STATUS`查询当前主从复制状态信息。MySQL8.0.22以前为`SHOW SLAVE STATUS`。
 
 8、副本停止复制：`STOP REPLICA`，MySQL8.0.22以前为`STOP SLAVE`。
 
@@ -2917,17 +2934,12 @@ MySQL5.6引入的GTID（Global Transaction Identifier）全局事务id，可以�
 基于GTID的主从同步命令如下：故障迁移的切换命令也是这个：
 
 ```sql
-CHANGE MASTER TO 
-MASTER_HOST=$host_name 
-MASTER_PORT=$port 
-MASTER_USER=$user_name 
-MASTER_PASSWORD=$password 
-master_auto_position=1 
+CHANGE MASTER TO MASTER_HOST="124.223.192.8", MASTER_PORT=13306, MASTER_USER="root",MASTER_PASSWORD="123456", master_auto_position=1 
 ```
 
 参数`master_auto_position=1`表示主从同步使用GTID协议。
 
-不采用GTID前必须手动指定`master_log_file`和`master_log_pos`参数来确定同步位点了，而GTID协议无须手动指定，因为**GTID协议是自动识别从哪开始同步**。
+基于binlog复制必须手动指定`master_log_file`和`master_log_pos`参数来确定同步位点，而GTID协议无须手动指定，因为**GTID协议是自动识别从哪开始同步**。
 
 可以通过`SHOW MASTER STATUS`命令查看GTID集合：
 
@@ -2996,6 +3008,202 @@ master_auto_position=1
 这个方案比较复杂，适合基于proxy方案，由proxy判断当前事务在主从是否已经同步完成，再分发路由。
 
 资料：https://time.geekbang.org/column/article/77636
+
+## docker构建主从案例
+
+### docker安装mysql
+
+这个去看docker部分的笔记。这里不重复列出。
+
+### 基于GTID主从搭建
+
+1、主库容器搭建：
+
+```shell
+[root@k8s-master mysqlDockerDir]# cat conf.d/mymysql.cnf 
+# 客户端设置，即客户端默认的连接参数
+[client]
+# 默认连接端口
+port = 3306
+# 字符集编码
+default-character-set = utf8mb4
+
+# 服务端基本设置
+[mysqld] 
+server-id=1
+# MySQL监听端口
+port = 3306
+datadir = /var/lib/mysql
+# 服务端默认编码（数据库级别）
+character_set_server = utf8mb4
+
+# 开启GTID
+gtid_mode=ON
+enforce_gtid_consistency=ON
+```
+
+构建镜像：`docker build -t uestcfzk/mysql_master:v1 .`
+
+启动：主库使用13306端口：
+
+```shell
+docker run -d -p 13306:3306 --name=mysql_master -e MYSQL_ROOT_PASSWORD=123456 uestcfzk/mysql_master:v1
+```
+
+执行：
+
+```sql
+mysql -uroot -h127.0.0.1 -P13306 -p'123456'
+
+mysql> show master status\G
+*************************** 1. row ***************************
+             File: binlog.000002
+         Position: 196
+     Binlog_Do_DB: 
+ Binlog_Ignore_DB: 
+Executed_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-5
+```
+
+2、从库容器搭建：server_id必须不同
+
+```shell
+[root@k8s-master mysqlDockerDir_replica]# cat conf.d/mymysql.cnf 
+# 客户端设置，即客户端默认的连接参数
+[client]
+# 默认连接端口
+port = 3306
+# 字符集编码
+default-character-set = utf8mb4
+
+# 服务端基本设置
+[mysqld] 
+server-id=2
+# MySQL监听端口
+port = 3306
+datadir = /var/lib/mysql
+# 服务端默认编码（数据库级别）
+character_set_server = utf8mb4
+
+# 开启GTID
+gtid_mode=ON
+enforce_gtid_consistency=ON
+```
+
+构建镜像：`docker build -t uestcfzk/mysql_replica:v1 .`
+
+启动：以23306端口做从库
+
+```shell
+docker run -d -p 23306:3306 --name=mysql_replica -e MYSQL_ROOT_PASSWORD=123456 uestcfzk/mysql_replica:v1
+```
+
+3、设置从库连上主库：
+
+```shell
+mysql -uroot -h127.0.0.1 -P23306 -p'123456'
+
+mysql> CHANGE MASTER TO MASTER_HOST="124.223.192.8", MASTER_PORT=13306, MASTER_USER="root",MASTER_PASSWORD="123456", master_auto_position=1;
+Query OK, 0 rows affected, 7 warnings (0.05 sec)
+
+mysql> start replica;
+Query OK, 0 rows affected (0.02 sec)
+
+
+# 省略大部分信息
+mysql> show replica status\G
+*************************** 1. row ***************************
+             Replica_IO_State: Waiting for source to send event
+                  Source_Host: 124.223.192.8
+                  Source_User: root
+                  Source_Port: 13306
+                Connect_Retry: 60
+              Source_Log_File: binlog.000002
+          Read_Source_Log_Pos: 196
+               Relay_Log_File: 0e60590d1f97-relay-bin.000003
+                Relay_Log_Pos: 405
+        Relay_Source_Log_File: binlog.000002
+           Replica_IO_Running: Yes
+          Replica_SQL_Running: Yes
+             
+          Exec_Source_Log_Pos: 196
+              Relay_Log_Space: 3117572
+              
+             Source_Server_Id: 1
+                  Source_UUID: 86b6a5ed-7a6f-11ee-aa04-0242ac110004
+             Source_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+    Replica_SQL_Running_State: Replica has read all relay log; waiting for more updates
+           Retrieved_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-5
+            Executed_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-5,
+894d0883-7a6f-11ee-9c76-0242ac110005:1-5
+```
+
+4、当主库执行了1次建库1次建表后：
+
+```shell
+mysql> show master status\G
+*************************** 1. row ***************************
+             File: binlog.000002
+         Position: 620
+     Binlog_Do_DB: 
+ Binlog_Ignore_DB: 
+Executed_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-7
+```
+
+从库此时也能看到新建的库和表，并且查看
+
+```shell
+# 省略大部分信息
+mysql> show replica status\G
+*************************** 1. row ***************************
+             Replica_IO_State: Waiting for source to send event
+                  Source_Host: 124.223.192.8
+                  Source_User: root
+                  Source_Port: 13306
+                Connect_Retry: 60
+              Source_Log_File: binlog.000002
+          Read_Source_Log_Pos: 620
+               Relay_Log_File: 0e60590d1f97-relay-bin.000003
+                Relay_Log_Pos: 829
+        Relay_Source_Log_File: binlog.000002
+           Retrieved_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-7
+            Executed_Gtid_Set: 86b6a5ed-7a6f-11ee-aa04-0242ac110004:1-7,
+894d0883-7a6f-11ee-9c76-0242ac110005:1-5
+```
+
+### 基于binlog主从搭建
+
+这个其实更简单。
+
+在上诉主从配置中，主库和从库只要不开启gtid即可：
+
+```shell
+# 客户端设置，即客户端默认的连接参数
+[client]
+# 默认连接端口
+port = 3306
+# 字符集编码
+default-character-set = utf8mb4
+
+# 服务端基本设置
+[mysqld] 
+server-id=2
+# MySQL监听端口
+port = 3306
+datadir = /var/lib/mysql
+# 服务端默认编码（数据库级别）
+character_set_server = utf8mb4
+
+# 开启GTID
+#gtid_mode=ON
+#enforce_gtid_consistency=ON
+```
+
+其它步骤一样的，从库连接master的指令就必须指定开始复制的binlog文件的指针：
+
+```sql
+CHANGE MASTER TO MASTER_HOST='source_host_name', MASTER_PORT='source_port',  MASTER_USER='replication_user_name',  MASTER_PASSWORD='replication_password',   MASTER_LOG_FILE='recorded_log_file_name', MASTER_LOG_POS=recorded_log_position;
+```
 
 # 分区
 
