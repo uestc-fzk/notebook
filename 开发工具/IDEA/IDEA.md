@@ -1,6 +1,16 @@
 
 
+## 破解
+
+2023版本破解：https://www.bilibili.com/read/cv26088967
+
+安装及破解教程：https://www.exception.site/essay/how-to-free-use-intellij-idea-2020 未验证过，不知是否有效
+还有一个更牛逼的激活网站：https://idea.medeming.com 缺点是要关注公众号，不过它的激活码确实是可以用的，非常方便。
+
+更推荐：还有一种是**学生身份申请IDEA的免费教育许可证**，每年可以申请一次，每次有效期一年，这个虽然麻烦，但是学生账户可以登录使用所有Jetbrains系列产品如GoLand，Pycharm。申请地址：https://www.jetbrains.com.cn/community/education/#students
+
 ## debug测试
+
 ![debug1](IDEA.assets/debug1.bmp)
 ![debug2](IDEA.assets/debug2.bmp)
 ![debug3](IDEA.assets/debug3.bmp)
