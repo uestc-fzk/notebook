@@ -66,14 +66,15 @@ RocketMQ会为每个消费组都设置一个Topic名称为`%RETRY%+consumerGroup
 
 ### 流量控制
 
-1、**生产者流控：**broker处理能力达到瓶颈
+1、**生产者流控**：broker处理能力达到瓶颈
 
 - commitLog文件被锁时间超过osPageCacheBusyTimeOutMills时，默认为1000ms，返回流控。
 - 如果开启transientStorePoolEnable == true，且broker为异步刷盘的主机，且transientStorePool中资源不足，拒绝当前send请求，返回流控。
 - broker每隔10ms检查send请求队列头部请求的等待时间，如果超过waitTimeMillsInSendQueue，默认200ms，拒绝当前send请求，返回流控。
 - broker通过拒绝send 请求方式实现流量控制。
+- 生产者客户端收到流控错误码530后，按照**指数回避策略进行延迟重试**
 
-注意，生产者流控，不会尝试消息重投。
+> 注意：要避免生产者流控，触发生产者流控**根源是broker系统容量或水位过高**。利用监控系统持续观察系统水位容量，保证资源充足。
 
 2、**消费者流控**：消费能力达到瓶颈
 
@@ -81,7 +82,7 @@ RocketMQ会为每个消费组都设置一个Topic名称为`%RETRY%+consumerGroup
 - 消费者本地缓存消息大小超过pullThresholdSizeForQueue时，默认100MB。
 - 消费者本地缓存消息跨度超过consumeConcurrentlyMaxSpan时，默认2000。
 
-消费者流控的结果是降低拉取频率。
+消费者流控的结果是**降低拉取频率**。
 
 ### 死信队列
 
@@ -247,8 +248,7 @@ RocketMQ在普通消息基础上**支持二阶段提交能力**，将二阶段�
 
 
 
-
-
+### 负载均衡
 
 
 
