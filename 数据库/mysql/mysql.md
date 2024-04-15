@@ -303,7 +303,7 @@ SELECT * FROM t1 WHERE (role|0)=0b11;
 ```sql
 CREATE TABLE t1(
   id BIGINT AUTO_INCREMENT PRIMARY KEY;
-	json_col JSON;
+    json_col JSON;
 );
 ```
 
@@ -387,12 +387,12 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 
 ### CRUD
 
-- JSON-INSERT()
-- JSON-REPLACE()
-- JSON-SET()
-- JSON-EXTRACT()
-- JSON-REMOVE
-- JSON-SEARCH()
+- JSON_INSERT()
+- JSON_REPLACE()
+- JSON_SET()：JSON_INSERT()和JSON_REPLACE()的结合
+- JSON_EXTRACT()
+- JSON_REMOVE
+- JSON_SEARCH()
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
 

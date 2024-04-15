@@ -31,13 +31,7 @@ RocketMQ支持消息的高可靠，影响消息可靠性的几种情况：
 
 回溯消费：Broker提供**按照时间维度来回退消费进度**的回溯机制，时间维度精确到毫秒。
 
-## 事务消息
 
-事务消息：**将本地事务和发送消息操作可以被定义到全局事务中**，要么同时成功，要么同时失败。RocketMQ的事务消息提供类似 X/Open XA 的分布事务功能，通过事务消息能达到分布式事务的最终一致。
-
-## 定时消息
-
-定时消息(延迟队列)：消息发送到broker后，不会立即被消费，等待指定时间投递给真正的topic。
 
 ## 消息重试
 
@@ -149,8 +143,6 @@ RocketMQ 按存储时长统一控制消息是否保留，在存储成本可控�
 
 
 
-# 领域模型
-
 ## topic主题
 
 一个topic可由多个消息队列MessageQueue组成。
@@ -214,9 +206,11 @@ public class MessageImpl implements Message {
 }
 ```
 
-# 功能特性
+
 
 ## 定时/延时消息
+
+定时消息(延迟队列)：消息发送到broker后，不会立即被消费，等待指定时间投递给真正的topic。
 
 定时消息是服务端根据消息设置的定时时间在某一固定时刻将消息投递给消费者消费。
 
@@ -270,6 +264,8 @@ public class MessageImpl implements Message {
 - 避免消息组集中热点，同一消息组的消息存入同一个队列，消息组集中会造成消息存储于少量队列，导致性能降低。如设置订单id、用户id为消息组。
 
 ## 事务消息
+
+事务消息：**将本地事务和发送消息操作可以被定义到全局事务中**，要么同时成功，要么同时失败。RocketMQ的事务消息提供类似 X/Open XA 的分布事务功能，通过事务消息能达到分布式事务的最终一致。
 
 分布式系统调用特点为一个核心业务逻辑的执行，同时需要调用多个下游业务进行处理。需要分布式事务保证多个下游业务执行最终结果完全一致。
 
@@ -338,6 +334,29 @@ RocketMQ在普通消息基础上**支持二阶段提交能力**，将二阶段�
 
 - 分配粒度较大，不够灵活
 - 保证同一队列消息被相同消费者处理，适用于流式计算、数据聚合等需要明确对消息进行聚合、批处理的场景。
+
+
+
+# 最佳实践
+
+1、一个应用尽可能用一个topic，消息子类型用tags标识。
+
+2、尽量**为消息设置key，方便定位消息丢失问题**。服务器为消息key创建hash索引，因此尽量保证key唯一以减少哈希冲突，如订单id、请求id等。
+
+3、消息发送成功或者失败要**打印消息日志**，用于业务排查问题。
+
+4、提高消费并行度：加机器；增加单机消费并行线程。
+
+5、RocketMQ无法避免消息重复(Exactly-Once)，**需业务去重**。
+
+6、同一个消费组内各个Consumer的订阅关系必须一致(Topic、tags和过滤表达式)，否则将出现业务紊乱。
+
+7、新创建的ConsumerGroup消费起点：
+
+- 5.x SDK首次上线时从最新offset开始消费
+- 再次启动则都是从记录的消费位置继续消费
+
+
 
 
 
@@ -631,25 +650,14 @@ sh bin/mqshutdown namesrv
 
 在mq解压目录的bin目录下有一个mqadmin命令，该命令是一个运维指令，用于对mq的主题，集群，broker 等信息进行管理。
 
-官方手册：https://github.com/apache/rocketmq/blob/master/docs/cn/operation.md#2-mqadmin%E7%AE%A1%E7%90%86%E5%B7%A5%E5%85%B7
+官方手册：https://rocketmq.apache.org/zh/docs/deploymentOperations/02admintool
 
 ```shell
-./bin/mqadmin # 可以查看能执行的全部命令参数
-
-[root@k8s-master rocketmq-4.9.3]# ./bin/mqadmin topicList
-RocketMQLog:WARN No appenders could be found for logger (io.netty.util.internal.InternalThreadLocalMap).
-RocketMQLog:WARN Please initialize the logger system properly.
-org.apache.rocketmq.tools.command.SubCommandException: TopicListSubCommand command faile
-......
+# 查看topic列表 -n 指定namesrv地址
+./bin/mqadmin topicList -n localhost:9876
 ```
 
-如果出现了上面这个错误，那没法了，PDF中的解决措施是修改tool.sh指定jre下的ext目录，可是Java17早已经没了jre目录了。
-
-> 虽然这个mqadmin管理工具用不了，但是dashboard可以用啊。
-
 ### dashboard管理
-
-上面已经知道mqadmin工具好像用不了，但是dashboard更好用！
 
 用dashboard直接创建topic：非常方便！
 
@@ -1153,6 +1161,34 @@ Producer发送的消息结构如下：
 
 其中properties是一堆属性，包括生产者地址、生产时间、queueId、是否为延迟消息等。
 
+# Connect
+
+> 官方库：https://github.com/apache/rocketmq-connect
+>
+> rocketmq-connect原理博客：https://developer.aliyun.com/article/1078049
+
+RocketMQ Connect是独立的、分布式的数据集成重要组件，**将各系统数据高效、可靠、流的方式流入流出到RocketMQ**，实现异构数据系统的连接，构建数据管道、ETL、CDC、数据湖等。
+
+![rocketmq-connect](rocketmq.assets/rocketmq-connect.png)
+
+应用场景：
+
+- 流式数据管道：mysql -> rocketmq -> elasticsearch，可满足业务对事务、搜索的需求。
+- CDC：Change Data Capture，**变更数据获取**，可以近乎实时的捕获增量数据库INSERT、UPDATE，DELETE变化。
+
+Connector：连接器
+
+- SourceConnector：源数据系统 ---w---> RocketMQ
+- SinkConnector：RocketMQ ---r--->目标系统
+
+Task：是Connector任务分片最小分配单位，是执行数据传输的真正执行者，无状态的、并行的。
+
+![connector和task](rocketmq.assets/connector和task.png)
+
+## MySQL CDC
+
+https://rocketmq.apache.org/zh/docs/connect/04RocketMQ%20Connect%20In%20Action1
+
 
 
 # RocketMQ整体架构
@@ -1160,6 +1196,8 @@ Producer发送的消息结构如下：
 [RocketMQ整体架构原图](https://www.processon.com/view/link/62a1b35b7d9c08733ec26b38)
 
 ![RocketMQ整体架构图](rocketmq.assets/RocketMQ整体架构图.png)
+
+- NameServer：简单的topic路由注册中心，提供broker的动态注册和发现，心跳检测机制。集群部署，各实例之间互不通信，broker向每个实例注册自己路由信息，某个实例挂了，其它实例还有完整信息。
 
 ## 设计原因
 
