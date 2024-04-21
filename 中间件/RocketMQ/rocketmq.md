@@ -1199,7 +1199,7 @@ https://rocketmq.apache.org/zh/docs/connect/04RocketMQ%20Connect%20In%20Action1
 
 - NameServer：简单的topic路由注册中心，提供broker的动态注册和发现，心跳检测机制。集群部署，各实例之间互不通信，broker向每个实例注册自己路由信息，某个实例挂了，其它实例还有完整信息。
 
-## 设计原因
+## 设计原理
 
 官方架构图：https://github.com/apache/rocketmq/blob/master/docs/cn/architecture.md
 
@@ -1212,6 +1212,19 @@ https://rocketmq.apache.org/zh/docs/connect/04RocketMQ%20Connect%20In%20Action1
 RocketMQ消费队列设计原因：https://rocketmq.apache.org/rocketmq/how-to-support-more-queues-in-rocketmq/
 
 # 消息发送分析
+
+## 消息类型
+
+```java
+public enum MessageType {
+    NORMAL, // 普通消息
+    FIFO, // 顺序消息, 设置了 messageGroup的消息
+    DELAY,// 定时消息，设置了deliveryTimestamp发送时间戳
+    TRANSACTION; // 事务消息
+}
+```
+
+
 
 ## 发送流程
 
