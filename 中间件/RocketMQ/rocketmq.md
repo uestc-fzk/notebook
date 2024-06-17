@@ -4979,6 +4979,38 @@ RocketMQ的多master多slave模式有两种复制方式：同步双写和异步�
 
 云原生、流式
 
+# RocketMQ5-Producer
+
+![producer-consumer](rocketmq.assets/producer-consumer.png)
+
+消息id的计算方法如下：(hex可自行百度)
+
+```bash
+messageId= 0x01 + hex(mac地址) + hex(pid) + hex(timediff) + hex(自增id)
+
+# 例子: 
+┌──┬────────────┬────┬────────┬────────┐
+│01│56F7E71C361B│21BC│024CCDBE│00000000│
+└──┴────────────┴────┴────────┴────────┘
+```
+
+各个字段来源如下：
+
+| version | mac地址                   | pid                      | timediff                                 | 自增id                      |
+| ------- | ------------------------- | ------------------------ | ---------------------------------------- | --------------------------- |
+| 2B      | 6B                        | 2B                       | 4B                                       | 4B                          |
+| "01"    | mac address(lower 6bytes) | process id(lower 2bytes) | seconds since 2021-01-01 00:00:00(UTC+0) | sequence number(big endian) |
+
+
+
+# RocketMQ5-Consumer
+
+![producer-consumer](rocketmq.assets/producer-consumer.png)
+
+
+
+
+
 # RocketMQ与Kafka比较
 
 > 注意：以下是我在未搜索网络资料情况下，个人对两者的一些看法，可能会有问题。
