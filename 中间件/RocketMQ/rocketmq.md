@@ -4983,6 +4983,21 @@ RocketMQ的多master多slave模式有两种复制方式：同步双写和异步�
 
 ![producer-consumer](rocketmq.assets/producer-consumer.png)
 
+## 消息类型
+
+```java
+public enum MessageType {
+    NORMAL, // 普通消息
+    FIFO, // 顺序消息, 设置了 messageGroup的消息
+    DELAY,// 定时消息，设置了deliveryTimestamp发送时间戳
+    TRANSACTION; // 事务消息
+}
+```
+
+每个topic只能接收一种类型的消息。
+
+## 消息id
+
 消息id的计算方法如下：(hex可自行百度)
 
 ```bash
@@ -5001,11 +5016,147 @@ messageId= 0x01 + hex(mac地址) + hex(pid) + hex(timediff) + hex(自增id)
 | 2B      | 6B                        | 2B                       | 4B                                       | 4B                          |
 | "01"    | mac address(lower 6bytes) | process id(lower 2bytes) | seconds since 2021-01-01 00:00:00(UTC+0) | sequence number(big endian) |
 
+## 流程图
+
+原图：https://www.processon.com/view/link/66797a7f7ff9ca3b962870f6
+
+![Producer](rocketmq.assets/Producer.png)
+
+> 思考：这个并没有像kafka那样囤积一批消息再发送诶。为了低时延？
+
 
 
 # RocketMQ5-Consumer
 
 ![producer-consumer](rocketmq.assets/producer-consumer.png)
+
+## SimpleConsumer
+
+简单消费者(Simple)：每次随机选一个mq进行消息拉取，消费这批消息后手动ACK，和kafka消费者类似，消费流程由开发者完全控制。
+
+![SimpleConsumer](rocketmq.assets/SimpleConsumer.png)
+
+## PushConsumer
+
+推式消费者PushConsume：对消费者分配到的每个mq都创建一个请求pq，由其不断请求该mq的最新消息(长训轮)，并将消息统一放到线程池进行乱序消费。
+
+有以下两种消费者实现：
+
+![image-20240625011525431](rocketmq.assets/image-20240625011525431.png)
+
+### 标准消费者流程图
+
+原图：https://www.processon.com/view/link/667990e15035294a53892219
+
+![PushConsumer](rocketmq.assets/PushConsumer.png)
+
+> 思考：这个ACK为啥不多屯几条一块ACK呢？这应该不影响消费时延啊？
+
+### FIFO消费者
+
+FIFO消费者与标准消费者的区别：
+
+- 往线程池放消息时，消费完上一条再放入下一条
+- 消费失败重试：
+  - FIFO消费者在**本地定时等待重试**，这可能**造成后面的消息一直等待直至其成功或进入死信队列**。
+  - 标准消费者是**向broker发送修改消息不可见时长**，然后跳过此消息。
+- 消费失败重试超最大重试次数后，FIFO消费者将向broker发请求**将消息转入私信队列**。
+
+FIFO消费者代码：
+
+```java
+class FifoConsumeService extends ConsumeService {
+    public void consumeIteratively(ProcessQueue pq, Iterator<MessageViewImpl> iterator) {
+        if (!iterator.hasNext()) { return;  }
+        // 迭代器指向下条消息
+        final MessageViewImpl messageView = iterator.next();
+        if (messageView.isCorrupted()) {
+            // 如果消息损坏了(签名出错)，则nack消息，修改其不可见时间，进行消费重试
+            pq.discardFifoMessage(messageView);// 放入私信队列
+            consumeIteratively(pq, iterator);// 消费下条消息
+            return;
+        }
+        // 将消息放入线程池消费
+        final ListenableFuture<ConsumeResult> future0 = consume(messageView);
+        // 根据消费结果：
+        // 消费成功：ack
+        // 消费失败：未达最大重试次数则定时重试
+        // 消费失败：已达最大重试次数则进入死信队列
+        ListenableFuture<Void> future = Futures.transformAsync(future0, result -> pq.eraseFifoMessage(messageView,
+                result), MoreExecutors.directExecutor());
+        // 在监听器上递归调用此方法消费下条消息
+        future.addListener(() -> consumeIteratively(pq, iterator), MoreExecutors.directExecutor());
+    }
+}
+
+class ProcessQueueImpl implements ProcessQueue {
+    public ListenableFuture<Void> eraseFifoMessage(MessageViewImpl messageView, ConsumeResult consumeResult) {
+        // 省略部分代码
+        // 1、消费失败但未达重试次数限制，再次进行消息消费
+        if (ConsumeResult.FAILURE.equals(consumeResult) && attempt < maxAttempts) {
+            // 1.1 重试间隔计算
+            final Duration nextAttemptDelay = retryPolicy.getNextAttemptDelay(attempt);
+            // 1.2 本地定时再次消费
+            final ListenableFuture<ConsumeResult> future = service.consume(messageView, nextAttemptDelay);
+            return Futures.transformAsync(future, result -> eraseFifoMessage(messageView, result), MoreExecutors.directExecutor());
+        }
+        boolean ok = ConsumeResult.SUCCESS.equals(consumeResult);
+        // 2、消费成功：ack
+        // 3、消费失败且超过重试次数，进入死信队列
+        ListenableFuture<Void> future = ok ? ackMessage(messageView) : forwardToDeadLetterQueue(messageView);
+        return future;
+    }
+}
+```
+
+Standard消费者代码：
+
+```java
+public class StandardConsumeService extends ConsumeService {
+    @Override
+    public void consume(ProcessQueue pq, List<MessageViewImpl> messageViews) {
+        for (MessageViewImpl messageView : messageViews) {
+            if (messageView.isCorrupted()) {
+                // 如果消息损坏了(签名出错)，则nack消息，修改其不可见时间，进行消费重试
+                pq.discardMessage(messageView);
+                continue;
+            }
+            // 异步消费消息
+            final ListenableFuture<ConsumeResult> future = consume(messageView);
+            Futures.addCallback(future, new FutureCallback<ConsumeResult>() {
+                @Override
+                public void onSuccess(ConsumeResult consumeResult) {
+                    // 擦除已使用的消息(ACK / NACK)
+                    pq.eraseMessage(messageView, consumeResult);
+                }
+            }, MoreExecutors.directExecutor());
+        }
+    }
+}
+
+class ProcessQueueImpl implements ProcessQueue {
+    public void eraseMessage(MessageViewImpl messageView, ConsumeResult consumeResult) {
+        statsConsumptionResult(consumeResult);// 统计消费消息情况
+        // 根据消息消费结果判断是 ACK / NACK(修改消息不可见时间) 消息
+        ListenableFuture<Void> future = ConsumeResult.SUCCESS.equals(consumeResult) ? ackMessage(messageView) :
+                nackMessage(messageView);
+        // 从pq本地缓存队列移除该消息
+        future.addListener(() -> evictCache(messageView), MoreExecutors.directExecutor());
+    }
+    
+    private ListenableFuture<Void> nackMessage(final MessageViewImpl messageView) {
+        final int deliveryAttempt = messageView.getDeliveryAttempt();// 获取投递次数
+        // 1、2进制指数回退策略：计算下次消费重试间隔
+        final Duration duration = consumer.getRetryPolicy().getNextAttemptDelay(deliveryAttempt);
+        final SettableFuture<Void> future0 = SettableFuture.create();
+        // 2、向broker发请求修改消息不可见时间
+        changeInvisibleDuration(messageView, duration, 1, future0);
+        return future0;
+    }
+}
+```
+
+
 
 
 
