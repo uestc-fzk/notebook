@@ -398,6 +398,15 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 
 JSON函数文档：https://dev.mysql.com/doc/refman/8.0/en/json-search-functions.html
 
+```sql
+# 插入或更新ext_info中某json字段为基础类型: 
+UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', 100)
+# 插入或更新ext_info中某json字段为结构体: 
+UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', CAST('{"name":"fzk"}' AS JSON))
+```
+
+
+
 # SQL与函数与运算符
 
 ## 命名锁

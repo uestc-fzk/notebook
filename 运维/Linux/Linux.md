@@ -929,7 +929,38 @@ Linux 文件的基本权限就有九个，分别是 **owner/group/others(拥有�
 
 
 
+### 文件传输
 
+#### scp
+
+Secure Copy Protocol，Linux 系统下基于 ssh 登陆进行安全的远程文件拷贝命令。
+
+- `-r`：递归复制目录
+
+```shell
+# 将本地文件传输到远程目录下
+scp C:/Users/76771/hello.jpg root@remote_ip:/home/
+scp C:/Users/76771/hello.jpg root@remote_ip:/home/test.jpg # 指定文件名
+
+# 将本地目录传输到远程目录下
+scp -r C:/Users/76771/test root@remote_ip:/home/test
+```
+
+#### lrzsz
+
+[lrzsz](https://www.ohse.de/uwe/software/lrzsz.html)是unix通信包，提供Xmodem、Ymodem、Zmodem文件传输协议。Linux系统需要先安装该命令。
+
+rz：Receive Zmodem，上传文件到服务器，输入后一个文件选择窗口会出现在本地机器上，选择上传的文件即可。
+
+sz：Send Zmodem，输入`sz filename`，弹出一个窗口选择下载文件到本地哪个目录即可。
+
+注意：lrzsz命令需要确保ssh客户端支持ZModem协议。
+
+#### trzsz
+
+trzsz ( trz / tsz ) 是一个兼容 tmux 的文件传输工具，和 lrzsz ( rz / sz ) 类似，并且有进度条和支持目录传输。
+
+文档：https://trzsz.github.io/cn/
 
 ## 防火墙与进程管理
 
