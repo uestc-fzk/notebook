@@ -208,7 +208,7 @@
 - **/srv**：存放服务启动后需要提取的数据**（不用服务器就是空）**
 
 ## Linux常用命令
->菜鸟教程：https://www.runoob.com/linux/linux-tutorial.html
+>菜鸟教程命令大全：https://www.runoob.com/linux/linux-command-manual.html
 
 >Linux命令手册:https://www.runoob.com/linux/linux-tutorial.html
 
@@ -455,7 +455,7 @@ cp: overwrite `/tmp/bashrc'? n  <==n不覆盖，y为覆盖
 -u ：若目标文件已经存在，且 source 比较新，才会升级 (update)
 ```
 
-### 文件内容查看
+### 文件内容查看(日志查看)
 Linux系统中使用以下命令来查看文件的内容：
 
 - cat  由第一行开始显示文件内容
@@ -481,100 +481,71 @@ Linux系统中使用以下命令来查看文件的内容：
 -v ：列出一些看不出来的特殊字符
 ```
 
-#### more
-一页一页翻动
+#### head/tail
+
+参数：
+
+- -n ：后面接数字，代表显示几行的意思，默认10行。
+
+例子：
+
 ```shell
-[root@www ~]# more /etc/man_db.config 
-#
-# Generated automatically from man.conf.in by the
-# configure script.
-#
-# man.conf from man-1.6d
-....(中间省略)....
---More--(28%)  <== 重点在这一行喔！你的光标也会在这里等待你的命令
+# 读前20行
+head -n 20 hello.txt
+# 读后20行
+tail -n 20 hello.txt
+
+# 读文件末尾并一直等待读取新内容
+tail -f hello.txt
+tailf hello.txt
 ```
-在 more 这个程序的运行过程中，你有几个按键可以按的：
-```shell
-空白键 (space)：代表向下翻一页；
-Enter         ：代表向下翻『一行』；
-/字串         ：代表在这个显示的内容当中，向下搜寻『字串』这个关键字；
-:f            ：立刻显示出档名以及目前显示的行数；
-q             ：代表立刻离开 more ，不再显示该文件内容。
-b 或 [ctrl]-b ：代表往回翻页，不过这动作只对文件有用，对管线无用。
-```
-
-#### head
-取出文件前面几行
-
-语法：
-`head [-n number] 文件 `
-选项与参数：
-- -n ：后面接数字，代表显示几行的意思
-
-`[root@www ~]# head /etc/man.config`
-
-默认的情况中，显示前面 10 行！若要显示前 20 行，就得要这样：
-
-`[root@www ~]# head -n 20 /etc/man.config`
 
 #### grep
-文件内搜索: 用于查找文件里符合条件的字符串
+文件内搜索: 用于查找文件里符合条件的字符串的一行。
 
 在文件中(可以多个文件同时)搜索字符串，可以使用**正则表达式**
 
-grep 指令用于查找内容包含指定的范本样式的文件，如果发现某文件的内容符合所指定的范本样式，预设 grep 指令会把含有范本样式的**那一行显示出来**。
-
-```shell
-[centos@localhost Desktop]$ who | grep cent
-centos   :0           2021-06-18 11:10 (:0)
-centos   pts/0        2021-06-30 21:04 (192.168.3.3)
-```
-
 若不指定任何文件名称，或是所给予的文件名为 `-`，则 grep 指令会从标准输入设备读取数据。
-
-
-语法如下：
->`grep [-abcEFGhHilLnqrsvVwxy][-A<显示行数>][-B<显示列数>][-C<显示列数>][-d<进行动作>][-e<范本样式>][-f<范本文件>][--help][范本样式][文件或目录...]`
 
 参数：
 ```
--a 或 --text : 不要忽略二进制的数据。
--A<显示行数> 或 --after-context=<显示行数> : 除了显示符合范本样式的那一列之外，并显示该行之后的内容。
--b 或 --byte-offset : 在显示符合样式的那一行之前，标示出该行第一个字符的编号。
--B<显示行数> 或 --before-context=<显示行数> : 除了显示符合样式的那一行之外，并显示该行之前的内容。
--c 或 --count : 计算符合样式的列数。
--C<显示行数> 或 --context=<显示行数>或-<显示行数> : 除了显示符合样式的那一行之外，并显示该行之前后的内容。
--d <动作> 或 --directories=<动作> : 当指定要查找的是目录而非文件时，必须使用这项参数，否则grep指令将回报信息并停止动作。
+-A: 除了显示符合范本样式的那一列之外，并显示该行之后的内容。
+-B: 除了显示符合样式的那一行之外，并显示该行之前的内容。
+-c: 计算符合样式的列数。
+
 -e<范本样式> 或 --regexp=<范本样式> : 指定字符串做为查找文件内容的样式。
--E 或 --extended-regexp : 将样式为延伸的正则表达式来使用。
--f<规则文件> 或 --file=<规则文件> : 指定规则文件，其内容含有一个或多个规则样式，让grep查找符合规则条件的文件内容，格式为每行一个规则样式。
+
 -F 或 --fixed-regexp : 将样式视为固定字符串的列表。
 -G 或 --basic-regexp : 将样式视为普通的表示法来使用。
--h 或 --no-filename : 在显示符合样式的那一行之前，不标示该行所属的文件名称。
--H 或 --with-filename : 在显示符合样式的那一行之前，表示该行所属的文件名称。
--i 或 --ignore-case : 忽略字符大小写的差别。
--l 或 --file-with-matches : 列出文件内容符合指定的样式的文件名称。
--L 或 --files-without-match : 列出文件内容不符合指定的样式的文件名称。
--n 或 --line-number : 在显示符合样式的那一行之前，标示出该行的列数编号。
--o 或 --only-matching : 只显示匹配PATTERN 部分。
--q 或 --quiet或--silent : 不显示任何信息。
--r 或 --recursive : 此参数的效果和指定"-d recurse"参数相同。
--s 或 --no-messages : 不显示错误信息。
--v 或 --invert-match : 显示不包含匹配文本的所有行。
--V 或 --version : 显示版本信息。
--w 或 --word-regexp : 只显示全字符合的列。
--x --line-regexp : 只显示全列符合的列。
--y : 此参数的效果和指定"-i"参数相同。
+
+-i: 忽略字符大小写的差别。
+-v: 显示不包含匹配文本的所有行。
 ```
-在多个文件搜索
-例如 grep  java  aa.txt  test.txt
-使用管道 “|”
-例如： cat  aa.txt  |  grep  java
-从aa.txt 中的详细信息搜索java。
+例子：
+
+```shell
+# 查文件中包含 字符串INFO 的行数
+grep hello.log -e 'INFO' -c 
+
+# 查文件中 字符串INFO 所在行 及其后10行，前5行
+cat hello.txt |grep INFO -A 10 -B 5
+```
 
 
-#### 其他
-其他的使用细节：https://www.runoob.com/linux/linux-file-content-manage.html
+
+#### awk
+
+参数：
+
+- -F：指定分隔符
+
+```shell
+# 输出分割后的第一列，第二列
+tail -n 2 hello.log | awk -F '=' '{print $1,$2}'
+# $0是整行，$n是分割后第n列
+```
+
+
 
 ### 链接概念
 
