@@ -854,6 +854,93 @@ func (m *Mutex) lockSlow() {
 }
 ```
 
+# 泛型(类型参数)
+
+Go泛型的设计者*Ian Lance Taylor*在官网发布的博客文章：[when to use generics](https://go.dev/blog/when-generics)
+
+Go编程有一条通用准则：write Go programs by writing code, not by defining types.
+
+泛型，如果你写代码的时候从定义类型参数约束(type parameter constraints)开始，那你可能搞错了方向。从编写函数开始，如果写的过程中发现使用类型参数更好，那再使用类型参数。
+
+使用场景：
+
+1、通用数据结构，比如二叉树、链表
+
+```go
+// Tree is a binary tree.
+type Tree[T any] struct {
+    cmp  func(T, T) int
+    root *node[T]
+}
+
+// A node in a Tree.
+type node[T any] struct {
+    left, right  *node[T]
+    val          T
+}
+
+// find returns a pointer to the node containing val,
+// or, if val is not present, a pointer to where it
+// would be placed if added.
+func (bt *Tree[T]) find(val T) **node[T] {
+    pl := &bt.root
+    for *pl != nil {
+        switch cmp := bt.cmp(val, (*pl).val); {
+        case cmp < 0:
+            pl = &(*pl).left
+        case cmp > 0:
+            pl = &(*pl).right
+        default:
+            return pl
+        }
+    }
+    return pl
+}
+
+// Insert inserts val into bt if not already there,
+// and reports whether it was inserted.
+func (bt *Tree[T]) Insert(val T) bool {
+    pl := bt.find(val)
+    if *pl != nil {
+        return false
+    }
+    *pl = &node[T]{val: val}
+    return true
+}
+```
+
+这个`Tree`例子说明了另一个一般准则：当你需要像比较函数这样的东西时，最好使用函数而不是方法。
+
+因为将方法转换为函数比向类型添加方法要简单得多。像int这种去实现Compare方法就远不如传个比较函数进去方便简洁。
+
+2、通用处理函数
+
+```go
+// GetKeysFromMap 获取哈希表的key数组
+func GetKeysFromMap[K comparable, V interface{}](m map[K]V) []K {
+	var result = make([]K, 0, len(m))
+	for k, _ := range m {
+		result = append(result, k)
+	}
+	return result
+}
+```
+
+不建议：
+
+1、不要用类型参数替换接口类型
+
+2、如果对不同类型实现方法不同，不要用类型参数
+
+3、适当使用反射：如果某些操作必须支持没有方法的类型（则不能用接口类型），并且如果每种类型的操作都不同（因此类型参数不合适），请使用反射。比如encoding/json包。
+
+
+
+
+
+
+
+
 # 数据访问
 
 ## 内置sql包
@@ -2501,13 +2588,33 @@ Spring核心技术：
 
 仅记录大功能点更新。
 
+go 1.23
+
+- 迭代器iter包
+
+go 1.22
+
+- 以前，“for”循环声明的变量只创建一次，每次迭代都会更新。此版本开始循环的每次迭代都会创建新变量，以避免意外共享错误
+  - **不再需要在循环中写 nv := v 了**，就可将其值传递给闭包或for循环之外
+  - 性能影响：编译器逃逸分析若确定循环变量仍可进行堆栈分配，这意味着没有新的分配。其它情况会有额外分配。总体而言性能差异并不显著。
+
+go 1.21
+
+- 标准库
+  - 新包log/slog提供具有级别的结构化日志记录。
+  - 新工具包slices、maps、cmp
+
+go 1.20
+
+- 标准款支持错误包装：errors.Join(...error)
+
 go 1.18
 
 - **泛型**
 
 go 1.17
 
-- 新增`runtime/cgo`包，允许将任何 Go 值转换为安全表示，可用于在 C 和 Go 之间安全地传递值。有关详细信息，请参阅 [运行时/cgo.Handle](https://go.dev/pkg/runtime/cgo#Handle)。
+- `runtime/cgo`包新增功能，允许将任何 Go 值转换为安全表示，可用于在 C 和 Go 之间安全地传递值。有关详细信息，请参阅 [Runtime/cgo.Handle](https://go.dev/pkg/runtime/cgo#Handle)。
 
 go 1.16
 
