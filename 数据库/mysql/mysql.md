@@ -393,6 +393,7 @@ mysql> SELECT JSON_EXTRACT('{"a": 1, "b": 2, "c": [3, 4, 5]}', '$.c[*]');
 - JSON_EXTRACT()
 - JSON_REMOVE
 - JSON_SEARCH()
+- JSON_VALID()：判断是否符合json格式
 
 文档：https://dev.mysql.com/doc/refman/8.0/en/json.html#json-paths
 
@@ -400,9 +401,23 @@ JSON函数文档：https://dev.mysql.com/doc/refman/8.0/en/json-search-functions
 
 ```sql
 # 插入或更新ext_info中某json字段为基础类型: 
-UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', 100)
+UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', 100);
+UPDATE table SET ext_info = JSON_SET(if(json_valid(ext_info),ext_info,'{}'), '$.key', 100);
 # 插入或更新ext_info中某json字段为结构体: 
-UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', CAST('{"name":"fzk"}' AS JSON))
+UPDATE table SET ext_info = JSON_SET(ifnull(ext_info,'{}'), '$.key', CAST('{"name":"fzk"}' AS JSON));
+
+
+# ext_info是json字段
+# '->>' 等于 JSON_UNQUOTE(JSON_EXTRACT())，json_unquote去除json转义，一般用于取出字符串值
+# '->' 等于 JSON_EXTRACT()，返回的是json格式
+select (ext_info->'$.fzk.age'),(ext_info->>'$.fzk.name') from tablename where json_valid(ext_info) and (ext_info->'$.fzk.age') is not null;
+
+mysql> select json_extract('{"age": 20, "name": "fzk"}','$.name') as a,json_unquote(json_extract('{"age": 20, "name": "fzk"}','$.name')) as b;
++-------+------+
+| a     | b    |
++-------+------+
+| "fzk" | fzk  |
++-------+------+
 ```
 
 
