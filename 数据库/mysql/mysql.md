@@ -28,22 +28,6 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
 
 
-## 新功能
-
-**MySQL8新增的部分功能如下：**(我简单的选了一些看得懂的)
-
-1. 默认字符集已从 `latin1`更改为`utf8mb4`。
-
-2. [JSON数据类型](https://dev.mysql.com/doc/refman/8.0/en/json.html)
-
-3. 优化器新增功能：
-   - 支持不可见索引
-   - 支持降序索引
-4. [窗口函数](https://dev.mysql.com/doc/refman/8.0/en/window-functions.html)
-5. [多值索引](https://dev.mysql.com/doc/refman/8.0/en/create-index.html#create-index-multi-valued)
-6. RIGHT JOIN 作为 LEFT JOIN 处理。
-7. [数据字典](https://dev.mysql.com/doc/refman/8.0/en/data-dictionary.html)
-
 ## 常用命令
 
 ```sql
@@ -568,11 +552,12 @@ START TRANSACTION
 - [mysqld](https://dev.mysql.com/doc/refman/8.0/en/mysqld-server.html)：SQL守护进程（是MySQL服务器，一般以这个启动）
 - mysqld_safe：服务器启动脚本
 - mysql.server：服务器启动脚本
+- mysql：命令行客户端程序
 - mysqlcheck：表维护程序
 - mysqldump：数据库备份程序
 - mysqlslap：负载仿真客户端，https://dev.mysql.com/doc/refman/8.0/en/mysqlslap.html
-- mysqlbinlog：处理二进制日志文件的实用程序
-- mysqldumpslow：总结慢查询日志文件
+- mysqlbinlog：处理binlog文件的实用程序
+- mysqldumpslow：总结slowlog慢查询日志文件
 
 ## dump-数据库备份
 
@@ -2032,10 +2017,8 @@ MySQL默认启用死锁检测（`innodb_deadlock_detect`控制），自动检测
   锁定读：如SELECT ... FOR UPDATE 或SELECT ... FOR SHARE，以及update和delete语句，锁定取决于语句是使用具有唯一搜索条件的唯一索引，还是范围类型的搜索条件：
   - 唯一索引条件：仅锁定索引记录，不锁定间隙
   - 其它或扫描索引范围：使用间隙锁或next-key lock
-
 - SERIALIZABLE
-  和REPEATABLE READ类似，不过将每个SELECT语句转换为SELECT...FOR SHARE。
-  可序列化级别一般用于XA事务。
+  和REPEATABLE READ类似，不过将每个SELECT语句转换为SELECT...FOR SHARE。**可序列化级别一般用于XA事务**。
 
 可重复读级别如何防止幻读：
 
@@ -2478,6 +2461,7 @@ possible_keys: idx_blog_rt
 
 - 如果只是去重，没有count(*)等聚合函数，则两者都是临时表方式，执行流程相同，性能相同
 - 若有limit，则distinct快一点
+- 在mysql5.7中group by默认排序(explain后extra中有file sort标识)会影响性能，而mysql8不再排序。有索引时即使在mysql5.7中也性能相同（索引已有序）。
 
 ## 自增id
 
@@ -3746,3 +3730,31 @@ slow_query_log_file
 
 log-error
 
+
+
+# 发布说明
+
+**MySQL8.0新增的部分功能如下：**(我简单的选了一些看得懂的)
+
+1. 默认字符集已从 `latin1`更改为`utf8mb4`。
+2. [JSON增强](https://dev.mysql.com/doc/refman/8.0/en/json.html)
+3. 优化器新增功能：
+   - 支持隐形索引：可用于测试索引性能，https://dev.mysql.com/doc/refman/8.0/en/invisible-indexes.html
+   - 支持降序索引：https://dev.mysql.com/doc/refman/8.0/en/descending-indexes.html
+4. [窗口函数](https://dev.mysql.com/doc/refman/8.0/en/window-functions.html)
+5. [多值索引](https://dev.mysql.com/doc/refman/8.0/en/create-index.html#create-index-multi-valued)
+6. RIGHT JOIN 作为 LEFT JOIN 处理。
+7. [数据字典](https://dev.mysql.com/doc/refman/8.0/en/data-dictionary.html)
+8. InnoDB增强：
+   - InnoDB 临时表现在在共享临时表空间 ibtmp1 中创建。
+   - 锁定读支持NOWAIT和SKIP LOCKED选项：https://dev.mysql.com/doc/refman/8.0/en/innodb-locking-reads.html#innodb-locking-reads-nowait-skip-locked
+   - 原子DDL：https://dev.mysql.com/doc/refman/8.0/en/atomic-ddl.html
+   - 直方图统计分析：https://dev.mysql.com/doc/refman/8.0/en/analyze-table.html#analyze-table-histogram-statistics-analysis
+   - 哈希连接优化：Hash Join Optimization
+9. 弃用：binlog_format变量
+10. **删除查询缓存**
+
+8.4.0：
+
+- Master/Slave相关语句已删除，主从复制只能使用Replica相关语句。
+- 
