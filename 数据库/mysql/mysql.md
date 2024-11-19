@@ -30,7 +30,12 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
 ## 常用命令
 
+mysqld是MySQL服务器，也是sql守护进程。
+
 ```sql
+# 重启mysql
+systemctl restart mysqld
+
 # mysql 命令
 # 登录MySQL服务
 mysql -h localhost -u root -p # 然后输入密码
@@ -574,16 +579,75 @@ mysqldump程序将进行**逻辑备份**，生成的是一组SQL语句文件，�
 
 ## binlog-二进制日志
 
-文档：https://dev.mysql.com/doc/refman/8.0/en/mysqlbinlog.html
+文档：https://dev.mysql.com/doc/refman/8.4/en/mysqlbinlog.html
+
+binlog：https://dev.mysql.com/doc/refman/8.4/en/binary-log.html
+
+relaylog：https://dev.mysql.com/doc/refman/8.4/en/replica-logs.html
+
+binlog由包含“事件”的文件组成，这些“事件”描述了对数据库内容的修改。
+
+### 显示行事件
+
+`mysqlbinlog -v binlog.000007 | tail -n 100`
+
+这是一段开启GTID，binlog_format为row，sql语句为`update t1 set cc="fzk" where id=2`的binlog日志：
+
+```shell
+# at 497188
+#241103 16:08:33 server id 1  end_log_pos 497267 CRC32 0xb015f6a5 	Anonymous_GTID	last_committed=9	sequence_number=10	rbr_only=yes	original_committed_timestamp=1730621313988226	immediate_commit_timestamp=1730621313988226	transaction_length=329
+/*!50718 SET TRANSACTION ISOLATION LEVEL READ COMMITTED*//*!*/;
+# original_commit_timestamp=1730621313988226 (2024-11-03 16:08:33.988226 CST)
+# immediate_commit_timestamp=1730621313988226 (2024-11-03 16:08:33.988226 CST)
+/*!80001 SET @@session.original_commit_timestamp=1730621313988226*//*!*/;
+/*!80014 SET @@session.original_server_version=80030*//*!*/;
+/*!80014 SET @@session.immediate_server_version=80030*//*!*/;
+SET @@SESSION.GTID_NEXT= 'ANONYMOUS'/*!*/;
+# at 497267
+#241103 16:08:33 server id 1  end_log_pos 497351 CRC32 0x8ec21aff 	Query	thread_id=37625	exec_time=0	error_code=0
+SET TIMESTAMP=1730621313/*!*/;
+BEGIN
+/*!*/;
+# at 497351
+#241103 16:08:33 server id 1  end_log_pos 497420 CRC32 0x4347c8c1 	Table_map: `test`.`t1` mapped to number 22610
+# at 497420
+#241103 16:08:33 server id 1  end_log_pos 497486 CRC32 0xf802ac3a 	Update_rows: table id 22610 flags: STMT_END_F
+
+BINLOG '
+gS8nZxMBAAAARQAAAAyXBwAAAFJYAAAAAAEABHRlc3QAAnQxAAYI/v7+D/wJ9wH4Af4UFAACPgEB
+AAIF/P8AAj/ByEdD
+gS8nZx8BAAAAQgAAAE6XBwAAAFJYAAAAAAEAAgAG//80AgAAAAAAAAACBU5ldyAyNAIAAAAAAAAA
+AgNmems6rAL4
+'/*!*/;
+### UPDATE `test`.`t1`
+### WHERE
+###   @1=2
+###   @2=2
+###   @3=NULL
+###   @4='New 2'
+###   @5=NULL
+###   @6=NULL
+### SET
+###   @1=2
+###   @2=2
+###   @3=NULL
+###   @4='fzk'
+###   @5=NULL
+###   @6=NULL
+# at 497486
+#241103 16:08:33 server id 1  end_log_pos 497517 CRC32 0x3ce5abab 	Xid = 165603
+COMMIT/*!*/;
+```
+
+
 
 ### 备份binlog
 
+mysqlbinlog 可以读取binlog并写入相同内容的新binlog文件。
+
 参数选项：
 
-- `--read-from-remote-server`：从远程服务器备份到本地(即本地为远处服务器的副本服务器)。还需结合以下参数：
-  - `--host`
-  - `--user`
-  - `--password`
+- `--read-from-remote-server`：从远程服务器备份到本地(即本地为远处服务器的副本服务器)。还需结合以下参数：`--host`、`--port`、`--user`、`--password`
 - `--raw`：写入原始（二进制）输出，而不是文本输出
 - `--stop-never`：到达最后一个日志文件的末尾后**保持与服务器的连接**，并继续等待读取新的事件。
 
@@ -678,15 +742,72 @@ mysqlbinlog --start-position=27284 binlog.000002 binlog.000003 binlog.000004
 
 ## dumpslow-慢查询日志
 
-文档：https://dev.mysql.com/doc/refman/8.0/en/mysqldumpslow.html
+文档：https://dev.mysql.com/doc/refman/8.4/en/mysqldumpslow.html
 
 `mysqldumpslow`程序可解析 MySQL 慢查询日志文件并汇总其内容。
 
 ```sql
 mysqldumpslow [options] [log_file...]
+-s ORDER     what to sort by (al, at, ar, c, l, r, t), 'at' is default
+                al: average lock time
+                ar: average rows sent
+                at: average query time
+                 c: count
+                 l: lock time
+                 r: rows sent
+                 t: query time
+-t NUM       just show the top n queries
+```
+
+示例：
+
+```shell
+[root@k8s-master tmp]# mysqldumpslow -s t  mysql-slow.log 
+Reading mysql slow query log from mysql-slow.log
+Count: 4  Time=0.00s (0s)  Lock=0.00s (0s)  Rows=6.0 (24), root[root]@localhost
+  select * from t1
 ```
 
 
+
+
+
+# 服务器
+
+## sql模式
+
+MySQL服务器可在不同的SQL模式下运行，模式影响SQL语法和数据校验检查。
+
+在配置文件中指定sql模式：
+
+```ini
+sql-mode="ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"
+```
+
+### 严格sql模式
+
+STRICT_TRANS_TABLES：严格sql模式，**对DML语句中的非法值、缺失值会报错提醒**，比如类型错误或超出范围。
+
+1. 未启动严格模式 或 严格模式下 `insert ignore`和`update ignore`会插入调整值并产生警告
+2. 严格模式不允许0000-00-00作为有效日期
+3. `ignore`关键字可将错误降级为警告，严格sql模式将警告升级为错误，且ignore优先
+
+更多比较细节：https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html#ignore-strict-comparison
+
+### ONLY_FULL_GROUP_BY
+
+group by 后面的字段称为聚合字段。
+
+此模式将拒绝以下查询：查询字段、HAVING 条件字段或 ORDER BY 字段引用既未在 GROUP BY 子句中命名也不在功能上依赖于（唯一确定）GROUP BY 列的非聚合字段。
+
+例子如下：
+
+```sql
+mysql> select sex,hobby,max(id) from t1 group by sex;
+ERROR 1055 (42000): Expression #2 of SELECT list is not in GROUP BY clause and contains nonaggregated column 'test.t1.hobby' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by
+```
+
+不启动此模式，mysql会任意选择组内任何值，且orderby不会影响服务器选择组内哪个值，排序发生在分组选值之后。
 
 # 服务器日志
 
@@ -876,7 +997,7 @@ slowlog记录执行时间超过`long_query_time`的SQL，`mysqldumpslow`命令�
 ```properties
 # 慢查询日志
 slow_query_log=on # 这个参数设置为ON，可以捕获执行时间超过一定数值的SQL语句
-slow_query_log_file=/opt/mysql/mysql_slow_query.log  # 记录日志的文件名，必须有写权限
+slow_query_log_file=/var/lib/mysql/mysql_slow.log  # 记录日志的文件名，必须有写权限
 long_query_time=1 # 当SQL语句执行时间超过此数值时，就会被记录到日志中，建议设置为1或者更短
 ```
 
