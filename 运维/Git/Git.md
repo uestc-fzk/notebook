@@ -164,3 +164,70 @@ git config --global --unset http.proxy
 git config --global --unset https.proxy
 git config --global -l
 ```
+
+
+
+# dns污染github
+
+https://blog.csdn.net/hjy_mysql/article/details/131596257
+
+当开不开代理都出现无法连接时，有两个办法：
+
+```
+PS C:\Users\76771> git clone git@github.com:uestc-fzk/notebook.git
+Cloning into 'notebook'...
+ssh: connect to host github.com port 22: Connection refused
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+办法1：从git协议改用https协议，但git push需要登录。
+
+无本地仓库直接git clone远程仓库https链接。
+
+有本地仓库则在其目录执行 git config --local -e，将url配置项改为https格式的即可。
+
+这个其实就是修改的本地仓库目录下.git/config文件。
+
+办法2：判断DNS污染
+
+既然是与github建立ssh连接时报错，看一下ssh日志：
+
+```
+PS C:\Users\76771> ssh -vT git@github.com
+OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2
+debug1: Reading configuration data C:\\Users\\76771/.ssh/config
+debug1: Connecting to github.com [127.0.0.1] port 22.
+debug1: connect to address 127.0.0.1 port 22: Connection refused
+ssh: connect to host github.com port 22: Connection refused
+```
+
+蚌埠住了，github.com被DNS解析为127本机地址了。
+
+用nslookup命令查一下dns解析情况：
+
+```
+PS C:\Users\76771> nslookup github.com
+服务器:  UnKnown
+Address:  fe80::36ca:81ff:fee8:d7b
+
+非权威应答:
+名称:    github.com
+Address:  127.0.0.1
+
+PS C:\Users\76771> nslookup github.com 8.8.8.8
+服务器:  dns.google
+Address:  8.8.8.8
+
+非权威应答:
+名称:    github.com
+Address:  20.205.243.166
+```
+
+可以看到默认dns解析被污染了，而指定谷歌dns服务器(8.8.8.8)则能正常解析。
+
+那么此时要么按照方法1改为https链接，要么去hosts文件手动指定github.com的ip地址(治标不治本)。
+
+看看能不能更换系统的dns服务器解析呢，尝试了一下设置为谷歌和百度
