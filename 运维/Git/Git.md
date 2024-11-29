@@ -230,9 +230,25 @@ Address:  20.205.243.166
 
 那么此时要么按照方法1改为https链接，要么去hosts文件手动指定github.com的ip地址(治标不治本)。
 
-看看能不能更换系统的dns服务器解析呢，连接WiFi下在设置静态ip并设置谷歌dns：
+还有个办法解决dns污染：设置静态ip并设置谷歌dns：
 ![image-20241128013240443](Git.assets/image-20241128013240443.png)
 
 ![屏幕截图 2024-11-28 013259](Git.assets/屏幕截图 2024-11-28 013259.png)
 
 这样就在开代理情况下就可以正常通过git协议push仓库了。
+
+此时再nslookup命令解析一下就正确了：
+
+```
+PS C:\Users\76771> nslookup github.com
+服务器:  dns.google
+Address:  8.8.8.8
+
+非权威应答:
+名称:    github.com
+Address:  20.205.243.166
+```
+
+
+
+感觉这样好麻烦，还是改回DHCP和自动DNS，然后使用https协议访问远程仓库吧。
