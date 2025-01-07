@@ -1064,11 +1064,19 @@ private static void kafkaSendMsgWithTransaction(KafkaProducer<String, String> pr
 
 ![image-20220413231658514](kafka.assets/image-20220413231658514.png)
 
-官方文档中关于[max.in.flight.requests.per.connection](https://kafka.apache.org/documentation/#producerconfigs_max.in.flight.requests.per.connection)的说明：类似于TCP中的发送窗口。
+官方文档中关于[max.in.flight.requests.per.connection](https://kafka.apache.org/documentation/#producerconfigs_max.in.flight.requests.per.connection)的说明：类似于TCP中的发送窗口和接受窗口。
 
 客户端在阻塞之前将在单个连接上发送的未收到ack确认请求的最大数量。默认为5。
 
 # kafka消费者
+
+## pull模型
+
+**kafka消费者只有pull模式，没有push模型**。因为pull模型由消费者自己决定拉取速率，而**push模型broker有消息就推送，可能造成消费者消费能力跟不上发送速度**。
+
+而RocketMQ的push模型其实是**pull模型+长轮训**实现的低时延，且其有**流量控制**，本地处理队列满了就不拉了，有空位了再拉。
+
+相对来说，**RocketMQ的push模型结合了两种模型的有点：既实现了低时延，又能控制拉取速度。**
 
 ## 消费流程
 
@@ -1495,7 +1503,11 @@ public class MyConsumer {
 
 如果想完成Consumer端的精准一次性消费，那么需要Kafka消费端将消费过程和提交offset过程做原子绑定，即支持事务。
 
+# kafka整体
 
+如怎么提交吞吐量、分区数设置、
+
+看PDF文档。
 
 # Golang操作kafka
 

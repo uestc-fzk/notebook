@@ -1194,6 +1194,8 @@ MySQL意外退出后，直接重启即可自动恢复：https://dev.mysql.com/do
 
 ## EXPLAIN
 
+explain各字段详解：https://javaguide.cn/database/mysql/mysql-query-execution-plan.html#select-type
+
 **EXPLAIN可用于了解查询执行计划**，它根据表、列、索引等信息，可以在不读取所有行情况下执行对巨大表的查询，优化器选择执行最高效查询的一组操作成为**查询执行计划**，也被称为**EXPLAIN计划**。可以根据其执行计划，判断优化情况，进而改进。
 
 > 可以借助BENCHMARK()函数简单观察优化效果。
@@ -1233,10 +1235,10 @@ MySQL意外退出后，直接重启即可自动恢复：https://dev.mysql.com/do
 - unique_subquery
 - index_subquery
 - **range**：仅检索给定范围内的行，使用索引来选择行。
-- **index**：index连接类型与ALL相同，只是扫描了索引树，有2种情况：
+- **index**：**扫描整个索引树**，因普通索引比聚集索引小，稍比ALL好点。有2种情况：
   - 如果查询的是覆盖索引，则只扫描索引树
-  - 使用从索引读取以按索引顺序查找数据行来执行全表扫描。
-- ALL：对先前表中每个行组合进行全表扫描，性能非常糟糕
+  - 使用从索引读取以按索引顺序查找数据行来执行全表扫描。这种一般会直接走全表扫，除非用索引排序了。
+- ALL：全表扫描，性能糟糕。
 
 2、filtered指示按条件过滤的表行的估计百分比，100表示没发生过滤，值越低说明索引的基数越好，选择性越高。
 
@@ -1244,14 +1246,14 @@ MySQL意外退出后，直接重启即可自动恢复：https://dev.mysql.com/do
 
 - `Using filesort`：排序是通过根据联接类型遍历所有行，并为匹配WHERE子句的所有行存储排序关键字和指向该行的指针来完成的。
 
-- `Using index`：覆盖索引，仅使用索引树中的信息从表中检索列信息，无须回表。
+- `Using index`：覆盖索引，无须回表，效率高。
 
 - `Using index condition`：通过索引过滤。
 - `Using index for group-by`：表示MySQL找到了一个索引可用于检索GROUP BY 或 DISTINCT查询的所有列，而无需对实际表进行额外io
 
 - `Using sort_union(...)`, `Using union(...)`, `Using intersect(...)`：当where条件匹配多个索引且都较合适时，Index merge通过多次扫描索引并将其结果合并后再查主表。
 
-- `Using temporary`：为了解析查询，MySQL 需要创建一个临时表来保存结果。GROUP BY和ORDER BY通常出现。
+- `Using temporary`：需创建临时表保存结果。GROUP BY和ORDER BY通常出现。
 
 - `Using where`：从数据表中读取数据后进行过滤。
 
@@ -1674,6 +1676,7 @@ INSERT/UPDATE/DELETE等DML操作时中往往涉及对二级索引的更新，当
 change buffer使用限制：**实际上只有普通二级索引可以使用change buffer缓存更改**。
 
 - 唯一索引更新操作需要判断是否违反了唯一性约束，而这必须将数据页读入内存池中进行判断，无法使用change buffer。
+- **唯一索引更新性能不如普通索引，可以尽量少用唯一索引，而在业务上进行限制**。
 
 **优点**：与聚集索引相比，二级索引更新顺序相对随机，可能会访问不相邻的二级索引页，change buffer缓存更改可以避免从磁盘中读取索引页到缓冲池所造成的大量随机I/O。系统后台线程会定期将更改merge到索引页并写入磁盘。
 
@@ -1797,7 +1800,7 @@ mysql> SHOW STATUS LIKE 'Innodb_undo_tablespaces%';
 
 delete命令是无法回收表空间的，没有被使用的表空间看起来就像“空洞”。insert、update等命令也会造成“空洞”，因为它们也可能引起页分裂和页合并。
 
-### 重建表
+### 重建表-Online DDL
 
 重建表可以空间收缩，增加表空间利用率：
 
@@ -1860,7 +1863,7 @@ mysql> SELECT FILE_NAME, START_LSN, END_LSN FROM performance_schema.innodb_redo_
 
 MySQL8.0.30以前重做日志文件默认存储于数据目录下，且仅有2个文件分别为：`ib_logfile0`和 `ib_logfile1`，并循环写入这些文件。
 
-### 写入机制
+### 写入机制-组提交
 
 Innodb事务执行中，将缓冲池数据页修改记录到`redo log buffer`，事务提交时：
 
@@ -1892,15 +1895,13 @@ Innodb有一个后台线程定时1s将redo log buffer中的日志write到文件�
 
 MySQL将redolog和binlog落盘动作都分开间隔执行，使得组提交中每次落盘前暂存的落盘请求更多。
 
-
-
 ### 两阶段提交
 
 事务执行时，只是将缓冲池的数据页修改，并将修改项记入`redo log buffer`，事务提交时需要将`redo log buffer`内容写入redolog 文件并落盘，同时需要将事务语句写入binlog并落盘，为了保证这两者数据一致性，采用了如下两阶段提交的策略：
 
 ![两阶段提交](mysql.assets/两阶段提交.png)
 
-在两阶段提交的不通时刻，MySQL异常重启：**redolog 和binlog有个共同的数据字段`XID`**
+在两阶段提交的不同时刻，MySQL异常重启：**redolog 和binlog有个共同的数据字段`XID`**
 
 - 时刻A：写入redo log处于prepare阶段时崩溃重启，未写binlog，事务回滚
 - 时刻B：binlog写完，redo log未commit前发生崩溃重启，此时数据恢复规则：
@@ -2136,17 +2137,17 @@ MySQL默认启用死锁检测（`innodb_deadlock_detect`控制），自动检测
 - REPEATABLE READ
   快照读：读取undo log快照
   锁定读：如SELECT ... FOR UPDATE 或SELECT ... FOR SHARE，以及update和delete语句，锁定取决于语句是使用具有唯一搜索条件的唯一索引，还是范围类型的搜索条件：
-  - 唯一索引条件：仅锁定索引记录，不锁定间隙
-  - 其它或扫描索引范围：使用间隙锁或next-key lock
+  - 唯一索引条件：仅锁定索引记录，不锁定间隙，行锁
+  - 其它或扫描索引范围：使用行锁和间隙锁，即next-key lock
 - SERIALIZABLE
   和REPEATABLE READ类似，不过将每个SELECT语句转换为SELECT...FOR SHARE。**可序列化级别一般用于XA事务**。
 
 可重复读级别如何防止幻读：
 
-- 一致性读：快照方式可实现避免幻读
+- 一致性读：MVCC快照方式可实现避免幻读
 - 锁定读：Next-Key lock，避免其它事务插入数据
 
-在实现上，数据库里面会创建一个视图，访问的时候以视图的逻辑结果为准。读已提交级别下，MVCC视图会在每一个语句前创建一个，所以在读已提交级别下，一个事务是可以看到另外一个事务已经提交的内容，因为它在每一次查询之前都会重新给予最新的数据创建一个新的MVCC视图。 可重复读级别下，MVCC视图实在开始事务的时候就创建好了，这个视图会一直使用，直到该事务结束。 这里要注意不同的隔离级别他们的一致性事务视图创建的时间点是不同的。 
+在实现上，数据库里面会创建一个视图，访问的时候以视图的逻辑结果为准。读已提交级别下，MVCC视图会在每一个语句前创建一个，所以在读已提交级别下，一个事务是可以看到另外一个事务已经提交的内容，因为它在每一次查询之前都会重新给予最新的数据创建一个新的MVCC视图。 可重复读级别下，MVCC视图实在开始事务的时候就创建好了，这个视图会一直使用，直到该事务结束。 这里要注意不同的隔离级别他们的一致性事务视图创建的时间点是不同的：
 
 读未提交：没有视图的概念，直接返回最新行数据。
 
@@ -2252,9 +2253,9 @@ https://time.geekbang.org/column/article/73161
 
 `innodb_stats_persistent=on`默认开启持久化统计信息：会将优化器统计信息保存到磁盘，以便服务器重启后快速加载，其保存在`mysql.innodb_table_stats`和 `mysql.innodb_index_stats`表中。
 
-`innodb_stats_auto_recalc=on`变量默认开启，控制表中超过10%行发生更改时将自动计算统计信息。
+`innodb_stats_auto_recalc=on`变量默认开启，**控制表中超过10%行发生更改时将自动计算统计信息**。
 
-统计信息使用采样法，根据`innodb_stats_persistent_sample_pages`参数默认采样20个页面，预估索引的cardinality，该值越大越准确，但会导致ANALYZE分析运行缓慢。
+统计信息使用采样法，根据`innodb_stats_persistent_sample_pages`参数**默认采样20个页面**，预估索引的cardinality，该值越大越准确，但会导致ANALYZE分析运行缓慢。
 
 可以通过`SELECT * FROM mysql.innodb_index_stats`观察各个索引统计情况：
 
@@ -2419,7 +2420,7 @@ ALTER TABLE {table_name} ADD INDEX index_name(col_name(6));
 
 `innodb_stats_persistent`参数：
 
-- `on`：表示统计信息持久化存储，N为20，M为10
+- `on`：默认，表示统计信息持久化存储到系统表，N为20，M为10
 - `off`：表示统计信息只存储内存，N为8，M为16
 
 注意这是采样统计，很容易不准确。
@@ -2971,7 +2972,7 @@ sql_thread分配流程如下：假设事务T涉及修改表t1和表t2，那么�
 
 MySQL5.6之所以只支持按库分发，是因为**按库分发可以兼容不同的binlog格式**，不强制要求row格式。
 
-#### 基于group commit并发
+#### 基于group commit组提交并发
 
 这是MariaDB设计的并行复制策略，它利用了**redolog组提交优化**的特征：
 
@@ -2983,7 +2984,9 @@ MySQL5.6之所以只支持按库分发，是因为**按库分发可以兼容不�
 - 在一组里面一起提交的事务，有一个相同的 commit_id，下一组就是 commit_id+1；commit_id 直接写到 binlog 里面；
 - 传到备库应用的时候，相同 commit_id 的事务分发到多个 worker 执行；这一组全部执行完成后，coordinator 再去取下一批。
 
-当时，这个策略出来的时候是相当惊艳的。因为，之前业界的思路都是在“分析 binlog，并拆分到 worker”上。而 MariaDB 的这个策略，目标是“模拟主库的并行模式”。
+当时，**这个策略出来的时候是相当惊艳的**。因为，之前业界的思路都是在“分析 binlog，并拆分到 worker”上。而 MariaDB 的这个策略，目标是“模拟主库的并行模式”。
+
+> **fzk注：这个组提交策略，很多中间件(如RocketMQ)同步flush落盘策略都会用到，但是能想出来用这个机制实现从节点同步数据时模拟主节点并发执行是真的相当NB。**
 
 但是此策略也有问题：它并没有实现“真正的模拟主库并发度”这个目标。在主库上，一组事务在 commit 的时候，下一组事务是同时处于“执行中”状态的。而这里的从库并发复制，必须在一组事务执行并提交完成后，coordinator 才能分配下一组。
 
@@ -3052,7 +3055,7 @@ CHANGE REPLICATION TO # 8.0.23以后
 
 MySQL5.6引入的GTID（Global Transaction Identifier）全局事务id，可以识别跟踪每个事务，它可解决主从故障迁移导致的数据不一致问题。**GTID协议可自动识别同步位点**。
 
-**GTID在事务提交时生成，是事务的唯一标识，格式为`GTID = server_uuid:transaction_id`。server_uuid是MySQL实例第一次启动时生成，transaction_id初始值为1，自增。**
+**GTID在<u>事务提交时</u>生成，是事务的唯一标识，格式为`GTID = server_uuid:transaction_id`。server_uuid是MySQL实例第一次启动时生成，transaction_id初始值为1，自增。**
 
 默认不开启GTID，开启需要配置参数`gtid_mode=ON`和`enforce_gtid_consistency=ON`。
 

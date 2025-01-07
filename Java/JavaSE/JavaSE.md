@@ -235,6 +235,10 @@ AQS同步队列实现原理：`CAS+LockSupport`，以int变量表示同步状态
 
 ## 队列同步器AQS
 
+AQS详解：https://javaguide.cn/java/concurrent/aqs.html
+
+AQS使用的CLH锁机制，可以学习一下。
+
 ```java
 public abstract class AbstractQueuedSynchronizer
     extends AbstractOwnableSynchronizer
@@ -2088,6 +2092,11 @@ public void acquire(int permits) throws InterruptedException {
 
 线程间交换数据
 
+## ThreadLocal
+
+ThreadLocalMap的key是弱引用，在无外部强引用情况下，会自动被GC为null，但其value是强引用，可能存在内存泄漏问题。
+
+https://javaguide.cn/java/concurrent/threadlocal.html#%E5%89%8D%E8%A8%80
 
 ## ThreadPoolExecutor
 
@@ -2567,6 +2576,36 @@ public List<Runnable> shutdownNow() {
 - largestPoolSize：线程池曾创建的最大线程数，根据该值可知线程池是否满过
 - **getPoolSize：线程池线程数量**
 - **getActiveCount：活动线程数**
+
+
+
+### 美团应用实践
+
+**动态化线程池**在美团应用实践：https://tech.meituan.com/2020/04/02/java-pooling-pratice-in-meituan.html
+
+监控线程池，将线程池的3个核心参数(corePoolSize、maximumPoolSize，workQueue)以配置中心动态调参，在处理突发情况时快速响应。
+
+动态设置两种工作队列：
+
+- SynchronousQueue同步队列：并行执行子任务，提高响应速度，没有什么任务应该被缓存下来，而是应该立即执行。
+- 有界阻塞队列(可调控容量)：并行执行大批次任务，提升吞吐量。使用队列去缓冲大批量的任务并配置队列容量，防止任务无限制堆积。美团自定义 `ResizableCapacityLinkedBlockIngQueue` 的队列（主要是`LinkedBlockingQueue`的 capacity 字段的 final 关键字修饰给去掉了，让它变为可变的）。
+
+监控：
+
+- 线程活跃度=core/max
+
+- 任务执行情况、最大任务执行时间、平均任务执行时间、95/99线等
+
+- 队列任务积压，负载阈值报警
+- Reject异常
+
+拒绝策略：线程池容量满后触发拒绝策略，可抛拒绝异常，外部兜底进行降级处理：
+
+- 用户查请求可降级，如返回稍后重试
+
+- 重要写操作，可提交线程自己执行，可持久化到DB再运行
+
+
 
 # 序列化与反序列化
 
@@ -4951,7 +4990,7 @@ java.xml.ws*                jdk.xml.dom
 java.xml.ws.annotation*     jdk.zipfs
 ```
 
-- AppClassLoader加载-cp，-mp指定的类
+- AppClassLoader加载-cp，-mp指定的类，负责加载当前应用 classpath 下的所有 jar 包和类。
 
 ```
 jdk.aot                     jdk.jdeps
@@ -5072,11 +5111,6 @@ static Class<?> findBootstrapClassOrNull(String name) {
 // BuiltinClassLoader.java
 protected Class<?> findClass(String cn) throws ClassNotFoundException {
    	// 省略检查
-    
-    
-    
-    
-    
     // find the candidate module for this class
     LoadedModule loadedModule = findLoadedModule(cn);
 
@@ -5216,6 +5250,8 @@ public static Class<?> forName(String className)
 
 ## 打破双亲委派模型
 
+打破双亲委派模型：https://javaguide.cn/java/jvm/classloader.html#%E6%89%93%E7%A0%B4%E5%8F%8C%E4%BA%B2%E5%A7%94%E6%B4%BE%E6%A8%A1%E5%9E%8B%E6%96%B9%E6%B3%95
+
 为什么要打破呢？
 
 - **JavaSPI机制**打破双亲委派
@@ -5224,7 +5260,12 @@ public static Class<?> forName(String className)
 
 如果某个核心包的类如ServiceLoader，它必然由启动类加载器加载，它若依赖第3方厂商的、部署在classpath的Service Provider类，这些类也将由启动类加载器进行加载，那肯定加载失败啊。
 
-为了解决这个问题，Java提供了线程上下文类加载器，默认是AppClassLoader。
+为了解决这个问题，Java提供了线程上下文类加载器，默认是AppClassLoader：
+
+```java
+Thread.currentThread().getContextClassLoader();// 获取上下文类加载器
+Thread.currentThread().setContextClassLoader();// 设置上下文类加载器
+```
 
 如Spring会将它的自定义类加载器设置为线程上下文加载器。
 
@@ -5906,6 +5947,20 @@ public class Logger {
 此目录记录一些自己写的小工具类。
 
 ## 监听中断信号-优雅关闭进程
+
+信号处理原理：https://blog.csdn.net/longyu_wlz/article/details/108990092
+
+信号模拟了硬件中断的处理流程。cpu 在每条指令执行完成后检测中断引脚，判断是否有中断到来，检测到有中断发生后打断当前执行的任务并保存现场然后跳转到中断服务程序开始运行。
+
+信号与硬件中断的处理过程有类似之处，却也有显著的区别，它的主要步骤如下：
+
+1. 向某个进程发送信号事件，信号事件对应的结构被挂入到目标进程的 sigpending 链表中，并置位信号状态掩码中对应的位
+2. 目标进程在从内核态返回用户态的过程中检测是否有挂起的信号，发现有挂起的信号则从链表中每次拿出一个信号事件进行处理直到链表为空
+3. 获取到一个信号事件后，根据信号类型分发到不同的逻辑中，主要有一下三种大类
+   - 对于设定为 SIG_IGN 状态的信号直接忽略
+   - 对于有通过 signal、sigaction 注册信号处理函数的信号，设定堆栈后跳转到用户态的信号处理函数开始执行
+   - 对于设定为 SIG_DFL、其它类型的信号执行杀死进程的操作
+4. 对于有注册信号处理函数的信号，内核在设定好堆栈后返回到用户态后直接从用户态信号处理函数开始执行，此函数返回后触发一个 sigreturn 系统调用后再次回到内核，然后恢复旧的堆栈继续运行。
 
 可以用于优雅的关闭整个进程。
 
@@ -9790,7 +9845,9 @@ java [options] -jar jarfile [args ...] # 最常用
 java [options] -m module[/mainclass] [args ...]
 ```
 
-### 虚拟机选项参数
+### JVM参数
+
+重要JVM参数总结：https://javaguide.cn/java/jvm/jvm-parameters-intro.html
 
 选项参数可以通过空格、冒号 (:) 或等号 (=) 与选项名称分隔，或者参数可以直接跟在选项后面(每个选项的确切语法有所不同)。
 
@@ -9803,7 +9860,7 @@ java命令的额外选项：`-Xxx?`
 | `-Xint` | 以解释模式运行，即关闭JIT(即时热编译优化)，所有字节码均由解释器执行。默认关闭。 |
 | `-Xms`  | 设置堆的最小和初始大小。如果不设置此选项，则初始大小将设置为老年代和年轻代分配的大小之和。附加字母 `m`或`M`表示兆字节，或 `g`或`G`表示千兆字节，比如`-Xms1g`、`-Xms256m`。同`-XX:InitialHeapSize`选项. |
 | `-Xmx`  | 设置堆最大大小。**一般服务器部署， `-Xms`和`-Xmx`通常设置为相同的值。**默认为系统内存1/4。同 `-XX:MaxHeapSize`选项。 |
-| `-Xmn`  | 同时设置分代收集器年轻代堆的初始大小和最大大小，`-Xmn256m`。建议G1收集器不要设置年轻代的大小，而其他收集器的年轻代的大小应达到堆空间的25%~50%。`-XX:NewSize`指定初始大小和 `-XX:MaxNewSize`指定最大大小。 |
+| `-Xmn`  | 同时设置分代收集器年轻代堆的初始大小和最大大小，`-Xmn256m`。**G1收集器不建议设置年轻代大小**，而其他收集器的年轻代的大小应达到堆空间的25%~50%。`-XX:NewSize`指定初始大小和 `-XX:MaxNewSize`指定最大大小。 |
 | `-Xss`  | 设置线程堆栈大小(单位KB)。同`-XX:ThreadStackSize`选项。比如`-Xss1k`表示线程堆栈MB。 |
 
 java命令高级垃圾收集选项：`-XX:xxxx=?`
@@ -9811,7 +9868,7 @@ java命令高级垃圾收集选项：`-XX:xxxx=?`
 | 选项                    | 说明                                                         |
 | ----------------------- | ------------------------------------------------------------ |
 | `-XX:ConcGCThreads=n`   | 并发标记阶段，并行GC线程数，默认为JVM 可用的 CPU 数量。      |
-| `-XX:ParallelGCThreads` | 设置停止世界 (STW) 工作线程的数量。默认值取决于 JVM 可用的 CPU 数量和所选的垃圾收集器。 |
+| `-XX:ParallelGCThreads` | STW期间，并行GC线程数。默认值取决于 JVM 可用的 CPU 数量和所选的垃圾收集器。 |
 | `-XX:MaxMetaspaceSize`  | 元空间最大容量。默认无限制。`-XX:MaxMetaspaceSize=256m`      |
 | `-XX:NewRatio`          | 新生代和老年代大小之间的比率，默认为2.                       |
 | `-XX:SurvivorRatio`     | 新生代的伊甸园空间大小和幸存者空间大小之间的比率，默认为8，即`eden:survivor1:survivor2=8:1:1`。 |
@@ -9821,14 +9878,14 @@ java命令高级垃圾收集选项：`-XX:xxxx=?`
 | `-XX:G1HeapRegionSize`  | G1收集器的region大小，值是 2 的幂，范围可以从 1 MB 到 32 MB。 |
 | `-XX:MaxGCPauseMillis`  | 设置最大 GC 暂停时间的目标(单位ms)。这是软目标，JVM会尽最大努力来实现它。G1收集器默认为200ms。其它收集器不使用暂停时间选项。 |
 | `-XX:G1NewSizePercent`  | G1的年轻代占堆最小百分比，默认5%。`-XX:G1MaxNewSizePercent`选项G1的年轻代占堆最大百分比，默认60% |
-| `-XX:+UseZGC`           | 启用ZGC收集器。低延迟垃圾收集器，以一定的吞吐量成本提供几毫秒的最大暂停时间。暂停时间与使用的堆大小无关。支持从 8MB 到 16TB 的堆大小。 |
+| `-XX:+UseZGC`           | 启用ZGC收集器。低延迟垃圾收集器，以一定的吞吐量成本提供10ms以内最大暂停时间。暂停时间与使用的堆大小无关。支持从 8MB 到 16TB 的堆大小。 |
 
 优化示例：
 
 1、缩短响应时间：
 
 ```shell
-java -XX:+UseG1GC -XX:MaxGCPauseMillis=100 ......
+java -XX:+UseG1GC -XX:MaxGCPauseMillis=10 ......
 ```
 
 2、保持 Java 堆较小并减少嵌入式应用程序的动态占用空间：
@@ -10083,10 +10140,10 @@ H是Humongous，存储**巨大对象**，即超过region一半大小的对象。
 
 G1提供Young GC和Mixed GC，而不提供Full GC：
 
-- Young GC：选定所有年轻代region。通过控制年轻代region个数，即年轻代大小，来控制young GC的时间开销。
+- Young GC：全程STW(Stop The World)。通过控制年轻代region个数，即年轻代大小，来控制young GC的时间开销。
 - Mixed GC：选定所有年轻代region和global concurrent marking统计的收集收益高的部分老年代region，在用户指定gc停顿时间内尽可能选择收益高的老年代region。
 
-若Mixed GC无法跟上内存分配速度，老年代满后导致FullGC，此时只能用Serial Old GC执行单线程FullGC收集整堆。由于G1的应用场合往往堆内存都比较大，所以Full GC的收集代价非常昂贵，应该避免Full GC的发生。
+若Mixed GC无法跟上内存分配速度，老年代满后导致FullGC，此时只能用**Serial Old GC执行单线程FullGC收集整堆**。由于G1的应用场合往往堆内存都比较大，所以单线程Full GC的收集代价非常昂贵，应避免Full GC的发生。
 
 ### ZGC
 
@@ -10143,6 +10200,8 @@ jdk14发行说明：https://www.oracle.com/java/technologies/javase/14-relnote-i
 - 准备禁止动态加载代理
 
 ### 虚拟线程
+
+虚拟线程实现原理：https://www.cnblogs.com/throwable/p/16758997.html#%E5%89%8D%E6%8F%90
 
 ```java
 public void testSleep() {

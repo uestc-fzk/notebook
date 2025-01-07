@@ -101,6 +101,16 @@ go-build-to-linux:  # 交叉编译，GOOS=linux这里必须挨着&&，不能出�
 	go build main.go
 ```
 
+# 内存对齐
+
+一个结构体，相同的字段，按不用排序就可能造成不同对齐，占用不同的内存空间。
+
+内存对齐对性能的影响：https://geektutu.com/post/hpg-struct-alignment.html
+
+
+
+
+
 # 并发
 
 ## goroutine
@@ -292,6 +302,98 @@ at last total is  264
 ```
 
 上诉例子通过1个缓冲区的chan实现了互斥，又以通道传递值实现了非共享内存式数据访问。这个chan通信和锁或者CAS原子操作谁性能高应该要具体看chan的底层实现了。 
+
+
+
+### 实现原理
+
+https://golang.design/go-questions/channel/recv/
+
+```go
+func testSendChan(c chan<- int) {
+	// 非阻塞发送
+	select {
+	case c <- 1:
+		fmt.Println("send success")
+	default:
+		fmt.Println("try send fail")
+	}
+	// 阻塞发送
+	c <- 1
+}
+```
+
+向channel发送数据：
+
+- 若channel关闭，直接panic
+- 非阻塞发送的快速检测失败：无缓冲channel且等待接收队列里没有 goroutine 或 有缓存channel但缓存数组已满，直接返回false
+- 加锁，检测channel关闭panic
+- 等待接受队列有goroutine(此时缓冲必为空)，**将元素直接从发送者的栈拷贝到接收者的栈**，唤醒接收者，并解锁返回
+- 存在缓存队列且未满，将元素放到对应位置，解锁返回
+- 走到这说明要阻塞等待了，若是非阻塞发送则直接解锁并返回false，阻塞发送则将此goroutine入发送者队列并挂起，解锁
+- 阻塞被唤醒后，继续流程：要么发送成功则返回，要么channel关闭抛panic
+
+```go
+func testRecvChan(c <-chan int) {
+	// 非阻塞接受
+	select {
+	case v, ok := <-c:
+		if !ok {
+			fmt.Println("channel is close") // 能走到这只能是channel关闭了
+		} else {
+			fmt.Printf("recv success %+v\n", v)
+		}
+	default:
+		fmt.Println("try recv fail") // 尝试非阻塞获取失败了
+	}
+	// 阻塞接受
+	if v, ok := <-c; !ok {
+		fmt.Println("channel is close")
+	} else {
+		fmt.Printf("recv success %+v\n", v)
+	}
+}
+```
+
+向channel接受数据：
+
+- 非阻塞接受的快速检测失败：无缓冲channel且发送者队列为空 或 有缓冲channel但缓冲buf为空，直接返回false
+- 加锁，若channel关闭且缓冲数组为空，解锁并返回零值和false
+- 若发送者队列不为空：取出头部发送者
+  - 无缓冲channel，直接从发送者的栈拷贝到接收者的栈（从 sender goroutine -> receiver goroutine）
+  - 有缓冲channel，获取循环buf头部元素，并将发送者的元素放到循环数组尾部
+  - 然后解锁并唤醒头部发送者，将其状态改成 “runnable”
+- 若缓冲buf有数据(无论channel是否关闭)，接受数据，解锁返回
+- 否则需要阻塞，将goroutine加入到接受者队列并挂起，解锁
+
+
+
+关闭channel流程：
+
+- 加锁，改状态c.closed=1
+- 取出接受者队列或发送者队列(肯定只存在一个)
+- 解锁，对接受者队列赋予类型零值，唤醒两个队列的goroutine
+- 发送者goroutine继续执行识别到channel关闭会panic
+- 接受者返回零值和false
+
+注意：关闭的channel若buf缓冲数组有值，后续接受者仍能拿到值，取完值后再取则返零值和false。
+
+
+
+注意点：**与Java阻塞队列的区别**
+
+1. 发送者发送数据时发现有接受者等待，将直接把元素给接受者，不用先拷贝到 channel 的 buf，**减少一次内存copy**
+
+2. 阻塞的goroutine恢复一定是已经发送成功或获取成功数据(由操作的goroutine直接完成)，此时它可直接返回。
+   而Java的阻塞队列，操作线程操作完缓冲数组后，只能唤醒等待线程，等待线程拿到锁后再操作缓冲数组。
+
+   go的channel的操作goroutine在锁持有期间会将等待goroutine的数据直接完成后再释放锁并唤醒goroutine，被唤醒的goroutine不用再去竞争锁而可以直接返回了。
+
+   相比之下，**至少减少了一半的锁竞争。**
+
+3. 阻塞时，Java是线程等待，而go的channel只是将goroutine标记为等待中，其机器线程M将从P中获取下个goroutine继续执行，**锁等待几乎没啥资源损耗，也不涉及线程切换**！
+
+
 
 ## select
 
@@ -680,6 +782,8 @@ func main() {
 
 ### GPM
 
+https://www.topgoer.com/%E5%B9%B6%E5%8F%91%E7%BC%96%E7%A8%8B/GMP%E5%8E%9F%E7%90%86%E4%B8%8E%E8%B0%83%E5%BA%A6.html
+
 Go中goroutine使用的是GMP调度模型。
 
 - G(Goroutine)：**对goroutine的描述的数据结构**，存放并发执行的代码入口地址、上下文、运行环境(关联的P和M)、运行栈等元信息；
@@ -708,7 +812,9 @@ m0是启动程序的主线程，m0负责执行初始化操纵和启动第1个g�
 
 > Go官方：sync包提供了基本的同步基元，如互斥锁。除了Once和WaitGroup类型，大部分都是适用于低水平程序线程，高水平的同步使用channel通信更好一些。
 
-## mutex
+## Mutex
+
+sync.Mutex 的演进历史和当前的实现机制：https://colobu.com/2018/12/18/dive-into-sync-mutex/
 
 相关资料：https://mp.weixin.qq.com/s?__biz=MzUzNTY5MzU2MA==&mid=2247484379&idx=1&sn=1a2abc6f639a34e62f3a5a0fcd774a71&chksm=fa80d24ccdf75b5a70d45168ad9e3a55dd258c1dd57147166a86062ee70d909ff1e5b0ba2bcb&token=183756123&lang=zh_CN#rd
 
@@ -718,6 +824,8 @@ type Mutex struct {
    sema  uint32	// 真正控制锁状态的信号量
 }
 ```
+
+### 饥饿模式
 
 状态state并不是互斥的，可以同时表示多个状态，**低3位用于表示状态，高位表示等待的goroutine数量**。
 
@@ -741,7 +849,11 @@ const (
 )
 ```
 
-其实正常和饥饿就是1个非公平与公平的关系。显然正常模式(非公平锁)性能更好。
+正常模式和饥饿模式就是Java里的ReentrantLock的非公平与公平模式一样，实现原理也差不多。
+
+不过Java的ReentrantLock是初始化时指定是否公平模式，而Go的Mutex是自动根据协程等待时间从而将锁从正常模式切换到饥饿模式。
+
+显然正常模式(非公平锁)性能更好，新来协程正在cpu上拿到锁可直接运行，而不用被锁住造成上下文切换了。
 
 ### Lock()
 
@@ -2218,7 +2330,43 @@ ok      command-line-arguments  5.750s
 
 
 
+# build标签
 
+https://geektutu.com/post/hpg-dead-code-elimination.html#2-3-%E8%B0%83%E8%AF%95-debug-%E6%A8%A1%E5%BC%8F
+
+debug.go：
+
+```go
+//go:build debug
+// 指定debug标签此文件参与编译: go build -tags debug -o main
+package main
+
+const debugMode = true
+```
+
+online.go：
+
+```go
+//go:build !debug
+
+// 不指定debug标签此文件参与编译: go build -o main
+package main
+
+const debugMode = false
+```
+
+main.go：
+
+```go
+func main() {
+	fmt.Println("Hello World")
+	if debugMode {
+		fmt.Println("debug mode enabled")
+	}
+}
+```
+
+通过指定build tags即可实现某个文件是否参与编译，如上面例子可编译线上包，也可指定标签编译出debug模式包。
 
 # other
 
@@ -2626,3 +2774,18 @@ go 1.14
 
 
 
+# 面试
+
+
+
+##  传值还是传指针
+
+https://geektutu.com/post/hpg-escape-analysis.html#3-1-%E4%BC%A0%E5%80%BC-VS-%E4%BC%A0%E6%8C%87%E9%92%88
+
+函数返回传值虽然会拷贝整个对象，但编译器优化将其栈上分配，随函数出入栈自动销毁。
+
+传指针虽可避免拷贝，但会导致内存分配逃逸到堆中，增加垃圾回收(GC)的负担。在对象频繁创建和删除的场景下，传递指针导致的 GC 开销可能会严重影响性能。
+
+**注意：堆内存分配导致gc开销远远大于栈空间分配与释放的开销。**
+
+一般情况下，对于需要修改原对象值，或占用内存较大的结构体，选择传指针。对于只读的小结构体，直接传值更好。
