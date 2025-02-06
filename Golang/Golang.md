@@ -60,7 +60,7 @@ go env -w GO111MODULE=on # 开启mod依赖管理
 
 go本身开发并不需要gcc环境，但是在很多情况下，go项目的初始化什么的会用到很多命令行操作，如果建一个Makefile来进行构建项目，会方便很多。
 
-因为需要的仅仅是GCC，所以先到mingw官网找到Windows的下载页面：https://sourceforge.net/projects/mingw-w64/files/
+因为需要的仅仅是GCC，所以先到mingw源代码托管网站找到Windows的下载页面：https://sourceforge.net/projects/mingw-w64/files/
 
 1、找到需要的GCC版本：
 
@@ -79,6 +79,9 @@ go本身开发并不需要gcc环境，但是在很多情况下，go项目的初�
 然后Makefile执行就不会报错啦：
 
 ![image-20220311173257749](Golang.assets/image-20220311173257749.png)
+
+5、如果上诉方式无法下载到编译好的二进制gcc包，则可以去github上直接下载：https://github.com/niXman/mingw-builds-binaries/releases
+可以选择这个版本下载：x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev1.7z，后续操作步骤相同。
 
 ## 交叉编译
 
