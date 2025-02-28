@@ -224,7 +224,7 @@ HTTP连接是无状态的，为了让HTTP会话有状态，必须让浏览器发
 
 当然服务器也可以存一些会话状态信息，称之为session，因为服务器无法单纯从HTTP连接直接找到其session信息，因此必须让请求带有1个唯一id来找到这个存储在服务器的会话信息。如Tomcat服务器会在cookie中设置sessionId来唯一对应其存在服务器的会话状态信息。
 
-> 注意：**浏览器必须存储会话状态信息**，而服务器会话状态存储是不必要的。
+> 注意：**浏览器必须存储会话状态信息**，而服务器会话状态存储是可选的。
 
 Cookie和session的区别？`多个无状态HTTP请求-->有会话状态的交互`
 
@@ -297,7 +297,7 @@ Set-Cookie: id=a3fWa; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Secure; HttpOnly
 - `/docsets`
 - `/fr/docs`
 
-5、`SameSite`，没看懂
+5、`SameSite`：**防止 CSRF 攻击**：将 `SameSite` 属性设置为 `Strict` 或 `Lax`，限制 cookie 在跨站请求中的发送。
 
 ## 跟踪与隐私
 
@@ -623,7 +623,7 @@ HTTP重定向作用：
 - 站点维护或停机期间的临时重定向
 - 永久重定向将在更改站点的 URL 后，保留现有的链接/书签、上传文件时表示进度的页面等。
 
-重定向由服务器在触发，设置`3xx`状态码和`Location`标头指定重定向URL，重定向对于用户是不可见的。
+重定向由服务器在触发，设置`3xx`状态码和响应头 [`Location`](https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Headers/Location) 指定重定向URL，重定向对于用户是不可见的。
 
 ![httpredirect](http.assets/httpredirect.png)
 

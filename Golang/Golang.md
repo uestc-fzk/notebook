@@ -22,7 +22,7 @@ Go全路线入门教程：https://www.topgoer.com/
 
 然后接下来是一些关于Go的环境配置：
 
-1、GOROOT配置，先将安装Go的目录配置为系统变量GOROOT，并将GOROOT\bin配置到环境变量path中
+1、GOROOT配置，先将安装Go的目录配置为系统变量GOROOT，~~并将GOROOT\bin配置到环境变量path中~~
 
 2、GOPATH配置：在go module模式下，设置的GOPATH路径将用于存放引入的外部依赖包，默认是在用户目录即C盘下，可以新建一个目录来专门放依赖包
 
@@ -34,7 +34,7 @@ go env -w GOPATH=D:\xxxx\mygopath
 
 - 再设置系统变量GOPATH
 
-3、在上面配置好GOPATH之后，需要将GOPATH\bin路劲配置到环境变量path中，因为下载的依赖中，里面的可执行命令将会下载到GOPATH\bin下，将其配置到环境变量中才能到处执行(这里主要是给其他工具如protobuf调用其他依赖包的命令)
+3、~~在上面配置好GOPATH之后，需要将GOPATH\bin路劲配置到环境变量path中，因为下载的依赖中，里面的可执行命令将会下载到GOPATH\bin下，将其配置到环境变量中才能到处执行(这里主要是给其他工具如protobuf调用其他依赖包的命令)~~
 
 4、GOPROXY的配置
 
