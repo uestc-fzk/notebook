@@ -62,19 +62,19 @@ go env -w GO111MODULE=on # 开启mod依赖管理
 
 go本身开发并不需要gcc环境，但是在很多情况下，go项目的初始化什么的会用到很多命令行操作，如果建一个Makefile来进行构建项目，会方便很多。
 
-因为需要的仅仅是GCC，所以先到mingw源代码托管网站找到Windows的下载页面：https://sourceforge.net/projects/mingw-w64/files/
+mingw-w64 项目是 gcc 的完整运行时环境，用于支持 Windows 64 位和 32 位操作系统原生的二进制文件。
 
-1、找到需要的GCC版本：
+因为需要的仅仅是GCC，所以先到mingw源代码托管网站找到Windows的下载页面：https://sourceforge.net/projects/mingw-w64/files，但是这个页面下载的是源代码需要再编译还挺麻烦。
 
-![gcc1](Golang.assets/gcc1.png)
+可以去github上直接下载编译好的二进制gcc包：https://github.com/niXman/mingw-builds-binaries/releases，可以选择这个版本下载：x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev1.7z。
 
-2、下载之后解压即可，再将其bin目录添加到系统变量path中，此时在命令行中输入`gcc -v`即可查看是否成功。
+1、下载之后解压即可，再将其bin目录添加到系统变量path中，此时在命令行中输入`gcc -v`即可查看是否成功。
 
-3、然后将bin目录中的mingw32-make.exe文件复制粘贴并重命名为make.exe，完成之后如下图：(这么做的目的是方便框架直接调用make命令)
+2、然后将bin目录中的mingw32-make.exe文件复制粘贴并重命名为make.exe，完成之后如下图：(这么做的目的是方便直接调用make命令)
 
 ![image-20220311172950626](Golang.assets/image-20220311172950626.png)
 
-4、接下来去GoLand配置make命令所在目录：
+3、接下来去GoLand配置make命令所在目录：
 
 ![image-20220311173220997](Golang.assets/image-20220311173220997.png)
 
@@ -82,8 +82,7 @@ go本身开发并不需要gcc环境，但是在很多情况下，go项目的初�
 
 ![image-20220311173257749](Golang.assets/image-20220311173257749.png)
 
-5、如果上诉方式无法下载到编译好的二进制gcc包，则可以去github上直接下载：https://github.com/niXman/mingw-builds-binaries/releases
-可以选择这个版本下载：x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev1.7z，后续操作步骤相同。
+
 
 ## 交叉编译
 

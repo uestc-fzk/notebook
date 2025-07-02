@@ -5718,6 +5718,19 @@ public class Logger {
     public static void error(String msg) {
         addMsg(LogLevel.ERROR, msg, 1);
     }
+    
+    public static void error(String msg, Throwable e) {
+        try (StringWriter sw = new StringWriter();
+             PrintWriter pw = new PrintWriter(sw)) {
+            e.printStackTrace(pw);
+            pw.close();
+            String string = sw.toString();
+            addMsg(LogLevel.ERROR, String.format("%s%n%s", msg, sw), 1);
+        } catch (IOException ex) {
+            addMsg(LogLevel.ERROR, msg, 1);
+            addMsg(LogLevel.ERROR, "serialize exception of error log " + ex, 0);
+        }
+    }
 
     public static void warning(String msg) {
         addMsg(LogLevel.WARNING, msg, 1);
@@ -5930,7 +5943,7 @@ public class Logger {
             file = FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
         } else {
             // 3.创建日志文件，并将创建时间写入第一行
-            Instant now = Instant.now();// 注意：测试发现目前不管是Instant还是LocalDateTime都只能精确到微秒
+            Instant now = Instant.now();// 注意：测试发现目前不管是Instant还是LocalDateTime都只能精确到微秒(windows)，linux可以到纳秒(nanos)
             file = FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
             // 创建时间: second.nano\n
             String createTime = String.format("%d.%d\n", now.getEpochSecond(), now.getNano());
