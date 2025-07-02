@@ -511,7 +511,7 @@ update user set name = "kuangshen", version = version + 1 where id = 2 and versi
 
    ![分页](./MyBatis-plus.assets/分页.png)
 
-## 动态SQL构建器
+## 动态SQL构建器(MyBatis)
 
 SQL语句构建器来自于MyBatis的API。
 
@@ -524,85 +524,14 @@ SQL语句构建器来自于MyBatis的API。
 | `@DeleteProvider` | `@Delete` |                     |
 | `@SelectProvider` | `@Select` | 这个是用的最多的    |
 
-以下例子展示了 `ProviderMethodResolver`（3.5.1 后可用）的默认实现使用方法：
+使用案例：
 
 ```java
-@SelectProvider(UserSqlProvider.class)
-List<User> getUsersByName(String name);
-
-// 在你的 provider 类中实现 ProviderMethodResolver 接口
-class UserSqlProvider implements ProviderMethodResolver {
-  // 默认实现中，会将映射器方法的调用解析到实现的同名方法上
-  public static String getUsersByName(final String name) {
-    return new SQL(){{
-      SELECT("*");
-      FROM("users");
-      if (name != null) {
-        WHERE("name like #{value} || '%'");
-      }
-      ORDER_BY("id");
-    }}.toString();
-  }
-}
-```
-
-点进去看一下ProviderMethodResolver类
-
-```java
-public interface ProviderMethodResolver {
-
-  /**
-   * Resolve an SQL provider method.
-   *
-   * <p> The default implementation return a method that matches following conditions.
-   * <ul>
-   *   <li>Method name matches with mapper method</li>
-   *   <li>Return type matches the {@link CharSequence}({@link String}, {@link StringBuilder}, etc...)</li>
-   * </ul>
-   * If matched method is zero or multiple, it throws a {@link BuilderException}.
-   *
-   * @param context a context for SQL provider
-   * @return an SQL provider method
-   * @throws BuilderException Throws when cannot resolve a target method
-   */
-  default Method resolveMethod(ProviderContext context) {
-    List<Method> sameNameMethods = Arrays.stream(getClass().getMethods())
-        .filter(m -> m.getName().equals(context.getMapperMethod().getName()))
-        .collect(Collectors.toList());
-    if (sameNameMethods.isEmpty()) {
-      throw new BuilderException("Cannot resolve the provider method because '"
-          + context.getMapperMethod().getName() + "' not found in SqlProvider '" + getClass().getName() + "'.");
-    }
-    List<Method> targetMethods = sameNameMethods.stream()
-        .filter(m -> CharSequence.class.isAssignableFrom(m.getReturnType()))
-        .collect(Collectors.toList());
-    if (targetMethods.size() == 1) {
-      return targetMethods.get(0);
-    }
-    if (targetMethods.isEmpty()) {
-      throw new BuilderException("Cannot resolve the provider method because '"
-          + context.getMapperMethod().getName() + "' does not return the CharSequence or its subclass in SqlProvider '"
-          + getClass().getName() + "'.");
-    } else {
-      throw new BuilderException("Cannot resolve the provider method because '"
-          + context.getMapperMethod().getName() + "' is found multiple in SqlProvider '" + getClass().getName() + "'.");
-    }
-  }
-
-}
-```
-
-根据注释可以知道它匹配的原则是：**同名方法且相同返回类型**。即**参数是被忽略的**。所以用它构建动态SQL，构建类中尽量就不要出现同名方法了。
-
-其实如果非得出现同名方法的话，就不要用它的方法解析器了。可以这样：但是没必要
-
-```java
+// 指定哪个类的哪个方法提供sql
 @SelectProvider(type = UserSqlBuilder.class, method = "buildGetUsersByName")
-List<User> getUsersByName(
-    @Param("name") String name, @Param("orderByColumn") String orderByColumn);
+List<User> getUsersByName(@Param("name") String name, @Param("orderByColumn") String orderByColumn);
 
-class UserSqlBuilder {
-
+class UserSqlBuilder{
   // 如果不使用 @Param，就应该定义与 mapper 方法相同的参数
   public static String buildGetUsersByName(
       final String name, final String orderByColumn) {
@@ -625,6 +554,56 @@ class UserSqlBuilder {
   }
 }
 ```
+
+以下例子展示了 `ProviderMethodResolver`（3.5.1 后可用）的默认实现使用方法：
+
+```java
+// 可以仅指定sql提供类，而不指定sql提供方法
+@SelectProvider(type=UserSqlProvider.class)
+List<User> getUsersByName(String name);
+
+// 实现了ProviderMethodResolver的sql提供类，可以不指定方法，由其自动解析
+// 默认是解析到同名方法，即参数是被忽略的
+// 如果要自定义方法映射，需重写ProviderMethodResolver.resolveMethod方法
+class UserSqlProvider implements ProviderMethodResolver {
+  // 默认实现中，会将映射器方法的调用解析到实现的同名方法上
+  public static String getUsersByName(final String name) {
+    return new SQL(){{
+      SELECT("*");
+      FROM("users");
+      if (name != null) {
+        WHERE("name like #{value} || '%'");
+      }
+      ORDER_BY("id");
+    }}.toString();
+  }
+}
+```
+
+点进去看一下ProviderMethodResolver类：
+
+```java
+public interface ProviderMethodResolver {
+  default Method resolveMethod(ProviderContext context) {
+    List<Method> sameNameMethods = Arrays.stream(getClass().getMethods())
+        .filter(m -> m.getName().equals(context.getMapperMethod().getName()))
+        .collect(Collectors.toList());
+    if (sameNameMethods.isEmpty()) {
+      throw new BuilderException("Cannot resolve the provider method because '"
+          + context.getMapperMethod().getName() + "' not found in SqlProvider '" + getClass().getName() + "'.");
+    }
+    List<Method> targetMethods = sameNameMethods.stream()
+        .filter(m -> CharSequence.class.isAssignableFrom(m.getReturnType()))
+        .collect(Collectors.toList());
+    if (targetMethods.size() == 1) {
+      return targetMethods.get(0);
+    }
+    // 省略异常抛出
+  }
+}
+```
+
+如果非得出现同名方法的话，就必须实现ProviderMethodResolver接口并重写其resolveMethod方法，自定义实现方法映射。
 
 ### SQL语句构建器
 

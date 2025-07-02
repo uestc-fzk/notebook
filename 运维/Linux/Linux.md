@@ -2473,7 +2473,8 @@ firewall-cmd --zone=public --list-ports
 
 ```shell
 #!/bin/bash
-function addEnvArg(){
+# 幂等的添加环境变量的函数
+function addEnvArg(){ 
     # 遍历所有参数
     for arg in $@
     do 
@@ -2517,7 +2518,7 @@ jvm_options="-Xmx2g -Xms128m -Xss512k -XX:+UseG1GC -XX:MaxGCPauseMillis=10 -XX:+
 jvmLogDir="jvm"
 if [ ! -e ${jvmLogDir} ]
 then
-    mkdir -m 664 ${jvmLogDir}
+  mkdir -m 664 ${jvmLogDir}
 fi
 
 pid=`ps -ef | grep "${jarfile}" | grep -v grep| awk '{print $2}'` # 现存服务的pid
@@ -2525,39 +2526,39 @@ function start_func(){
 	echo "即将启动服务: ${jarfile}"
 	if [ -z "${pid}" ] # 检查字符串是否为空
 	then
-        echo "nohup java ${jvm_options} -jar ${jarfile} ${app_args} &"
-        nohup java ${jvm_options} -jar ${jarfile} ${app_args} &
-        echo "服务启动成功: ${jarfile}"
-    else
-    	echo "服务早已启动: pid: ${pid}"
-    fi
-    ps -ef | grep ${jarfile} | grep -v "grep"
+    echo "nohup java ${jvm_options} -jar ${jarfile} ${app_args} &"
+    nohup java ${jvm_options} -jar ${jarfile} ${app_args} &
+    echo "服务启动成功: ${jarfile}"
+  else
+    echo "服务早已启动: pid: ${pid}"
+  fi
+  ps -ef | grep ${jarfile} | grep -v "grep"
 }
 function stop_func(){
 	echo "即将关闭服务: ${jarfile}"
-    if [ ! -z "${pid}" ] # 检查字符串是否为空
-    then 
-        echo "关闭服务: ${jarfile}, pid: ${pid}"
-        kill ${pid}
-        echo "成功关闭, pid: ${pid}"
-        pid=""
-    else
-    	echo "服务不存在: ${jarfile}"
-    fi
+  if [ ! -z "${pid}" ] # 检查字符串是否为空
+  then
+    echo "关闭服务: ${jarfile}, pid: ${pid}"
+    kill ${pid}
+    echo "成功关闭, pid: ${pid}"
+    pid=""
+  else
+    echo "服务不存在: ${jarfile}"
+  fi
 }
 
 if [ $1 = "start" ]
 then
-    start_func
+  start_func
 elif [ $1 = "stop" ]
 then
 	stop_func
 elif [ $1 = "restart" ]
-then 
-    echo "即将重启服务: ${jarfile}"
+then
+  echo "即将重启服务: ${jarfile}"
 	stop_func
-    sleep 5s
-    start_func
+  sleep 5s
+  start_func
 else
 	echo "非法参数"
 	exit 1
@@ -2651,7 +2652,7 @@ fi      # 这个fi必须得有
       ```shell
       shell> mysql -uroot -p
       # 输入密码之后
-      mysql> ALTER USER 'root'@'localhost' IDENTIFIED BY '!MySQL123456';
+      mysql> ALTER USER 'root'@'localhost' IDENTIFIED BY '123456';
       ```
 
       > 注意：[`validate_password`](https://dev.mysql.com/doc/refman/8.0/en/validate-password.html) 默认安装。执行的默认密码策略`validate_password`要求密码至少包含1个大写字母、1个小写字母、1个数字和1个特殊字符，并且密码总长度至少为8个字符。
@@ -2686,7 +2687,7 @@ fi      # 这个fi必须得有
            grant all on *.* to 'root'@'%' identified by '!MySQL123456';
            -- 如果不行试试这个
            grant  all  privileges  on *.* to root@'%';
-               或者指定IP地址
+           -- 或者指定IP地址
            grant all on *.* to 'root'@'192.168.3.63' identified by '!MySQL123456';
        ```
        
@@ -2775,21 +2776,19 @@ ssh远程免密登录：
 1、在本机`用户/.ssh`目录下看看有没有公/私钥文件，如果没有可以生成：
 
 ```shell
-ssh-keygen -t rsa -C "yourname@computername.com"
+ssh-keygen -t ed25519 -C "your_email@example.com"
 ```
 
 注意：第一个输入会让你输入秘钥存储文件名，建议默认。
 
-2、将公钥文件id_rsa.pub内容写入到服务器的`用户/.ssh/authorized_keys`文件末尾，不存在需要先创建该文件。
+2、将公钥文件id_ed25519.pub内容写入到服务器的`用户/.ssh/authorized_keys`文件末尾，不存在需要先创建该文件。
 
 3、设置文件权限：Linux强制要求.ssh目录权限为700，authorized_keys文件权限为600
 
 4、此时已经可以免密登录：-i指定私钥文件，这样就能免密登录了
 
 ```shell
-PS C:\Users\zhike.feng\.ssh> ssh root@124.223.192.8 -i  C:\Users\zhike.feng\.ssh\fzk-computer 
-
-[root@k8s-master ~]#
+PS C:\Users\zhike.feng\.ssh> ssh root@124.223.192.8 -i  C:\Users\zhike.feng\.ssh\id_ed25519
 ```
 
 5、上面这种每次指定私钥文件还是有点麻烦，可以在ssh配置文件中指定：
@@ -2801,15 +2800,13 @@ PS C:\Users\zhike.feng\.ssh> ssh root@124.223.192.8 -i  C:\Users\zhike.feng\.ssh
 Host fzk-tx.top # 主机别名，使用该别名可直接登录
     HostName 124.223.192.8 # 服务器地址
     User root # 用户
-    IdentityFile C:\Users\zhike.feng\.ssh\fzk-computer # 私钥文件
+    IdentityFile C:\Users\zhike.feng\.ssh\id_ed25519 # 私钥文件
 ```
 
 此时登录方式为：
 
 ```shell
 PS C:\Users\zhike.feng\.ssh> ssh fzk-tx.top
-
-[root@k8s-master ~]#
 ```
 
 

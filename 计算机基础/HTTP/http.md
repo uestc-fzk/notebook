@@ -271,7 +271,7 @@ Set-Cookie: name1=val1; Expires=Wed, 21 Oct 2015 07:28:00 GMT;
 ## 属性
 
 ```http
-Set-Cookie: id=a3fWa; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Secure; HttpOnly
+Set-Cookie: name=tom; Max-Age=86400; Expires=Sat, 01 Mar 2025 15:40:45 GMT; Domain=baidu.com; Path=/fs; Secure; HttpOnly
 ```
 
 1、`Secure`属性：表示只能cookie只能在HTTPS协议下发给服务器，可防止被中间人访问。
@@ -284,18 +284,7 @@ Set-Cookie: id=a3fWa; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Secure; HttpOnly
 
 如果设置 `Domain=mozilla.org`，则 Cookie 也包含在子域名中（如 `developer.mozilla.org`），当子域需要共享有关用户的信息时，**如单点登录可能有用**。
 
-4、`Path`属性：指定URL路径，只有满足该前缀路径的请求才会自动携带cookie。如`Path=/docs`，则以下地址都会匹配：
-
-- `/docs`
-- `/docs/`
-- `/docs/Web/`
-- `/docs/Web/HTTP`
-
-但是这些请求路径不会匹配以下地址：
-
-- `/`
-- `/docsets`
-- `/fr/docs`
+4、`Path`属性：指定URL路径，只有满足该前缀路径的请求才会自动携带cookie。
 
 5、`SameSite`：**防止 CSRF 攻击**：将 `SameSite` 属性设置为 `Strict` 或 `Lax`，限制 cookie 在跨站请求中的发送。
 
@@ -312,14 +301,6 @@ Firefox 默认情况下会阻止已知包含跟踪器的第三方 cookie。第�
 服务器设置第3方cookie时应该设置`SameSite`属性以指定是否可以将 cookie 发送到第三方站点。
 
 注意法律规定允许用户在不接收 Cookie 的情况下使用大部分服务。
-
-## 浏览器存储方式
-
-Cookie本身是浏览器存储数据的一种方式，可由服务器设置，浏览器自动存储并每次请求自动发送。
-
-其它存储方式如localstorage或sessionstorage存储限制比 cookie 大，并且永远不会发送到服务器。
-
-可以使用 [IndexedDB API](https://developer.mozilla.org/zh-CN/docs/Web/API/IndexedDB_API) 或基于它构建的库来存储更多结构化的数据。
 
 # 跨域资源共享(CORS)
 
@@ -410,7 +391,7 @@ Cache-Control: max-age=3600
 
 `Last-Modified`表明资源上次修改时间，浏览器在缓存过期后，会发出条件请求刷新缓存时间，将此响应头作为请求头发给服务器。
 
-## 条件请求
+## 条件GET请求
 
 更多细节：https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Conditional_requests
 

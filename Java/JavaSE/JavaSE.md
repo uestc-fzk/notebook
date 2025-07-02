@@ -2599,7 +2599,7 @@ public List<Runnable> shutdownNow() {
 - 队列任务积压，负载阈值报警
 - Reject异常
 
-拒绝策略：线程池容量满后触发拒绝策略，可抛拒绝异常，外部兜底进行降级处理：
+**拒绝策略：线程池容量满后触发拒绝策略，可抛拒绝异常，外部兜底进行降级处理：**
 
 - 用户查请求可降级，如返回稍后重试
 
@@ -5553,14 +5553,17 @@ public class LogRecord {
     public final String msg;
     public final LocalDateTime time;
     public final StackTraceElement caller;
-	public boolean pureMsg = false;// 纯消息，不打印时间/caller等信息
-    
+
+    public boolean pureMsg = false;// 纯消息，不打印时间/caller等信息
+
+    /**
+     * @param callDepth 2是此方法调用者
+     */
     public LogRecord(LogLevel level, String msg, LocalDateTime time, int callDepth) {
         this.level = level;
         this.msg = msg;
         this.time = time;
-        StackTraceElement[] stackTraces = Thread.currentThread().getStackTrace();
-        // 应该是3
+        StackTraceElement[] stackTraces = Thread.currentThread().getStackTrace();// depth=1是这里
         this.caller = stackTraces[callDepth];
     }
 }
@@ -5580,10 +5583,10 @@ public class LogRecord {
  * @datetime 2023-02-09 21:35:30
  */
 public class LogConf {
-    private String logPath;
-    private String logLevel;
-    private int logQueueSize;// 日志队列大小，建议1024
-    private long logFileSize;// 日志文件大小，建议16MB，即16*1024*1024
+    private String logPath = "logs/info.log";
+    private String logLevel = "info";
+    private int logQueueSize = 1024;// 日志队列大小，建议1024
+    private long logFileSize = 16 * 1024 * 1024;// 日志文件大小，建议16MB，即16*1024*1024
 
 
     public String getLogPath() {
@@ -5628,15 +5631,6 @@ public class LogConf {
                 '}';
     }
 
-    public static LogConf getDefaultLogConf() {
-        LogConf conf = new LogConf();
-        conf.setLogLevel("info");
-        conf.setLogPath("logs/info.log");
-        conf.setLogQueueSize(1024);
-        conf.setLogFileSize(16 * 1024 * 1024);// 16MB
-        return conf;
-    }
-
     /**
      * 自动探测日志配置文件并解析，优先级如下：
      * 1.工作目录下: conf/log.properties
@@ -5650,7 +5644,7 @@ public class LogConf {
     public static LogConf detectLogConf() throws IOException {
         // 1.优先加载当前工作目录下 conf/log.properties
         System.out.println("日志配置探测：工作路径下conf/log.properties");
-        if (Files.exists(Path.of("conf/log.properties"))) {
+        if (Files.exists(Paths.get("conf/log.properties"))) {
             try (FileReader fileReader = new FileReader("conf/log.properties")) {
                 System.out.println("日志配置探测成功：读取工作目录下conf/log.properties");
                 Properties p = new Properties();
@@ -5674,7 +5668,7 @@ public class LogConf {
         }
 
         // 3.返回默认配置
-        LogConf logConf = getDefaultLogConf();
+        LogConf logConf = new LogConf();
         System.err.println("未探测到日志配置文件: 类路劲下log.properties或当前工作目录下conf/log.properties");
         System.out.println("日志默认配置: " + logConf);
         return logConf;
@@ -5687,10 +5681,10 @@ public class LogConf {
         logConf.logQueueSize = Integer.parseInt(p.getProperty("logQueueSize", "0"));
         logConf.logFileSize = Integer.parseInt(p.getProperty("logFileSize", "0"));
         // 检查
-        if (logConf.logPath == null || logConf.logPath.length() == 0) {
+        if (logConf.logPath == null || logConf.logPath.isEmpty()) {
             throw new RuntimeException("缺少属性logPath");
         }
-        if (logConf.logLevel == null || logConf.logLevel.length() == 0) {
+        if (logConf.logLevel == null || logConf.logLevel.isEmpty()) {
             throw new RuntimeException("缺少属性logLevel");
         }
         if (logConf.logQueueSize < 128) {
@@ -5718,39 +5712,42 @@ public class LogConf {
 @SuppressWarnings("unused")
 public class Logger {
     public static void fatal(String msg) {
-        addMsg(LogLevel.FATAL, msg);
+        addMsg(LogLevel.FATAL, msg, 1);
     }
 
     public static void error(String msg) {
-        addMsg(LogLevel.ERROR, msg);
+        addMsg(LogLevel.ERROR, msg, 1);
     }
 
     public static void warning(String msg) {
-        addMsg(LogLevel.WARNING, msg);
+        addMsg(LogLevel.WARNING, msg, 1);
     }
 
     public static void info(String msg) {
-        addMsg(LogLevel.INFO, msg);
+        addMsg(LogLevel.INFO, msg, 1);
     }
 
     public static void debug(String msg) {
-        addMsg(LogLevel.DEBUG, msg);
+        addMsg(LogLevel.DEBUG, msg, 1);
     }
 
     public static void fine(String msg) {
-        addMsg(LogLevel.FINE, msg);
+        addMsg(LogLevel.FINE, msg, 1);
     }
 
     public static void println(String fmt) {
-        LogRecord record = new LogRecord(globalLevel, fmt, LocalDateTime.now(), 4);
+        LogRecord record = new LogRecord(globalLevel, fmt, LocalDateTime.now(), 3 + 1);
         record.pureMsg = true;// 纯消息日志
         addMsg(record);
     }
 
-    private static void addMsg(LogLevel level, String msg) {
-        // 低于全局日志级别的日志忽略
-        if (level.lower(globalLevel)) return;
-        LogRecord logRecord = new LogRecord(level, msg, LocalDateTime.now(), 4);
+    /**
+     * @param level 低于全局logLevel将忽略
+     * @param depth 0是此方法调用者
+     */
+    public static void addMsg(LogLevel level, String msg, int depth) {
+        if (level.lower(globalLevel)) return; // 低于全局日志级别的日志忽略
+        LogRecord logRecord = new LogRecord(level, msg, LocalDateTime.now(), 3 + depth);
         addMsg(logRecord);
     }
 
@@ -5778,7 +5775,7 @@ public class Logger {
     private static volatile ArrayList<LogRecord> queueRead;// flush线程从此队列处理日志
     private static final ReentrantLock lock = new ReentrantLock();
     private static final Condition emptyCond = lock.newCondition();
-    private static final FlushThread flushTread = new FlushThread();
+    private static final FlushThread flushTread = new FlushThread("logger-flush");
     private static FileChannel file;
 
     static {
@@ -5811,6 +5808,10 @@ public class Logger {
     private static class FlushThread extends Thread {
         public volatile boolean isAwake = false;// 刷新线程活跃状态：避免冗余唤醒
         private static final DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+        public FlushThread(String name) {
+            super(name);
+        }
 
         // 轮转队列: 组提交
         private void turnQueue() {
@@ -5874,14 +5875,14 @@ public class Logger {
                 } else {
                     content = record.msg + "\n";
                 }
-                file.write(ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8)));
+                file.write(ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8)));// 写到os cache page
                 // 控制台染色
                 if (record.level.higher(LogLevel.INFO))
                     System.out.printf("%s%s%s", ConsoleColors.RED, content, ConsoleColors.RESET);
                 else System.out.print(content);
             }
             queueRead.clear();// 清空队列
-            // 2.落盘
+            // 2.落盘? 日志似乎没有必要保证必须落盘? 在这里其实不落盘只要os不崩溃就不会丢失日志数据了
             file.force(true);
             // 3.切割日志
             if (file.size() >= globalLogConf.getLogFileSize()) {
@@ -5901,7 +5902,7 @@ public class Logger {
         Path origin = Path.of(globalLogConf.getLogPath());
         Path target = null;
         // 注意要关闭资源
-        try (BufferedReader bufferedReader = new BufferedReader(new FileReader(origin.toFile()));) {
+        try (BufferedReader bufferedReader = new BufferedReader(new FileReader(origin.toFile()))) {
             String s = bufferedReader.readLine();
             String[] splits = s.split("\\.");
             if (splits.length != 2) throw new RuntimeException("写入文件第一行的时间错误：" + s);
@@ -5924,13 +5925,13 @@ public class Logger {
         if (Files.notExists(path.getParent())) {
             Files.createDirectories(path.getParent());
         }
-        // 2.日志文件若存在，则切割
+        // 2.日志文件若存在，直接复用
         if (Files.exists(path)) {
-            splitLogFile();
+            file = FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
         } else {
             // 3.创建日志文件，并将创建时间写入第一行
             Instant now = Instant.now();// 注意：测试发现目前不管是Instant还是LocalDateTime都只能精确到微秒
-            file = FileChannel.open(path, Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+            file = FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
             // 创建时间: second.nano\n
             String createTime = String.format("%d.%d\n", now.getEpochSecond(), now.getNano());
             file.write(ByteBuffer.wrap(createTime.getBytes(StandardCharsets.UTF_8)));
@@ -5962,33 +5963,58 @@ public class Logger {
    - 对于设定为 SIG_DFL、其它类型的信号执行杀死进程的操作
 4. 对于有注册信号处理函数的信号，内核在设定好堆栈后返回到用户态后直接从用户态信号处理函数开始执行，此函数返回后触发一个 sigreturn 系统调用后再次回到内核，然后恢复旧的堆栈继续运行。
 
-可以用于优雅的关闭整个进程。
+### 信号监听机制
+
+sun.misc.Signal可以监听部分信号如SIGHUP(kill -1)和SIGINT(kill -2)等。
 
 ```java
 ArrayBlockingQueue<String> queue = new ArrayBlockingQueue<>(1);
-// 监听`ctrl+c`中断信号
+// 监听SIGINT中断信号，一般是`ctrl+c`发出kill -2
 Signal.handle(new Signal("INT"), (Signal sig) -> {
     System.out.println("监听到中断信号: name: " + sig.getName() + ", number: " + sig.getNumber());
-    try {
-        queue.put(sig.toString());
-    } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-    }
+    queue.put(sig.toString());
 });
-// 监听`kill`信号，注意无法捕获`kill -9`信号
+
+// 注意：这种方式无法捕获 SIGTERM 和 SIGKILL 信号
+// SIGTERM：kill -15 或默认 kill，请求进程终止
+// SIGKILL：kill -9，强制终止进程
 Signal.handle(new Signal("TERM"), (Signal sig) -> {
     System.out.println("监听到kill信号: name: " + sig.getName() + ", number: " + sig.getNumber());
-    try {
-        queue.put(sig.toString());
-    } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-    }
+    queue.put(sig.toString());
 });
+
 System.out.println("开始等待信号");
 queue.take();
 System.out.println("线程结束");
 System.exit(0);// 结束整个虚拟机进程     
 ```
+
+### jvm关闭Hook
+
+jvm提供了关闭挂钩，一般用于优雅关闭服务器资源：
+
+- 在虚拟机的生命周期中，关闭钩子在微妙的时间内运行，因此应进行**防御性编码**
+- 关闭挂钩应快速完成工作。当由于用户注销或系统关闭而终止虚拟机时，基础操作系统可能**只允许有限的时间关闭和退出**
+
+```java
+// 通过 Shutdown Hook 监听信号：SIGTERM(kill -15/默认)、SIGINT(kill -2 / ctrl+c)
+// SIGKILL信号即kill -9无法监听
+Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+    Logger.info("shutdown hook called, will shutdown the server");
+    // 等10s强制关闭
+    new Timer("forceShutdownWait10s", true).schedule(new TimerTask() {
+        public void run() {
+            Logger.warning("wait for netty server shutdown 10s, force shutdown due to timeout");
+            System.exit(0);// 结束虚拟机进程
+        }
+    }, 10 * 1000L);
+    srv.close();// 关闭服务器
+}));
+```
+
+
+
+
 
 ## 加密算法
 
@@ -6060,25 +6086,65 @@ public class AES {
 
 ## 摘要算法
 
-### MD5
+摘要算法又称哈希算法、散列算法，可用于验证数据完整性，常见的有MD系列、SHA系列。
+
+### Hmac消息认证码
 
 ```java
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
+import javax.crypto.Mac;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+
 /**
- * 使用jdk自带的md5算法
- * <a href="https://www.cnblogs.com/hihtml5/p/6064999.html">MD5案例</a>
+ * HMAC（Hash-based Message Authentication Code，基于哈希的消息认证码）是一种用于验证消息完整性和真实性的加密技术。
+ * 它结合了哈希函数（如 SHA-256、MD5 等）和一个密钥，生成一个固定长度的摘要（即 HMAC 值）。
+ * <p>
+ * 摘要/哈希算法可用于数据完整性校验(如文件传输)
+ * hmac适用于验证消息真实性和防篡改，可用于JWT。
+ * 比如HmacMD5和MD5的区别就是多了个秘钥(加盐)
  *
  * @author fzk
  * @datetime 2023-02-11 01:34:33
  */
-public class MD5 {
+public class MyHmac {
+    public static final int MD5_Str_Len = 32;// md5字符串长度32
+
+    // md5哈希算法
     public static String md5(byte[] bytes) {
         // 生成一个MD5加密计算摘要
-        MessageDigest md = getMD5Digester();
+        MessageDigest md = getDigester("MD5");
         // 计算md5函数
         md.update(bytes);
         // digest()最后确定返回md5 hash值，返回值为32位字符串。因为md5 hash值是16进制的hex值，实际上就是16位的字符
         // 将1个字节转换为2个16进制的字符, 0--e
         return HexFormat.of().formatHex(md.digest());
+    }
+
+    /**
+     * 基于md5哈希算法的哈希验证码，需引入 apaches commons-codec 库
+     *
+     * @param data 待取摘要值的数据
+     * @param salt key/加盐
+     * @return 32位小写字符hex码的md5值
+     */
+    public static String hmacMd5(byte[] data, String salt) {
+        return new HmacUtils(HmacAlgorithms.HMAC_MD5, salt).hmacHex(data);
+    }
+
+    public static String hmac256(byte[] data, String salt) {
+        Mac mac = HmacUtils.getInitializedMac(HmacAlgorithms.HMAC_SHA_256, salt.getBytes());
+        mac.update(data);
+        byte[] bytes = mac.doFinal();
+        return HexFormat.of().formatHex(bytes);
+//        return new HmacUtils(HmacAlgorithms.HMAC_SHA_256, salt).hmacHex(data);  // 一样的
     }
 
     /**
@@ -6091,7 +6157,7 @@ public class MD5 {
      */
     public static String getFileMD5(Path path) throws IOException {
         // 生成一个MD5加密计算摘要
-        MessageDigest md = getMD5Digester();
+        MessageDigest md = getDigester("MD5");
         try (FileChannel file = FileChannel.open(path, StandardOpenOption.READ)) {
             ByteBuffer buf = ByteBuffer.allocateDirect(4096);
             while (file.read(buf) != -1) {
@@ -6105,10 +6171,15 @@ public class MD5 {
         }
     }
 
-    private static MessageDigest getMD5Digester() {
-        // 生成一个MD5加密计算摘要
+    /**
+     * 摘要/哈希算法，由jdk提供
+     *
+     * @param algorithm MD5、SHA-1、SHA-256
+     */
+    private static MessageDigest getDigester(String algorithm) {
+        // 生成一个摘要计算器
         try {
-            return MessageDigest.getInstance("MD5");
+            return MessageDigest.getInstance(algorithm);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         }
@@ -10271,3 +10342,4 @@ JDK中绝大多数阻塞操作都会卸载虚拟线程，释放其载体和底�
 - synchronized阻塞
 - 执行native方法或外部函数
 
+****

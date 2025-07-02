@@ -212,8 +212,8 @@ WHERE MATCH (article_title) AGAINST ('~应届生 +阿里 哈佛*' IN BOOLEAN MOD
 
 ## 时间
 
-- DATE：范围`'1000-01-01'到'9999-12-31'`，用于生日字段
-- DATETIME[(fsp)]：范围是 `'1000-01-01 00:00:00.000000'`到 `'9999-12-31 23:59:59.999999'`。fsp指定小数秒精度，默认0。
+- DATE：范围`'1000-01-01'到'9999-12-31'`，用于生日字段，建议默认值为current_date()或`'1970-01-01’`。
+- DATETIME[(fsp)]：范围是 `'1000-01-01 00:00:00.000000'`到 `'9999-12-31 23:59:59.999999'`。fsp指定小数秒精度，默认0。建议默认值设置为current_timestamp()或`'1970-01-01 08:00:01'`。
 - TIMESTAMP[(fsp)]：时间搓，范围是`'1970-01-01 00:00:01.000000'`UTC 到`'2038-01-19 03:14:07.999999'`UTC。fsp指定小数秒精度，默认0.
   注意：MySQL 将`TIMESTAMP`值从当前时区转换为 UTC 进行存储，然后从 UTC 转换回当前时区以进行检索。如果有海外机房，一定要注意时区问题，最好在连接时给定当地时区。
 
@@ -1021,7 +1021,7 @@ log_queries_not_using_indexes=on
 log_throttle_queries_not_using_indexes=10
 ```
 
-
+生产环境慢查可配100ms。
 
 # 备份与恢复
 
@@ -1092,7 +1092,7 @@ mysqldump db_name [tbl_name ...] # 备份某个数据库的某些表
 1、全量逻辑备份例子：
 
 ```sql
-mysqldump --single-transaction --flush-logs --master-data=2 \
+mysqldump -u'your_user' -p'your_password' --single-transaction --flush-logs --master-data=2 \
          --all-databases > demo1.sql
 ```
 
@@ -1108,7 +1108,7 @@ mysqldump命令进行全量备份时会**先读取此时binlog坐标**：此备�
 
 周二3点逻辑全量备份为demo2.sql，新binlog为demo-bin.000003，将demo2.sql和demo-bin.000002都保存到安全地方(如磁带或光盘)。
 
-可以定期清理不需要的binlog以释放空间。
+**可以定期清理不需要的binlog以释放空间。**
 
 2、复制数据库例子：
 
@@ -1206,20 +1206,20 @@ explain各字段详解：https://javaguide.cn/database/mysql/mysql-query-executi
 
 注意：如果出现索引在您认为应该使用时未被使用的问题，请运行[`ANALYZE TABLE`](https://dev.mysql.com/doc/refman/8.0/en/analyze-table.html)以更新表统计信息，例如键的基数cardinality，这可能会影响优化器所做的选择。
 
-| Column                                                       | JSON Name       | Meaning                      |
-| :----------------------------------------------------------- | :-------------- | :--------------------------- |
-| [`id`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_id) | `select_id`     | The `SELECT` identifier      |
-| [`select_type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_select_type) | None            | The `SELECT` type            |
-| [`table`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_table) | `table_name`    | 表                           |
-| [`partitions`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_partitions) | `partitions`    | 匹配的分区                   |
-| [`type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_type) | `access_type`   | The join type                |
-| [`possible_keys`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_possible_keys) | `possible_keys` | 供选择的索引                 |
-| [`key`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key) | `key`           | 实际选择的索引               |
-| [`key_len`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key_len) | `key_length`    | 选择索引的长度               |
-| [`ref`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_ref) | `ref`           | 与索引相比的列               |
-| [`rows`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_rows) | `rows`          | 估计要扫过的行               |
-| [`filtered`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_filtered) | `filtered`      | 按条件过滤的数据行估计百分比 |
-| [`Extra`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_extra) | None            | 附加信息                     |
+| Column                                                       | JSON Name       | Meaning                                                      |
+| :----------------------------------------------------------- | :-------------- | :----------------------------------------------------------- |
+| [`id`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_id) | `select_id`     | The `SELECT` identifier                                      |
+| [`select_type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_select_type) | None            | The `SELECT` type                                            |
+| [`table`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_table) | `table_name`    | 表                                                           |
+| [`partitions`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_partitions) | `partitions`    | 匹配的分区                                                   |
+| [`type`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_type) | `access_type`   | The join type                                                |
+| [`possible_keys`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_possible_keys) | `possible_keys` | 可选择的索引，当大表(行数>500万)时该处出现多个考虑索引并且数据分布不均则存在一定概况SQL会**错误选择索引从而导致性能雪崩** |
+| [`key`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key) | `key`           | 实际选择的索引                                               |
+| [`key_len`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_key_len) | `key_length`    | 选择索引的长度                                               |
+| [`ref`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_ref) | `ref`           | 与索引相比的列                                               |
+| [`rows`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_rows) | `rows`          | 估计要扫过的行，>10万可能出现慢查询                          |
+| [`filtered`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_filtered) | `filtered`      | 按条件过滤的数据行估计百分比，100表示没发生过滤，值越低说明索引的基数越好，选择性越高。 |
+| [`Extra`](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html#explain_extra) | None            | 附加信息                                                     |
 
 如果要强制优化器使用某个索引，可以用`FORCE INDEX`索引提示。
 
@@ -1228,23 +1228,21 @@ explain各字段详解：https://javaguide.cn/database/mysql/mysql-query-executi
 - system：查系统表
 
 - **const**：该表最多有一个匹配行，在查询开始时读取。因为只有一行，所以优化器的其余部分可以将这一行中列的值视为常量。 `const`表非常快，因为它们只读一次。
-- **eq_ref**：对于先前表中行的每个组合，从该表中读取一行，当连接使用索引为主键聚族索引或UNIQUE NOT NULL索引时
-- **ref**：对于先前表中行的每个组合，从该表中读取具有匹配索引值的所有行。有索引，但无法根据索引选出连接的单个行
+- **eq_ref**：唯一索引查询。对于先前表中行的每个组合，从该表中读取一行，当连接使用索引为主键聚族索引或UNIQUE NOT NULL索引时
+- **ref**：普通索引等值查询。对于先前表中行的每个组合，从该表中读取具有匹配索引值的所有行。有索引，但无法根据索引选出连接的单个行
 - fulltext：连接是使用`FULLTEXT` 索引执行的。
 - index merge：使用索引合并优化
 - unique_subquery
 - index_subquery
-- **range**：仅检索给定范围内的行，使用索引来选择行。
+- **range**：索引范围扫描。仅检索给定范围内的行，使用索引来选择行。
 - **index**：**扫描整个索引树**，因普通索引比聚集索引小，稍比ALL好点。有2种情况：
   - 如果查询的是覆盖索引，则只扫描索引树
   - 使用从索引读取以按索引顺序查找数据行来执行全表扫描。这种一般会直接走全表扫，除非用索引排序了。
 - ALL：全表扫描，性能糟糕。
 
-2、filtered指示按条件过滤的表行的估计百分比，100表示没发生过滤，值越低说明索引的基数越好，选择性越高。
+2、Extra：额外信息
 
-3、Extra：额外信息
-
-- `Using filesort`：排序是通过根据联接类型遍历所有行，并为匹配WHERE子句的所有行存储排序关键字和指向该行的指针来完成的。
+- `Using filesort`：排序是通过根据联接类型遍历所有行，并为匹配WHERE子句的所有行存储排序关键字和指向该行的指针来完成的。对查询结果进行外部索引排序而不是按索引次序从表里读取行，这种情况可以考虑建立索引来进行优化
 
 - `Using index`：覆盖索引，无须回表，效率高。
 
@@ -1253,9 +1251,38 @@ explain各字段详解：https://javaguide.cn/database/mysql/mysql-query-executi
 
 - `Using sort_union(...)`, `Using union(...)`, `Using intersect(...)`：当where条件匹配多个索引且都较合适时，Index merge通过多次扫描索引并将其结果合并后再查主表。
 
-- `Using temporary`：需创建临时表保存结果。GROUP BY和ORDER BY通常出现。
+- `Using temporary`：需创建临时表保存结果。DISTINCT、GROUP BY和ORDER BY通常出现，最好使用索引优化。
 
 - `Using where`：从数据表中读取数据后进行过滤。
+
+3、rows：预估扫描的行数
+
+    有时候总得数据才1w行，但执行计划显示扫描的行数却是 2W+ 条记录？
+    
+    简单回答：explain/desc 展示执行计划，只计算 sample 了几个数据页中记录数后的加权操作，预估相对粗糙。
+    
+    详细回答：
+    mysql-5.5之前：
+        首先找到查询第一个记录所在的page（记为PLeft），统计PLeft里的记录数（记为Records_PLeft），之后找到最后一个记录所在的page（记为PRight），
+        统计PRight的记录数（Records_PRight），之后将Records_PLeft与Records_PRight取平均，最后乘以总共的page数目（记为Page_Num）。公式如下：
+        
+                          Rows = ((Records_PLeft + Records_PRight)/2)*Page_Num
+                          
+        统计上讲这个预估方法是很有偏的。比如总共4个page：page1(999 records), page2(1 record), page3(1 record), page4(1 record)，这样预估出来的
+        Rows=((999+1)/2)*4 = 2000，然而实际上才总共才有1002个记录。
+    mysql-5.5之后:
+        上述预估偏差大的关键在于有偏，而有偏的关键在于采样的page数太少了，事实上只采样了边界2个，新算法的思路很简单，增加采样数目，比如采样10个page，这样可以
+        在一定程度上降低偏差。
+        具体来说，mysql除了边界2个外，还沿着左侧page往右连续查找8个page，如果总的page数目小于等于10个，那么预估的Rows和真实的Rows一致。
+        
+                          Rows = ((Records_PLeft +  Records_P1 + Records_P2 + ... + Records_P8 + Records_PRight)/10)*Page_Num 
+                          
+        上述方法只是在一定程度上缓解了有偏的问题，但是不准确还是存在的。
+    摘自：https://www.cnblogs.com/LBSer/p/3333881.html
+    
+    总结：所以，单表的碎片率过大，对执行计划的选择有较大影响哦，多关注该值。
+
+
 
 ## 索引
 
@@ -1295,7 +1322,7 @@ AND col1=val1 AND col2=val2 AND col3=val3;
 
 
 
-### 索引合并
+### 索引合并index merge
 
 当where条件匹配多个索引且都较合适时，**Index merge通过多次扫描索引并将其结果合并后再查主表**。仅能合并单表扫描，不适用于全文索引。
 
@@ -3701,15 +3728,39 @@ Innodb引擎**分区不支持外键**
 
 > **表上的每个唯一键都必须使用表的分区表达式中的每一列。**
 
-## 分库分表建议
+## 分库分表
 
-分区表与业务手动分表对比：
+**背景**
+
+单表行数过大或者单表/单实例访问量过大可能遇到的瓶颈如下：
+
+1、单表行数过大(亿级)：
+
+- 查询变慢(索引扫描过滤数据量增加)
+- 统计信息采样比例变小，影响执行计划准确性，导致查询变慢
+
+- DDL变更耗时长，且生成的临时表占空间大
+- 备份恢复、故障实例重建时间长
+
+2、单表/单实例访问量过大：CPU/MEM/IO等物理资源无法满足业务请求
+
+
+
+**分区表与业务手动分表对比**
 
 - 分区表由server层决定使用哪个分区，手工分表由代码决定使用哪个表
 - 在 server 层，认为所有分区是同一张表，因此**所有分区共用一个 MDL锁**
 - 在引擎层，认为分区是不同的表，因此 MDL 锁之后的执行过程，会根据分区表规则，只访问必要的分区。
 
 > 建议根据某个键手动分库分表，再结合一些分库分表中间件开发业务。
+
+
+
+
+
+
+
+
 
 # 权限控制
 
@@ -3875,6 +3926,18 @@ log-error
 
 > 至少为一主一从一备架构，且不能在同一机房。
 
+### 实例使用原则
+
+1、MySQL单实例最大CPU规格日常不建议超过8C，单实例磁盘规格建议最大不超过2T，单实例实际存储数据不建议超过1T；
+
+2、MySQL单实例QPS峰值建议不超过8000，单实例QPS过高建议增加缓存或者进行分库分表拆分；
+
+3、核心业务MySQL实例CPU日常使用率峰值建议不超过30%，为业务增长留有一定余量；
+
+4、建议核心业务进行分库分表，可提升容灾能力；如分成4个实例，则单实例故障影响面约为25%；
+
+
+
 ## 库
 
 存储引擎选择--只推荐Innodb。Innodb和MyISAM引擎区别：
@@ -3890,6 +3953,41 @@ log-error
 
 ## 表
 
+1、原则上不允许使用大字段(tinytext,mediumtext,logtext,tinyblob,mediumblob,longblob)，单行不超过4k，否则响应时间、性能、网络带宽都有显著影响，污染缓存；大字段尽可能的拆分成小字段，如果特别需要，建议选用其他存储方案(Hbase等存储对象)；
+
+2、建议单表数据量不超过5kw行，表大小不超过50G，字段数超过30个宽表，数据量过大建议分库分表，或是进行自动归档，宽表拆分小表；
+
+建议：线上保留合理满足业务使用的数据生命周期，如3个月，半年，其他时间进行归档处理，如需保留作分析用，让大数据进行抽取存档。
+
+**避免使用timestamp存储时间字段**，除非业务依赖timestamp的某些特性，timestamp只能表示到2038年，而且在大量读取的情况下可能导致DB获取系统锁**消耗大量cpu资源**，参考文章一：https://opensource.actionsky.com/20191112-mysql/     参考文章二：https://zdg39.github.io/2019/12/22/online-failure-MySQL-timestamp/
+
+### NOT NULL
+
+除非你有一个很特别的原因去使用 NULL 值，你应该总是让你的字段保持 NOT NULL。
+1、空值和NULL：
+
+- 空值代表字符串长度为0,数据本身不占用实际存储空间的，长度需要1-2个字节
+- MySQL中的NULL会在行记录头部占用空间(1个bit位)
+
+2、处理麻烦，任何数跟NULL进行运算都是NULL, 判断值是否等于NULL，不能用=而要用IS NULL关键字。
+
+3、含有空值的列很难进行查询优化，而且对表索引时不会存储NULL值的，所以如果索引的字段可以为NULL，索引的效率会下降很多。因为它们使得索引、索引的统计信息以及比较运算更加复杂。你应该用0、一个特殊的值或者一个空串代替空值。
+
+4、联表查询的时候，例如LEFT JOIN table2，若没有记录，则查找出的table2字段都是null。假如table2有些字段本身可以是null，那么除非把table2中not null的字段查出来，否则就难以区分到底是没有关联记录还是其他情况。
+
+### varchar长度
+
+字段够用情况下越短越好，大字段blob/text谨慎使用，存储分为行内存储和行外存储(读性能差)：
+
+- Compact行格式：行内存储768B，其余行外存储，row_format=compact(5.6默认)
+- Dynamic行格式：行内存储指针，数据行外存储，row_format=dynamic(5.7默认)
+
+字符串推荐varchar(255)：
+
+- varchar字段768B行内存储，超过部分行外存储(读性能差)
+- utf8编码下最长765B，utf8mb4编码下最长1020B，也会存储到行外
+- 不过大多情况下用的字符占1~3B，utf8mb4编码下varchar(255)很少超过768，因此是比较合适的控制长度和行内存储的字符串长度。
+
 
 
 ## 索引
@@ -3898,15 +3996,28 @@ log-error
 
 ![不同索引数量插入性能](mysql.assets/不同索引数量插入性能.jpg)
 
-单表索引7个以内，复合索引字段3个以内。
+控制索引数量，单表索引7个以内，复合索引字段3个以内。索引太多占磁盘空间，增大更新性能消耗，易引起查询走错索引。
 
 索引命令：主键pk_xxx，唯一键uk_xxx，普通索引idx_xxx。
 
+**索引数据要控制倾斜**，避免出现索引选择度很高，但大部分数据集中在某几条索引那里，当查询筛选条件恰好是这几条索引时将造成性能严重下滑。
 
 
 
 
 
+## sql写法
+
+- 禁止使用replace into操作;
+- 禁止在where后的筛选字段上做计算与函数;
+- 禁止where后的筛选字段类型出现隐式转换问题(索引字段类型与传参类型不一致);
+- 禁止在生产库进行大量统计类型的操作，这类操作应从大数据部门获取;
+- 建议查询in数量不超过10，尽量避免in跨不同表查询(尤其分库分表);
+- 建议减少全表计数count(xx)的使用(扫整个索引树计数)，高频count(xx)访问可引入业务缓存
+- 建议生产查询避免使用join
+- 禁止使用全文检索(Full Text Search)，有这种需求，数据量较少用LIKE，数据量较大用搜索引擎ES处理
+- 禁止在没有匹配索引的表上进行for update这类的操作，会锁定整个表
+- 未经过DBA同意，禁止在程序端大批量更新或者删除数据，因为这样操作很可能造成复制的大量阻塞和延时
 
 
 
@@ -3935,6 +4046,77 @@ sql查询结果集限制在1MB以内。
 超过100万行数据的批量操作必须分批进行，避免造成严重的主从延迟，binlog为row格式(默认)会产生大量日志。避免大事务操作。
 
 集群监控指标：DB存活监控、同步延迟、性能监控、资源监控(连接数、CPU、硬盘)、DBProxy监控等。
+
+# 常见问题解决
+
+## 大表处理
+
+大表：表大小大于50G，或行数大于5k万且字段大于20个的表。
+
+1、分库分表：垂直/水平拆分
+
+2、归档表
+
+对于线上数据量比较大的表，会产生几个问题
+- 线上空间使用较多，造成资源浪费
+
+- 查询性能会随着数据量变大而降低
+
+对于核心的业务数据，如订单记录，支付记录，可以做冷热数据分离。
+对于流水类型的日志数据，如果需要查询历史数据，可以抽取到数据仓库，然后使用归档来清理线上数据。
+对于不需要保留的临时数据可以申请归档，直接删除线上历史数据。
+
+3、分区表
+
+对于数据线上生命周期和时间关系较大，如，仅需要最近30天，15天，7天这种类型的数据，数据不是特别大，单表qps不超过1w的情况，可以考虑分区表。
+
+## 机器配置
+
+![mysql机器配置参考](mysql.assets/mysql机器配置参考.png)
+
+
+
+## 空闲长事务处理
+
+长事务：亦称大事务，指运行时间比较长，且长时间未提交或者回滚的语句或者语句集（单位：秒）。通常有两种类型： 
+
+- a. 执行时间特别长的单条 SQL 语句（一条语句一个事务） 
+- b. 显示开启了事务（start transaction/begin），一个事务中，包含了多条操作语句
+
+空闲长事务的问题：
+
+- 事务长时间不提交或回滚，占用的锁资源无法释放，易导致锁等待或死锁问题，业务侧体现为 RT 上升或者超时失败（依业务逻辑可能导致严重资损）
+- 数据库可能出现大量请求被阻塞现象（并发症：磁盘 IO/CPU/MEM 使用率上升，并发线程数飙高），可能占满连接池导致业务SQL全面报错，拖垮数据库。
+- 一个事务中若有大量 dml 语句，将导致从库延时，影响 HA（高可用性）
+
+**产生场景**：
+
+- 场景一：业务端彻底宕机，导致遗留半开连接。
+- 场景二：业务因服务器故障（MCE导致卡顿）或自身原因（如fullgc）或外部原因（远程调用没返回）长时间无法按正常逻辑提交事务。
+- 场景三：业务逻辑处理不当（例如执行中途出现报错后没有得到妥善处理）。
+- 场景四：慢查询、批量操作或者一些优化不足的场景，导致SQL执行时间久的长事务。此种长事务在大多数场景，属于正常操作，不应该简单一刀切的被杀掉。
+
+长事务发现：监控报警。
+
+**长事务处理**：
+
+针对半开连接，DBA已完成操作系统参数tcp_keepalive调整，阈值相对保守，主要作为一个兜底处理。但是它只能应对场景一，并且时效上不会特别优秀。其主要优点是，不会有误伤的可能； 
+
+长事务查杀功能作为一种补充和加强，可以提高应对问题的时效，以及覆盖5.2.3中描述的场景二、三；对于场景四，正在执行SQL的，进行了连接状态的判断，不会杀掉；
+
+除开启长事务查杀功能，业务角度还可以调整实例或会话级别的wait_timeout，但调整此参数同样有负面影响，若想要使用，需联系DBA仔细评估。
+
+**注意点**：
+
+SQL语句执行慢，执行时间接近或者超过查杀阈值时，语句结束后，sleep状态是从最后一个SQL语句开始执行计算的。如果在语句执行结束和提交事务之间存在间隙，可能存在误杀。
+
+长事务查杀功能设计了一定高可用方案，但无法保证可用性100%。日常功能不应依赖长事务查杀，不应将长事务查杀作为唯一的保障手段。
+
+长事务查杀功能当前是轮询执行，不保证超过阈值即刻查杀，会存在多等一会儿。
+
+修改了数据的长事务回滚需要一定的时间，修改的数据越多，回滚所需的时间越长。
+
+使用了XA事务的需要特别注意，长事务查杀功能无法结束已处于prepared状态的XA事务，需要分布式事务的协调者决策处理; 存在部分实例不可访问，目前不对“不可访问”的实例提供长事务查杀功能;
 
 
 
